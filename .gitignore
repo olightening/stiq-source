@@ -1,0 +1,113 @@
+# Dependencies
+node_modules/
+client/node_modules/
+
+# Build output
+client/android/app/build/
+client/android/build/
+client/android/.gradle/
+client/ios/build/
+client/ios/Pods/
+client/ios/*.xcworkspace
+client/ios/**/xcuserdata/
+client/ios/**/*.xcuserstate
+client/ios/.xcode.env.local
+*.tsbuildinfo
+dist/
+build/
+
+# Relay
+relay/target/
+relay/config.json
+relay/stiq-relay
+relay/stiq-relay.exe
+relay/data/
+relay/deploy/*.onion
+relay/membership.json
+
+# Issuer key material — NEVER commit
+issuer_private.pem
+*issuer_private*
+
+# Organizer Nostr key (moderation root of trust) — a REAL deployment's copy must NEVER be committed.
+# The shared TEST fixture at issuer/organizer_nostr.json is the one deliberate exception: it holds a
+# BURNT key derived from a documented public seed (see its "_seed"/"_notice" fields), not a real
+# secret, so it stays committed for cross-machine test consistency (per issuer/.gitignore).
+**/organizer_nostr.json
+!issuer/organizer_nostr.json
+
+# Logs / coverage
+*.log
+coverage/
+client/coverage/
+
+# Graphify machine-local state
+graphify-out/.graphify_python
+graphify-out/.graphify_root
+graphify-out/cost.json
+graphify-out/cache/
+
+# Metro / RN
+.metro-health-check*
+client/.metro/
+
+# Android generated artifacts
+client/android/local.properties
+client/android/app/.cxx/
+client/android/app/src/main/assets/
+client/android/app/src/main/res/drawable-mdpi/
+client/android/app/src/main/res/drawable-hdpi/
+client/android/app/src/main/res/drawable-xhdpi/
+client/android/app/src/main/res/drawable-xxhdpi/
+client/android/app/src/main/res/drawable-xxxhdpi/
+
+# Secrets and key material — NEVER commit
+*.nsec
+*.key
+*.pem
+hostname
+hs_ed25519_secret_key
+hs_ed25519_public_key
+.env
+.env.*
+secrets/
+# Server SSH key pair (extensionless — not caught by *.key)
+stiq-server-key
+stiq-server-key.pub
+# Issuer-issued invite codes
+issuer/invites.json
+# Shared community keys (blind-posting attribution secrets)
+issuer/*.b64
+
+# Local artifacts — not source, never commit
+*.tgz
+diagnostics/
+outputs/
+simulator/
+server-cmd.py
+issuer/forge-compat-test.mjs
+issuer/package-lock.json
+# Loose screenshots
+stiq_*.png
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Build artifacts (do not commit binaries — build via CI/releases)
+*.exe
+relay/stiq-relay-linux
+relay/stiq-relay-new
+relay/organizer
+relay/issuer-keygen
+
+# Local export scaffolding (see scripts/export-public.ps1 in the source repo)
+.stiq-public-export
+
+# Tracked upstream but matched by the rules above -- part of the published product.
+!client/stiq_nip53.png
+!issuer/issuer_public.b64
+!issuer/package-lock.json

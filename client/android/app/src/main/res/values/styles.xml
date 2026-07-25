@@ -1,0 +1,27 @@
+<resources>
+
+    <!-- Base application theme. -->
+    <style name="AppTheme" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <!-- Customize your theme here. -->
+        <item name="android:editTextBackground">@drawable/rn_edit_text_material</item>
+        <!-- Paint the status bar the app background (#111111) instead of the AppCompat default
+             opaque black, so it reads as an extension of the Stiq page (like Telegram/WhatsApp).
+             windowLightStatusBar=false keeps the clock/battery icons light on that dark fill.
+             Set on the theme (not just JS <StatusBar>) so it's correct on the very first frame —
+             no black flash before React mounts. -->
+        <item name="android:statusBarColor">@color/status_bar_background</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+
+    <!-- Launch-only theme: paints the window the instant the process starts, before any Activity
+         (and long before the JS SplashScreen in src/app/screens/SplashScreen.tsx) has mounted.
+         android:windowBackground is a solid fill matching that JS splash's background
+         (colors.bg / darkColors.bg = #111111 in src/ui/theme.ts) so the transition from the
+         native window to the JS splash is seamless instead of a flash of the default white
+         window. MainActivity.setTheme(R.style.AppTheme) swaps back to the real theme immediately
+         before super.onCreate(), so this theme is only ever visible for that pre-JS window. -->
+    <style name="LaunchTheme" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:windowBackground">@color/splash_background</item>
+    </style>
+
+</resources>

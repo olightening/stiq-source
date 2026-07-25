@@ -1,0 +1,68 @@
+# =====================================================================================
+# T17 Arti-migration SPIKE — arti-ffi crate (client/arti-ffi/)   ⚠ SCAFFOLD, NOT BUILT
+# =====================================================================================
+# This crate is the T17-S1 deliverable: a cdylib wrapping arti-client (+ tor-hsclient) with a
+# stable start/stop/bootstrap FFI that StiqArtiModule.kt drives, emitting the SAME TorBackendEvent
+# kinds (client/src/tor/types.ts) the shipping C-tor path emits.
+#
+# IT HAS NOT BEEN COMPILED. The build host for this spike has NO Rust cross-compile toolchain and
+# NO Android NDK, so `cargo ndk` (see build.sh) could not be run. The versions below are the
+# INTENDED pins; they must be re-resolved and Cargo.lock committed on a machine that has the
+# toolchain (see README.md → "Reproducing the build"). Treat every arti-* API name referenced in
+# src/*.rs as PROVISIONAL until it compiles against the resolved lockfile.
+# =====================================================================================
+
+[package]
+name = "arti-mobile"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "STIQ T17 spike: arti-client embedded-Tor backend behind the TorBackend FFI"
+
+[lib]
+# cdylib → libarti_mobile.so, loaded by StiqArtiModule.kt via System.loadLibrary("arti_mobile").
+crate-type = ["cdylib"]
+
+[dependencies]
+# --- Arti (pure-Rust Tor). Pin arti-client and tor-hsclient to ONE workspace version. -----------
+# The onion-service-client feature pulls tor-hsclient (client-side rendezvous) and the onion-address
+# resolver; without it arti-client cannot open a .onion stream at all (blocker for STIQ's relay).
+# NOTE: version pins are PROVISIONAL (see header). Re-resolve on the toolchain host and commit the
+# lockfile; record the resolved versions + exact type paths in README.md / RESTRICTED_DISCOVERY.md.
+arti-client = { version = "0.28", default-features = false, features = [
+    "tokio",
+    "rustls",              # rustls avoids bundling a second OpenSSL next to op-sqlite's (size + pickFirst)
+    "onion-service-client", # client-side onion connect (tor-hsclient) — REQUIRED for the relay onion
+] }
+tor-hsclient = "0.28"      # explicit, so restricted-discovery client-auth types are addressable (S4)
+tor-rtcompat = { version = "0.28", features = ["tokio", "rustls"] }
+
+# Single shared async runtime for the whole daemon lifecycle (arti is tokio-native).
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+
+# Config marshaling: StiqArtiModule passes ONE JSON string mirroring TorStartConfig (see ffi.rs).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# base32 decode for the x25519 restricted-discovery client-auth secret (onion_auth.rs, S4).
+data-encoding = "2"        # RFC4648 base32 (unpadded, uppercase) — matches onionAuth.ts key shape
+
+# Android logcat bridge so arti_* errors are visible under `adb logcat` during the on-device eval.
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.14"
+log = "0.4"
+
+# Optional: uniffi for the callback-trait ergonomics (ArtiBootstrap.on_event). If uniffi is used,
+# add it as a build-dependency too and generate the Kotlin bindings; the plain-extern-C path in
+# ffi.rs is the fallback documented in README.md. Left commented so the crate has ONE FFI story
+# until the toolchain host picks one.
+# uniffi = { version = "0.28", features = ["build"] }
+
+[profile.release]
+# Smallest possible .so — download bytes are the scarce resource for STIQ's sideload-over-Tor users
+# (build.gradle legacy-packaging is tuned for exactly this). See SIZE_REPORT section of the decision doc.
+opt-level = "z"   # optimize for size
+lto = true        # cross-crate size + speed
+codegen-units = 1 # better LTO / smaller output
+strip = true      # strip symbols in-toolchain (build.sh also runs llvm-strip as a backstop)
+panic = "abort"   # no unwinding tables — a panic in the daemon should abort, not unwind across FFI

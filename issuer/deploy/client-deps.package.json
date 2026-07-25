@@ -1,0 +1,11 @@
+{
+  "name": "stiq-organizer-clientdeps",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Runtime deps the organizer resolves from ../client/node_modules (blind-RSA + nostr-tools + ws).",
+  "dependencies": {
+    "@cloudflare/blindrsa-ts": "0.4.5",
+    "nostr-tools": "2.23.5",
+    "ws": "7.5.11"
+  }
+}

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Connecting TO Tor inherently uses clearnet: fetching bridges from the moat API, and (the
+  reliable path on an open network) bootstrapping a DIRECT Tor circuit to guard nodes. The
+  relay WebSocket itself is cleartext ws:// to a .onion (the onion address provides the
+  end-to-end crypto, so TLS would be redundant). Android blocks cleartext by default on
+  release builds, which silently broke the relay socket and could block bootstrap pathways.
+
+  Cleartext is therefore permitted. This does NOT weaken the app's Tor-only data posture:
+  all relay/app traffic still goes through the Tor SOCKS proxy (enforced in TorManager /
+  requireTorTransport); this flag only stops Android's policy from blocking the connection.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

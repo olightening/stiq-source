@@ -1,0 +1,38 @@
+# =============================================================================
+# STIQ self-hosted ntfy — content-free "wake and sync" push only (T1).
+#
+# This is a TEMPLATE. deploy/stiq-up.sh (PUSH_WATCHER=1) writes the live
+# /etc/ntfy/server.yml from it, substituting the __NTFY_*__ placeholders with the
+# resolved relay onion + loopback port. ntfy is OFF-THE-SHELF (installed from the
+# official archive.heckel.io apt repo) — it is NEVER built from source here.
+#
+# ── Security model (co-location, matching the relay/dashboard) ────────────────
+#   • Bind LOOPBACK ONLY. Tor fronts ntfy via a HiddenServicePort on the RELAY
+#     onion (added to /etc/tor/torrc.d/stiq-relay.conf by stiq-up.sh). There is
+#     NO clearnet listener.
+#   • Wakes carry ZERO content: no title, npub, body, or event id ever reaches
+#     ntfy. The keyless pushwatcher POSTs an EMPTY body to a per-member topic; the
+#     app derives all notification text locally over Tor after it wakes.
+#   • Topics are high-entropy bearer capabilities the member itself chose. There
+#     are no accounts and no login — a leaked topic only permits a content-free,
+#     watcher-rate-limited wake.
+# =============================================================================
+
+# Public base URL — the relay onion + ntfy port. Members point the ntfy Android
+# app's server URL here. Substituted by stiq-up.sh (e.g. http://<relay>.onion:2586).
+base-url: "__NTFY_BASE_URL__"
+
+# Bind loopback only (e.g. 127.0.0.1:2586). Tor is the sole front; ntfy must never
+# be exposed on a public interface. Substituted by stiq-up.sh.
+listen-http: "__NTFY_LISTEN__"
+
+# Not behind an HTTP reverse proxy — Tor's rendezvous is the only thing in front.
+behind-proxy: false
+
+# Content-free wakes need no attachments and no durable history. Attachments are
+# disabled by leaving attachment-cache-dir unset. Messages are held in memory only
+# (no cache-file) with a short retention — a wake is worthless once its sync ran.
+cache-duration: "12h"
+
+# Quiet logs — do not persist topic traffic (the systemd unit also discards stdout).
+log-level: "warn"

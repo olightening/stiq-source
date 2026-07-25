@@ -1,0 +1,80 @@
+buildscript {
+    ext {
+        buildToolsVersion = "35.0.0"
+        minSdkVersion = 24
+        compileSdkVersion = 35
+        targetSdkVersion = 34
+        ndkVersion = "26.1.10909125"
+        kotlinVersion = "1.9.24"
+    }
+    repositories {
+        google()
+        mavenCentral()
+        // Guardian Project: IPtProxy pluggable transports (obfs4 + Snowflake)
+        maven { url "https://raw.githubusercontent.com/guardianproject/gpmaven/master" }
+        maven { url "https://guardianproject.info/maven" }
+    }
+    dependencies {
+        classpath("com.android.tools.build:gradle")
+        classpath("com.facebook.react:react-native-gradle-plugin")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin")
+    }
+}
+
+// TOR-NATIVE-1 tripwire — DO NOT bump targetSdkVersion to 35+ without reading this comment first.
+//
+// Android 15 (API 35) introduces a hard 6h/24h timeout budget on `dataSync`-type foreground
+// services (Service.onTimeout(int,int), the FGS_TIMEOUT mechanism). Critically, that enforcement
+// is gated on the APP'S targetSdkVersion, not the device's OS level — API 34 only added a timeout
+// for shortService. So this app is exempt TODAY even on a phone already running Android 15/16 —
+// but the instant targetSdkVersion is raised to 35+, the budget arms immediately on every device
+// already in the field running 15/16, with no code change anywhere else needed to trigger it.
+//
+// StiqTorService AND StiqSyncService (client/android/app/src/main/java/com/stiq/client/) BOTH
+// declare foregroundServiceType="dataSync" and would SHARE that single 6h/24h budget. Tor is
+// deliberately run dormant/backgrounded for long stretches between foreground interactions
+// (indefinite dormancy is the intended policy — see the Tor stability+speed workstream); the OS
+// force-killing the service after the budget elapses would silently tear down the daemon out from
+// under an idle user with no warning, reintroducing the exact "Tor dies in the background" class
+// of bug this workstream exists to fix — and StiqSyncService's own dataSync usage eats into the
+// SAME shared budget, so the effective ceiling is tighter than 6h once both run.
+//
+// Before ever raising targetSdkVersion past 34, whoever does it MUST:
+//   1. Implement Service.onTimeout(int,int) in BOTH StiqTorService and StiqSyncService so the
+//      forced stop is handled gracefully (persist state, reschedule via WorkManager, surface a
+//      user-visible notification) instead of the daemon just disappearing mid-circuit.
+//   2. Re-verify foregroundServiceType="dataSync" is still the right type for both services, given
+//      the new timeout — an alternative type without this budget may fit better.
+//   3. Only then remove or raise this guard.
+//
+// STIQ ships sideloaded per-ABI APKs (no Play Store target-API mandate forcing this), so the ONLY
+// way this bump happens is a deliberate one-line edit to targetSdkVersion below — this check makes
+// that edit fail the build loudly instead of shipping a dormant landmine that only detonates after
+// hours of idle background time on a real user's device.
+if (rootProject.ext.targetSdkVersion >= 35) {
+    throw new GradleException(
+        "targetSdkVersion=${rootProject.ext.targetSdkVersion} is BLOCKED (must stay <= 34). Android 15 (API 35) " +
+        "starts enforcing a 6h/24h timeout budget on 'dataSync' foreground services " +
+        "(Service.onTimeout), and that enforcement is gated on THIS APP'S targetSdkVersion, not " +
+        "the device's OS version — so raising it arms the timeout immediately, even on phones " +
+        "already running Android 15/16 today. StiqTorService and StiqSyncService BOTH declare " +
+        "foregroundServiceType=\"dataSync\" and would share that one budget, which would silently " +
+        "kill the backgrounded (deliberately long-dormant) Tor daemon out from under an idle user. " +
+        "Do not raise targetSdkVersion until StiqTorService/StiqSyncService implement " +
+        "Service.onTimeout(int,int) (or move off dataSync) to handle the forced stop gracefully — " +
+        "see the comment directly above this check in client/android/build.gradle for the full " +
+        "writeup and the required steps."
+    )
+}
+
+apply plugin: "com.facebook.react.rootproject"
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+        // Guardian Project: IPtProxy (obfs4 + Snowflake) and tor-android
+        maven { url "https://raw.githubusercontent.com/guardianproject/gpmaven/master" }
+        maven { url "https://guardianproject.info/maven" }
+    }
+}

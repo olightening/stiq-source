@@ -1,0 +1,21 @@
+{
+  "name": "stiq-issuer",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Stiq community organizer tools",
+  "scripts": {
+    "organizer": "node organizer-server.mjs",
+    "sign": "node issuer.js",
+    "test": "node mailbox_dedupe_test.mjs && node mailbox_publish_test.mjs && node mailbox_transport_test.mjs && node mailbox_unlock_log_test.mjs && node invite-issuance_test.mjs && node contentEpochKeys_test.mjs && node contentEpochWatcher_test.mjs && node content_epoch_activation_test.mjs && node draw_concurrency_test.mjs && node draw_idempotency_test.mjs && node origin_csrf_test.mjs && node token_domain_sep_test.mjs && node token_keys_publish_test.mjs && node readers_revocation_test.mjs && node storage_config_test.mjs && node ranking_config_test.mjs && node joincode_bridges_test.mjs && node mirrors_test.mjs && node mailbox_policy_preserve_test.mjs && node join_roundtrip_test.mjs && node archive_test.mjs && node restore_roundtrip_test.mjs && node roundtrip_test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "jsqr": "^1.4.0",
+    "qrcode": "^1.5.4",
+    "socks-proxy-agent": "^8.0.0",
+    "ws": "^8.18.0"
+  }
+}

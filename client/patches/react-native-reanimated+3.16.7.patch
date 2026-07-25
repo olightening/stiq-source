@@ -1,0 +1,146 @@
+diff --git a/node_modules/react-native-reanimated/lib/module/createAnimatedComponent/createAnimatedComponent.js b/node_modules/react-native-reanimated/lib/module/createAnimatedComponent/createAnimatedComponent.js
+index 69682cb..91d5bf4 100644
+--- a/node_modules/react-native-reanimated/lib/module/createAnimatedComponent/createAnimatedComponent.js
++++ b/node_modules/react-native-reanimated/lib/module/createAnimatedComponent/createAnimatedComponent.js
+@@ -240,9 +240,24 @@ export function createAnimatedComponent(Component, options) {
+            * because TestObject contains a copy of props - look at render
+            * function: const props = this._filterNonAnimatedProps(this.props);
+            */
++          // STIQ patch (jest-only): initial must SEED, never STOMP — see src/ variant for details.
++          let freshAtAttach = {};
++          try {
++            const out = style.initial.updater ? style.initial.updater() : {};
++            for (const key in out) {
++              const v = out[key];
++              if (!(v && typeof v === 'object' && 'onFrame' in v)) {
++                freshAtAttach[key] = v;
++              }
++            }
++          } catch {
++            freshAtAttach = style.initial.value;
++          }
+           this.jestAnimatedStyle.value = {
++            ...style.initial.value,
++            ...style.jestAnimatedStyle.current?.value,
+             ...this.jestAnimatedStyle.value,
+-            ...style.initial.value
++            ...freshAtAttach
+           };
+           style.jestAnimatedStyle.current = this.jestAnimatedStyle;
+         }
+@@ -391,8 +406,18 @@ export function createAnimatedComponent(Component, options) {
+       });
+       const skipEntering = this.context?.current;
+       const nativeID = skipEntering || !isFabric() ? undefined : `${this.reanimatedID}`;
++      // STIQ patch (jest-only): strip circular animated-style entries — see src/ variant.
++      const stripAnimatedEntries = style => {
++        if (Array.isArray(style)) {
++          return style.map(stripAnimatedEntries);
++        }
++        if (style && typeof style === 'object' && ('viewDescriptors' in style || 'jestAnimatedStyle' in style)) {
++          return {};
++        }
++        return style;
++      };
+       const jestProps = IS_JEST ? {
+-        jestInlineStyle: this.props.style,
++        jestInlineStyle: stripAnimatedEntries(this.props.style),
+         jestAnimatedStyle: this.jestAnimatedStyle
+       } : {};
+       return /*#__PURE__*/React.createElement(Component, _extends({
+diff --git a/node_modules/react-native-reanimated/lib/module/jestUtils.js b/node_modules/react-native-reanimated/lib/module/jestUtils.js
+index 09310c1..97c6f75 100644
+--- a/node_modules/react-native-reanimated/lib/module/jestUtils.js
++++ b/node_modules/react-native-reanimated/lib/module/jestUtils.js
+@@ -28,6 +28,10 @@ const getCurrentStyle = component => {
+   const jestAnimatedStyleValue = component.props.jestAnimatedStyle?.value;
+   if (Array.isArray(jestInlineStyles)) {
+     for (const obj of jestInlineStyles) {
++      // STIQ patch: RN allows falsy entries in style arrays; `'x' in false` throws.
++      if (!obj || typeof obj !== 'object') {
++        continue;
++      }
+       if ('jestAnimatedStyle' in obj) {
+         continue;
+       }
+diff --git a/node_modules/react-native-reanimated/src/createAnimatedComponent/createAnimatedComponent.tsx b/node_modules/react-native-reanimated/src/createAnimatedComponent/createAnimatedComponent.tsx
+index e101e03..da0af79 100644
+--- a/node_modules/react-native-reanimated/src/createAnimatedComponent/createAnimatedComponent.tsx
++++ b/node_modules/react-native-reanimated/src/createAnimatedComponent/createAnimatedComponent.tsx
+@@ -370,9 +370,30 @@ export function createAnimatedComponent(
+            * because TestObject contains a copy of props - look at render
+            * function: const props = this._filterNonAnimatedProps(this.props);
+            */
++          // STIQ patch (jest-only): initial must SEED, never STOMP. Upstream merged the stale
++          // hook-mount `initial.value` OVER live animated values on EVERY componentDidUpdate, so
++          // any re-render after an animation reset getAnimatedStyle() to stale initials; and a
++          // style attached AFTER its shared values were assigned (conditionally-applied styles)
++          // reported hook-mount values until the next animation frame. Run the updater for the
++          // CURRENT values at attach (dropping in-flight animation objects), and let anything the
++          // live channel already holds win.
++          let freshAtAttach: Record<string, unknown> = {};
++          try {
++            const out = style.initial.updater ? style.initial.updater() : {};
++            for (const key in out) {
++              const v = (out as Record<string, unknown>)[key];
++              if (!(v && typeof v === 'object' && 'onFrame' in v)) {
++                freshAtAttach[key] = v;
++              }
++            }
++          } catch {
++            freshAtAttach = style.initial.value;
++          }
+           this.jestAnimatedStyle.value = {
+-            ...this.jestAnimatedStyle.value,
+             ...style.initial.value,
++            ...style.jestAnimatedStyle.current?.value,
++            ...this.jestAnimatedStyle.value,
++            ...freshAtAttach,
+           };
+           style.jestAnimatedStyle.current = this.jestAnimatedStyle;
+         }
+@@ -596,9 +617,27 @@ export function createAnimatedComponent(
+       const nativeID =
+         skipEntering || !isFabric() ? undefined : `${this.reanimatedID}`;
+ 
++      // STIQ patch (jest-only): animated-style entries carry circular refs (viewDescriptors →
++      // props → jestInlineStyle → …), which crashes the ubiquitous JSON.stringify(tree.toJSON())
++      // test idiom. Strip them from the copy handed to the host — getCurrentStyle skipped those
++      // entries anyway (their live values ride jestAnimatedStyle), so getAnimatedStyle semantics
++      // are unchanged.
++      const stripAnimatedEntries = (style: unknown): unknown => {
++        if (Array.isArray(style)) {
++          return style.map(stripAnimatedEntries);
++        }
++        if (
++          style &&
++          typeof style === 'object' &&
++          ('viewDescriptors' in style || 'jestAnimatedStyle' in style)
++        ) {
++          return {};
++        }
++        return style;
++      };
+       const jestProps = IS_JEST
+         ? {
+-            jestInlineStyle: this.props.style,
++            jestInlineStyle: stripAnimatedEntries(this.props.style),
+             jestAnimatedStyle: this.jestAnimatedStyle,
+           }
+         : {};
+diff --git a/node_modules/react-native-reanimated/src/jestUtils.ts b/node_modules/react-native-reanimated/src/jestUtils.ts
+index 9f4f238..2b5405f 100644
+--- a/node_modules/react-native-reanimated/src/jestUtils.ts
++++ b/node_modules/react-native-reanimated/src/jestUtils.ts
+@@ -70,6 +70,11 @@ const getCurrentStyle = (component: TestComponent): DefaultStyle => {
+ 
+   if (Array.isArray(jestInlineStyles)) {
+     for (const obj of jestInlineStyles) {
++      // STIQ patch: RN allows falsy entries in style arrays (`[base, cond && extra]`);
++      // `'x' in false` throws, so skip non-objects before probing.
++      if (!obj || typeof obj !== 'object') {
++        continue;
++      }
+       if ('jestAnimatedStyle' in obj) {
+         continue;
+       }

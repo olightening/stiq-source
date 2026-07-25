@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>stiq</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+	  <!-- Do not change NSAllowsArbitraryLoads to true, or you will risk app rejection! -->
+		<key>NSAllowsArbitraryLoads</key>
+		<false/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.stiq.client.deeplink</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>stiq</string>
+			</array>
+		</dict>
+	</array>
+	<!-- SECURITY: CFBundleURLSchemes claims the ENTIRE `stiq://` scheme — iOS has no per-host filter
+	     (unlike AndroidManifest's host="join"/"channel" intent filters). App.tsx's default-deny link
+	     router is therefore the ONLY enforcement of which deep-link hosts are accepted on iOS. -->
+	<!-- Export-compliance: the app uses only standard/exempt cryptography (TLS, Tor, Keychain). -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<!-- Usage strings are MANDATORY: touching a protected API without one is an instant OS
+	     process-kill (not a denied prompt). Shipping all of them costs nothing. -->
+	<key>NSCameraUsageDescription</key>
+	<string>STIQ uses the camera to scan invite/credential QR codes and to attach photos to posts.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>STIQ uses the microphone to record voice notes you choose to send.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>STIQ accesses your photo library so you can attach images to posts.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>STIQ saves images you download to your photo library.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>STIQ can use Face ID to unlock the app.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>STIQ connects to its bundled Tor client on the local loopback interface.</string>
+	<key>NSUserTrackingUsageDescription</key>
+	<string>STIQ does not track you. This permission is never used to build an advertising profile.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>STIQ does not access your contacts.</string>
+	<!-- LSApplicationQueriesSchemes: the only external apps STIQ ever probes with canOpenURL,
+	     for the "open in browser/app" affordance. `onionbrowser` mirrors AndroidManifest's
+	     <queries> Tor-browser packages — without it StiqWebProxy.canOpenURL("onionbrowser://")
+	     always returns false and the "open in Onion Browser" hand-off is dead on iOS. -->
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>https</string>
+		<string>http</string>
+		<string>onionbrowser</string>
+	</array>
+	<key>UILaunchStoryboardName</key>
+	<string>LaunchScreen</string>
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>arm64</string>
+	</array>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UIViewControllerBasedStatusBarAppearance</key>
+	<false/>
+</dict>
+</plist>

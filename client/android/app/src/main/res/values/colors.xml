@@ -1,0 +1,13 @@
+<resources>
+    <!-- Matches `darkColors.bg` in src/ui/theme.ts — the background the JS SplashScreen paints.
+         The app is dark-only (no light palette, no theme toggle), so this is the single source
+         of truth for both the native launch window and the JS splash beneath it. -->
+    <color name="splash_background">#111111</color>
+
+    <!-- System status-bar fill. Same #111111 as `darkColors.bg` so the status bar reads as an
+         extension of the app page instead of the theme-default opaque black. Set on AppTheme's
+         android:statusBarColor (see styles.xml). The app is non-edge-to-edge (iOS-only
+         SafeAreaView; no react-native-edge-to-edge), so the status bar is its own opaque strip
+         above the window and this is what paints it. -->
+    <color name="status_bar_background">#111111</color>
+</resources>

@@ -1,0 +1,7 @@
+{
+  "_notice": "BURNT TEST KEY — NOT a real secret. Derived as sha256(_seed) below, fed through the SAME nostr-tools getPublicKey/nip19.npubEncode calls organizer-nostr.mjs uses. Anyone can recompute skHex/pkHex/npub from _seed, which is the point: this key is provably not confidential. Shared TEST fixture only (see issuer/.gitignore) — NEVER reuse for a real community; a real deployment's organizer_nostr.json must stay gitignored (see the root .gitignore organizer_nostr.json rule).",
+  "_seed": "STIQ-BURNT-TEST-ORGANIZER-KEY-v1 — PUBLIC, NOT SECRET — issuer/organizer_nostr.json (shared TEST fixture, 2026-07-12)",
+  "skHex": "6bdadb6dbd302b9ebfe4fcdf1e5186dbd63008eaf2634531b0204dddb88c969e",
+  "pkHex": "e9cfb4b5b071e37ba78abf3d22767f2bc8134bc6d9afa099f84d5b74b689992f",
+  "npub": "npub1a88mfddsw83hhfu2hu7jyanl90ypxj7xmxh6px0cf4dhfd5fnyhs2uqpu8"
+}

@@ -1,0 +1,244 @@
+apply plugin: "com.android.application"
+apply plugin: "org.jetbrains.kotlin.android"
+apply plugin: "com.facebook.react"
+
+/**
+ * This is the configuration block to customize your React Native Android app.
+ * By default you don't need to apply any configuration, just uncomment the lines you need.
+ */
+react {
+    /* Folders */
+    //   The root of your project, i.e. where "package.json" lives. Default is '../..'
+    // root = file("../../")
+    //   The folder where the react-native NPM package is. Default is ../../node_modules/react-native
+    // reactNativeDir = file("../../node_modules/react-native")
+    //   The folder where the react-native Codegen package is. Default is ../../node_modules/@react-native/codegen
+    // codegenDir = file("../../node_modules/@react-native/codegen")
+    //   The cli.js file which is the React Native CLI entrypoint. Default is ../../node_modules/react-native/cli.js
+    // cliFile = file("../../node_modules/react-native/cli.js")
+
+    /* Variants */
+    //   The list of variants to that are debuggable. For those we're going to
+    //   skip the bundling of the JS bundle and the assets. By default is just 'debug'.
+    //   If you add flavors like lite, prod, etc. you'll have to list your debuggableVariants.
+    // debuggableVariants = ["liteDebug", "prodDebug"]
+
+    /* Bundling */
+    //   A list containing the node command and its flags. Default is just 'node'.
+    // nodeExecutableAndArgs = ["node"]
+    //
+    //   The command to run when bundling. By default is 'bundle'
+    // bundleCommand = "ram-bundle"
+    //
+    //   The path to the CLI configuration file. Default is empty.
+    // bundleConfig = file(../rn-cli.config.js)
+    //
+    //   The name of the generated asset file containing your JS bundle
+    // bundleAssetName = "MyApplication.android.bundle"
+    //
+    //   The entry file for bundle generation. Default is 'index.android.js' or 'index.js'
+    // entryFile = file("../js/MyApplication.android.js")
+    //
+    //   A list of extra flags to pass to the 'bundle' commands.
+    //   See https://github.com/react-native-community/cli/blob/main/docs/commands.md#bundle
+    // extraPackagerArgs = []
+
+    /* Hermes Commands */
+    //   The hermes compiler command to run. By default it is 'hermesc'
+    // hermesCommand = "$rootDir/my-custom-hermesc/bin/hermesc"
+    //
+    //   The list of flags to pass to the Hermes compiler. By default is "-O", "-output-source-map"
+    // hermesFlags = ["-O", "-output-source-map"]
+
+    /* Autolinking */
+    autolinkLibrariesWithApp()
+
+    /* Bundling: when `bundleInDebug=true` (gradle.properties), embed the JS bundle into the
+     * debug APK too. The RN plugin skips bundling for any variant listed in `debuggableVariants`
+     * (default ["debug"]); clearing it makes the debug build bundle JS so the app runs standalone
+     * without a Metro dev server — required for on-device field testing over Tor. */
+    if ((findProperty('bundleInDebug') ?: 'false').toBoolean()) {
+        debuggableVariants = []
+    }
+}
+
+/**
+ * Set this to true to Run Proguard on Release builds to minify the Java bytecode.
+ */
+def enableProguardInReleaseBuilds = true
+
+/**
+ * The preferred build flavor of JavaScriptCore (JSC)
+ *
+ * For example, to use the international variant, you can use:
+ * `def jscFlavor = 'org.webkit:android-jsc-intl:+'`
+ *
+ * The international variant includes ICU i18n library and necessary data
+ * allowing to use e.g. `Date.toLocaleString` and `String.localeCompare` that
+ * give correct results when using with locales other than en-US. Note that
+ * this variant is about 6MiB larger per architecture than default.
+ */
+def jscFlavor = 'org.webkit:android-jsc:+'
+
+android {
+    ndkVersion rootProject.ext.ndkVersion
+    buildToolsVersion rootProject.ext.buildToolsVersion
+    compileSdk rootProject.ext.compileSdkVersion
+
+    namespace "com.stiq.client"
+    defaultConfig {
+        applicationId "com.stiq.client"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        // Bump BOTH on every fleet-distributed build: versionCode gates upgrades (adb/package
+        // installer refuses downgrades; the T9-S6 in-app update repo offers an update only when the
+        // repo's versionCode is higher) and versionName is the only thing a user can read back to us
+        // from Settings → Apps → STIQ, so it is the fleet's version beacon. Every build before
+        // 2026-07-23 shipped as 1.0/1 — indistinguishable in the field, which is how the fleet
+        // silently drifted onto months-stale APKs.
+        versionCode 6
+        versionName "1.5"
+
+        /* RN developer support (red box, dev menu, HMR, and the Metro dev-server websocket).
+         *
+         * MainApplication used to tie this to BuildConfig.DEBUG, but our debug APK is a FIELD build:
+         * `bundleInDebug=true` embeds the JS bundle, so there is no Metro dev server to talk to and
+         * the dev client just retries localhost:8081 every 2s forever, burning CPU and battery on
+         * the phones we actually test on.
+         *
+         * Default: the inverse of bundleInDebug — an embedded bundle means no dev server, so no dev
+         * support. A dev running Metro (bundleInDebug=false) still gets the full dev experience with
+         * no flags. Override either way with -PdevSupport=true|false. */
+        def devSupportDefault = !((findProperty('bundleInDebug') ?: 'false').toBoolean())
+        def devSupport = (findProperty('devSupport') ?: devSupportDefault.toString()).toBoolean()
+        buildConfigField "boolean", "DEV_SUPPORT", devSupport.toString()
+    }
+    signingConfigs {
+        debug {
+            storeFile file('debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
+        release {
+            // Internal distribution: the release APK is sideloaded onto test phones over Tor, not
+            // shipped through Play, so it is signed with the SAME debug keystore as the debug build.
+            // This is deliberate — without a signingConfig the release APK is unsigned and the phone
+            // refuses to install it. Swap in a dedicated upload/release keystore before any public
+            // Play Store distribution (see https://reactnative.dev/docs/signed-apk-android); until
+            // then debug signing keeps the "install the release APK on the device" path working.
+            signingConfig signingConfigs.debug
+            minifyEnabled enableProguardInReleaseBuilds
+            // Strip unused resources (drawables/layouts/strings) from androidx (webkit/biometric/
+            // work-runtime/localbroadcastmanager), RN, svg and webview. Piggybacks on the code
+            // shrinking already enabled above; only runs on release, so dev/debug builds are
+            // untouched. See proguard-rules.pro for the reflection/JNI keeps R8 can't infer.
+            shrinkResources true
+            proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
+        }
+    }
+
+    // Per-ABI APK splits: instead of one universal APK carrying every ABI's copy of the (heavy) Tor,
+    // IPtProxy, SQLCipher/OpenSSL, Hermes and RN native libraries, emit a slim APK per ABI so a device
+    // downloads only the .so it can actually run. Distribute app-arm64-v8a-<variant>.apk to modern
+    // phones (arm64) — it is a fraction of the universal APK's native payload. universalApk stays true
+    // so the all-ABI app-<variant>.apk still exists for convenience/CI and matches older docs.
+    splits {
+        abi {
+            enable true
+            reset()
+            include 'armeabi-v7a', 'arm64-v8a'
+            universalApk true
+        }
+    }
+
+    // NOTE: deliberately NOT setting `packaging { jniLibs { useLegacyPackaging = false } }`. Storing
+    // the native libs UNCOMPRESSED would save a one-time first-launch extraction, but it makes the APK
+    // itself bigger to DOWNLOAD — and this app is sideloaded over Tor, where download bytes are the
+    // expensive resource. Legacy (compressed-in-APK) packaging keeps the download small; the extraction
+    // cost it trades for is single-digit seconds, dwarfed by the 30-90s Tor bootstrap anyway.
+
+    packagingOptions {
+        // @op-engineering/op-sqlite (SQLCipher) and info.guardianproject:tor-android both bundle an
+        // OpenSSL libcrypto.so / libssl.so. pickFirst resolves the "2 files found with path
+        // lib/<abi>/libcrypto.so" merge conflict so packaging doesn't fail; SQLCipher loads its own
+        // symbols and Tor loads its own, so taking either copy at packaging time is safe. (The
+        // blind-RSA WebCrypto is pure JS — onboarding/webcryptoShim.ts — and bundles no native .so.)
+        pickFirst '**/libcrypto.so'
+        pickFirst '**/libssl.so'
+    }
+}
+
+configurations.all {
+    resolutionStrategy {
+        force "org.jetbrains.kotlin:kotlin-stdlib:1.9.24"
+        force "org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.9.24"
+        force "org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.9.24"
+    }
+}
+
+dependencies {
+    // The version of react-native is set by the React Native Gradle Plugin
+    implementation("com.facebook.react:react-android")
+
+    if (hermesEnabled.toBoolean()) {
+        implementation("com.facebook.react:hermes-android")
+    } else {
+        implementation jscFlavor
+    }
+
+    // Bundled Tor daemon — info.guardianproject:tor-android from gpmaven (PLAN.md §3.2)
+    // STIQ invariant: bundled tor must be >= 0.4.8 for onion-service PoW puzzle solving (see client/src/tor/torVersion.ts).
+    // RE-VERIFY BY 2027-01-12: on 2026-07-10 the community's onions went dark for ~5 days because a
+    // still-widely-deployed tor 0.4.6.10 hit its network EOL and stopped receiving a valid consensus
+    // (see the stiq-tor-eol-consensus-outage handoff). This pin and TOR_MIN_SUPPORTED_VERSION
+    // (client/src/tor/torVersion.ts) MUST be bumped TOGETHER whenever either moves — a newer bundled
+    // daemon with a stale floor (or vice versa) silently reintroduces that same outage risk.
+    // client/src/tor/torVersionPin.test.ts enforces this pin stays >= TOR_MIN_SUPPORTED_VERSION.
+    implementation("info.guardianproject:tor-android:0.4.8.22")
+
+    // Pluggable transports: obfs4 + Snowflake via Controller API (Maven Central, no exec binary)
+    implementation("com.netzarchitekten:IPtProxy:5.5.0")
+
+    // LocalBroadcastManager for TorService bootstrap events
+    implementation("androidx.localbroadcastmanager:localbroadcastmanager:1.1.0")
+
+    // WorkManager for jittered background sync (periodic wake/drain/sleep cycle)
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
+
+    // UnifiedPush connector (T1) — content-free push WAKE over a self-hosted ntfy distributor +
+    // Orbot. NO FCM / Google Play Services. Native-only dep (no @noble/hashes drift); every call
+    // path is gated dark behind the PUSH_UNIFIEDPUSH client flag until the watcher is advertised.
+    // NOTE: 2.4.0 was a non-existent pin (Maven Central jumps 2.5.0 → 3.0.0 → … → 3.3.3) AND the
+    // wrong API generation — StiqUnifiedPushReceiver uses the 3.x typed callbacks
+    // (connector.data.PushEndpoint / PushMessage), first shipped in connector 3.0.0.
+    // Pinned to 3.0.10 (the newest 3.0.x): it carries the 3.x API AND was built with
+    // kotlin-stdlib 2.0.21 → Kotlin metadata 2.0.0, which the project's Kotlin 1.9.24 compiler can
+    // read. 3.1.2+ jump to Kotlin 2.2/2.3 (metadata 2.1.0+) and fail this compiler with
+    // "incompatible version of Kotlin … can read versions up to 2.0.0" until the project's Kotlin
+    // is bumped. Revisit when RN/AGP raises kotlinVersion (android/build.gradle).
+    implementation("org.unifiedpush.android:connector:3.0.10")
+
+    // androidx.webkit ProxyController — routes the opt-in full-page WebView through Tor's
+    // HTTPTunnelPort (StiqWebProxy). Without this a WebView would use the OS network stack
+    // and leak the user's real IP (PLAN.md §3.2).
+    implementation("androidx.webkit:webkit:1.11.0")
+
+    // BiometricPrompt for the password-vault unlock (StiqBiometric); BIOMETRIC_STRONG |
+    // DEVICE_CREDENTIAL gives biometric with the OS PIN/pattern as the built-in fallback.
+    implementation("androidx.biometric:biometric:1.1.0")
+
+    // Native BIP-340 schnorr verify for relay-event ingest (StiqSchnorrModule): bitcoin-core
+    // libsecp256k1 via ACINQ's vetted JNI bindings — NOT hand-rolled curve math. Consumed only when
+    // the client flips NATIVE_SCHNORR_VERIFY (src/config.ts); the JS side (nostr/nativeVerify.ts)
+    // auto-falls back to pure-JS verifyEvent when the module is absent, so builds without it stay
+    // fully functional. Pinned 0.15.0: built with Kotlin 1.9.x metadata, readable by this project's
+    // Kotlin 1.9.24 compiler (newer 0.16+ moves to Kotlin 2.x metadata — same trap as the
+    // unifiedpush connector pin above). Revisit alongside a project Kotlin bump.
+    implementation("fr.acinq.secp256k1:secp256k1-kmp-jni-android:0.15.0")
+}

@@ -1,0 +1,1045 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Stiq Organizer</title>
+<script>window.__ASSET_V__="__ASSET_V_TOKEN__";</script>
+<style>
+:root{--bg:#0b0b0b;--surf:#111;--bdr:#222;--acc:#2b5fac;--acc2:#3d74cc;--tx:#e8e8e8;--mu:#777;--red:#b33;--mono:'Courier New',monospace}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--tx);font:15px/1.6 system-ui,sans-serif;min-height:100vh}
+header{background:var(--surf);border-bottom:1px solid var(--bdr);padding:14px 28px;display:flex;align-items:center;gap:10px}
+header h1{font-size:19px;font-weight:800}
+header span{color:var(--mu);font-size:12px}
+nav{display:flex;gap:2px;padding:18px 28px 0;border-bottom:1px solid var(--bdr)}
+nav button{background:none;border:none;color:var(--mu);font-size:14px;padding:9px 16px;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;transition:color .15s}
+nav button.on{color:var(--tx);border-color:var(--acc);font-weight:600}
+nav button:hover:not(.on){color:var(--tx)}
+main{max-width:700px;margin:0 auto;padding:28px}
+section{display:none}
+section.on{display:block}
+h2{font-size:17px;font-weight:700;margin-bottom:4px}
+p.sub{color:var(--mu);font-size:12px;margin-bottom:22px}
+label{display:block;font-size:12px;color:var(--mu);margin:16px 0 5px}
+label:first-child{margin-top:0}
+textarea,input[type=text]{width:100%;background:var(--surf);border:1px solid var(--bdr);color:var(--tx);border-radius:8px;padding:11px;font:12px/1.4 var(--mono);resize:vertical;outline:none;transition:border-color .15s}
+textarea:focus,input[type=text]:focus{border-color:var(--acc)}
+.code{background:var(--surf);border:1px solid var(--bdr);border-radius:8px;padding:13px;font:11px/1.5 var(--mono);color:#9ecbff;word-break:break-all;position:relative}
+.btn{display:inline-flex;align-items:center;gap:5px;background:var(--acc);color:#fff;border:none;border-radius:8px;padding:9px 18px;font-size:14px;font-weight:600;cursor:pointer;transition:background .15s}
+.btn:hover{background:var(--acc2)}
+.btn:disabled{opacity:.5;cursor:default}
+.ghost{background:#1a1a1a}.ghost:hover{background:#222}
+.danger{background:var(--red)}.danger:hover{background:#cc3333}
+.sm{padding:5px 11px;font-size:12px;border-radius:6px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:14px}
+.ok{background:#052e16;border:1px solid #1a5c35;border-radius:8px;padding:11px 14px;font-size:13px;color:#4caf80;margin-top:12px}
+.err{background:#2e0d0d;border:1px solid #5c1a1a;border-radius:8px;padding:11px 14px;font-size:13px;color:#cf6679;margin-top:12px}
+.info{background:#0d1e2e;border:1px solid #1a3d5c;border-radius:8px;padding:11px 14px;font-size:12px;color:#5aaad4;margin-top:10px}
+.cpbtn{position:absolute;top:8px;right:8px;background:#1e2a3a;border:none;color:#9ecbff;border-radius:5px;padding:3px 9px;font-size:11px;cursor:pointer}
+.cpbtn:hover{background:#2a3d55}
+.bigcode{font-size:20px;font-weight:700;letter-spacing:3px;color:#fde68a;font-family:var(--mono);text-align:center;padding:16px 20px;background:#1a1200;border:1px solid #92400e;border-radius:8px;margin:12px 0;position:relative}
+table{width:100%;border-collapse:collapse;margin-top:14px;font-size:12px}
+th{text-align:left;color:var(--mu);padding:5px 8px;border-bottom:1px solid var(--bdr);font-weight:600}
+td{padding:8px;border-bottom:1px solid #161616;font-family:var(--mono)}
+tr:hover td{background:#131313}
+.used{color:var(--mu);text-decoration:line-through}
+.live{color:#4caf80}
+.expired{color:#c77b7b}
+.exhausted{color:#e0a83a}
+.chip{display:flex;align-items:center;gap:8px;background:#1a1a1a;border:1px solid var(--bdr);border-radius:6px;padding:8px 12px;font-size:12px;font-family:var(--mono);margin-bottom:6px}
+.chip button{background:none;border:none;color:var(--red);cursor:pointer;font-size:15px;line-height:1;padding:0 2px;margin-left:auto}
+.chip button:hover{color:#ff4444}
+.divider{border:none;border-top:1px solid var(--bdr);margin:24px 0}
+.ts{background:#0a1520;border:1px solid var(--bdr);border-radius:8px;padding:14px;font:12px/1.6 var(--mono);color:#7ec8e3;position:relative;white-space:pre-wrap}
+.qrbox{background:#fff;padding:6px;border-radius:8px;display:inline-block}
+.qrbox img{display:block}
+.spin{display:inline-block;width:13px;height:13px;border:2px solid #fff3;border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.badge{background:var(--surf);border:1px solid var(--bdr);border-radius:20px;padding:2px 9px;font-size:11px;color:var(--mu);margin-left:7px}
+input.lim{width:72px;background:var(--surf);border:1px solid var(--bdr);color:var(--tx);border-radius:6px;padding:6px 8px;font:13px var(--mono);outline:none}
+input.lim:focus{border-color:var(--acc)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Stiq Organizer</h1>
+  <span>Community management — local only</span>
+  <span class="badge" id="health-pill" title="GET /health">checking…</span>
+</header>
+
+<nav id="nav">
+  <button class="on" onclick="switchTab('join')">Join Codes</button>
+  <button onclick="switchTab('invites')">Invites</button>
+  <button onclick="switchTab('community')">Community Code</button>
+  <button onclick="switchTab('sign')">Sign Member</button>
+  <button onclick="switchTab('mods')">Moderators</button>
+  <button onclick="switchTab('tags')">Tags</button>
+  <button onclick="switchTab('limits')">Limits</button>
+  <button onclick="switchTab('tokens')">Tokens</button>
+  <button onclick="switchTab('activation')">Activation</button>
+  <button onclick="switchTab('labels')">Labels</button>
+  <button onclick="switchTab('postrules')">Post Rules</button>
+  <button onclick="switchTab('pictures')">Pictures</button>
+  <button onclick="switchTab('audio')">Audio</button>
+  <button onclick="switchTab('readaccess')">Read access</button>
+  <button onclick="switchTab('reasons')">Reasons</button>
+  <button onclick="switchTab('perms')">Permissions</button>
+  <button onclick="switchTab('modlimits')">Mod Limits</button>
+  <button onclick="switchTab('gov')">Governance</button>
+  <button onclick="switchTab('community-cfg')">Community</button>
+  <button onclick="switchTab('logpage')">Log Page</button>
+  <button onclick="switchTab('ranking')">Rising</button>
+  <button onclick="switchTab('storage')">Storage</button>
+  <button onclick="switchTab('safebrowsing')">Safe Browsing</button>
+  <button onclick="switchTab('relays')">Relays</button>
+  <button onclick="switchTab('guidelines')">Guidelines</button>
+  <button onclick="switchTab('maintenance')">Maintenance</button>
+</nav>
+
+<main>
+
+<!-- JOIN CODES -->
+<section id="tab-join" class="on">
+  <h2>Join Codes</h2>
+  <p class="sub">The recommended way to onboard. One code carries the relay, your issuer key, your
+    organizer mailbox, and a single-use invite. The member pastes or scans it — then the app
+    fetches their credential automatically over Tor. No back-and-forth.</p>
+  <div class="row" style="gap:22px;flex-wrap:wrap;align-items:flex-start;margin-top:0">
+    <div>
+      <label style="margin-top:0">Uses</label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input type="number" id="join-uses" min="1" value="1" style="width:64px;height:34px;padding:0 8px;font-size:13px;background:var(--surf);border:1px solid var(--bdr);color:var(--tx);border-radius:6px;outline:none">
+        <label style="font-size:12px;color:var(--mu);display:flex;gap:5px;align-items:center;cursor:pointer"><input type="checkbox" id="join-uses-unl" onchange="onUsesUnl('join-uses','join-uses-unl')"> unlimited</label>
+      </div>
+    </div>
+    <div>
+      <label style="margin-top:0">Expires</label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input type="number" id="join-exp-n" min="1" value="7" style="display:none;width:64px;height:34px;padding:0 8px;font-size:13px;background:var(--surf);border:1px solid var(--bdr);color:var(--tx);border-radius:6px;outline:none">
+        <select id="join-exp-unit" onchange="onExpUnit('join-exp-n','join-exp-unit')" style="height:34px;padding:0 10px;font-size:13px;background:var(--surf);border:1px solid var(--bdr);color:var(--tx);border-radius:6px;outline:none">
+          <option value="">Never</option>
+          <option value="min">Minutes</option>
+          <option value="hour">Hours</option>
+          <option value="day">Days</option>
+        </select>
+      </div>
+    </div>
+  </div>
+  <div class="row" style="margin-top:14px">
+    <button class="btn" onclick="genJoin()">+ Generate join code</button>
+  </div>
+  <div id="new-join" style="display:none;margin-top:18px">
+    <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start">
+      <div style="text-align:center">
+        <div class="qrbox"><img id="new-join-qr" width="190" height="190" alt="Join QR"></div>
+        <div style="font-size:11px;color:#4caf80;margin-top:6px">Member scans → app opens</div>
+      </div>
+      <div style="flex:1;min-width:220px">
+        <label style="margin-top:0">Join code (copy &amp; send, or share the QR)</label>
+        <div class="code" id="new-join-box" style="font-size:10px">
+          <button class="cpbtn" onclick="copyEl('new-join-text')">Copy</button>
+          <span id="new-join-text"></span>
+        </div>
+        <div class="ok" id="new-join-note" style="font-size:12px;margin-top:10px">Single use — send to one person only.</div>
+        <div style="font-size:12px;color:var(--mu);margin-top:4px" id="new-join-exp"></div>
+      </div>
+    </div>
+  </div>
+  <div id="join-err" class="err" style="display:none"></div>
+</section>
+
+<!-- INVITES -->
+<section id="tab-invites">
+  <h2>Member Invites <span class="badge" id="inv-count">—</span></h2>
+  <p class="sub">Generate one code per person (or a multi-use code for a group). They enter it in the app
+    before enrolling.</p>
+  <div class="row" style="gap:22px;flex-wrap:wrap;align-items:flex-start;margin-top:0">
+    <div>
+      <label style="margin-top:0">Uses</label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input type="number" id="inv-uses" min="1" value="1" style="width:64px;height:34px;padding:0 8px;font-size:13px;background:var(--surf);border:1px solid var(--bdr);color:var(--tx);border-radius:6px;outline:none">
+        <label style="font-size:12px;color:var(--mu);display:flex;gap:5px;align-items:center;cursor:pointer"><input type="checkbox" id="inv-uses-unl" onchange="onUsesUnl('inv-uses','inv-uses-unl')"> unlimited</label>
+      </div>
+    </div>
+    <div>
+      <label style="margin-top:0">Expires</label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input type="number" id="inv-exp-n" min="1" value="7" style="display:none;width:64px;height:34px;padding:0 8px;font-size:13px;background:var(--surf);border:1px solid var(--bdr);color:var(--tx);border-radius:6px;outline:none">
+        <select id="inv-exp-unit" onchange="onExpUnit('inv-exp-n','inv-exp-unit')" style="height:34px;padding:0 10px;font-size:13px;background:var(--surf);border:1px solid var(--bdr);color:var(--tx);border-radius:6px;outline:none">
+          <option value="">Never</option>
+          <option value="min">Minutes</option>
+          <option value="hour">Hours</option>
+          <option value="day">Days</option>
+        </select>
+      </div>
+    </div>
+  </div>
+  <div class="row" style="margin-top:14px">
+    <button class="btn" onclick="genInvite()">+ Generate invite code</button>
+  </div>
+  <div id="new-inv" style="display:none;margin-top:16px">
+    <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center">
+      <div class="qrbox"><img id="new-inv-qr" width="130" height="130" alt="QR"></div>
+      <div style="flex:1">
+        <div class="bigcode" id="new-inv-code">
+          <button class="cpbtn" onclick="copyEl('new-inv-text')">Copy</button>
+          <span id="new-inv-text"></span>
+        </div>
+        <div class="ok" id="new-inv-note" style="font-size:12px">Single use — share with one person only.</div>
+        <div style="font-size:12px;color:var(--mu);margin-top:4px" id="new-inv-exp"></div>
+      </div>
+    </div>
+  </div>
+  <div id="inv-err" class="err" style="display:none"></div>
+  <table style="margin-top:20px">
+    <thead><tr><th>Code</th><th>Status</th><th>Uses</th><th>Created</th><th>Expires</th><th></th></tr></thead>
+    <tbody id="inv-body"><tr><td colspan="6" style="color:var(--mu);padding:16px 8px">No invites yet.</td></tr></tbody>
+  </table>
+</section>
+
+<!-- COMMUNITY CODE -->
+<section id="tab-community">
+  <h2>Community Code</h2>
+  <p class="sub">Share this with members — it encodes the relay address and your issuer public key. No secrets here.</p>
+  <div style="display:flex;gap:28px;flex-wrap:wrap;align-items:flex-start;margin-top:6px">
+    <div>
+      <div class="qrbox"><img id="comm-qr" width="170" height="170" alt="Community QR"></div>
+      <div class="row" style="justify-content:center">
+        <button class="btn ghost sm" onclick="copyText(communityCode)">Copy code text</button>
+      </div>
+    </div>
+    <div style="flex:1;min-width:200px">
+      <label style="margin-top:0">Full community code</label>
+      <div class="code" id="comm-code-box" style="font-size:10px">
+        Loading…
+        <button class="cpbtn" onclick="copyText(communityCode)">Copy</button>
+      </div>
+      <label>Relay onion</label>
+      <div class="code" style="font-size:10px;color:#ccc">ws://stiqexamplerelayonionaddressfortestsonly2345672345672345.onion</div>
+    </div>
+  </div>
+</section>
+
+<!-- SIGN MEMBER -->
+<section id="tab-sign">
+  <h2>Sign Member Enrollment</h2>
+  <p class="sub">Member opens the app, enters invite code, app shows a <strong>Request Code</strong>. Scan it here or paste it, then show the <strong>Response QR</strong> to the member.</p>
+
+  <div style="margin-bottom:16px">
+    <button class="btn ghost" id="cam-btn" onclick="startCam()">&#128247; Scan request QR from phone screen</button>
+    <button class="btn ghost" id="cam-stop" onclick="stopCam()" style="display:none">&#9209; Stop camera</button>
+    <div id="cam-box" style="display:none;margin-top:10px;position:relative">
+      <video id="cam-video" autoplay muted playsinline style="width:100%;max-width:460px;border-radius:8px;background:#000"></video>
+      <canvas id="cam-canvas" style="display:none"></canvas>
+      <div id="cam-overlay" style="position:absolute;top:7px;left:7px;background:rgba(0,0,0,.65);color:#4caf80;font-size:12px;padding:3px 8px;border-radius:4px">Scanning…</div>
+    </div>
+  </div>
+
+  <label>Member request code (paste or scan above)</label>
+  <textarea id="req-in" rows="3" placeholder="stiq:cred-req:1;STIQ-XXXX-XXXX;…" spellcheck="false"></textarea>
+  <div class="row">
+    <button class="btn" id="sign-btn" onclick="doSign()">Sign</button>
+    <button class="btn ghost" onclick="clearSign()">Clear</button>
+  </div>
+  <div id="sign-err" class="err" style="display:none"></div>
+  <div id="sign-res" style="display:none;margin-top:20px">
+    <div class="info" style="margin-top:0">Show this QR to the member — they scan it with their phone camera to complete enrollment.</div>
+    <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start;margin-top:14px">
+      <div style="text-align:center">
+        <div class="qrbox"><img id="resp-qr" width="200" height="200" alt="Response QR"></div>
+        <div style="font-size:11px;color:#4caf80;margin-top:6px">Member scans → app opens</div>
+      </div>
+      <div style="flex:1">
+        <label style="margin-top:0">Response code (manual paste if needed)</label>
+        <div class="code" style="font-size:10px;min-height:54px;position:relative">
+          <span id="resp-text"></span>
+          <button class="cpbtn" onclick="copyEl('resp-text')">Copy</button>
+        </div>
+        <div class="ok" style="font-size:12px">Signed. Invite marked used. The member's identity is unknown to you — you only signed a blinded token.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- TAGS -->
+<section id="tab-tags">
+  <h2>Tag Policy</h2>
+  <p class="sub">Control what tags members can use. Community tags appear as tappable chips in the composer. When member tags are disabled, members can only use the chips you provide. Each tag's selector scopes it to articles, tweets, or all posts — the composer only offers it on the matching post type.</p>
+
+  <label style="margin-top:0">Community tags <span style="color:var(--mu);font-size:11px">(organizer-vetted — shown as chips in the composer; pick which post types each applies to)</span></label>
+  <div id="tag-chips" style="display:flex;flex-wrap:wrap;gap:6px;min-height:38px;background:var(--surf);border:1px solid var(--bdr);border-radius:8px;padding:8px;margin-bottom:10px"></div>
+  <div style="display:flex;gap:8px">
+    <input type="text" id="tag-input" placeholder="Add a tag (no #)…" style="flex:1;height:38px;padding:0 11px;font-size:13px" onkeydown="if(event.key==='Enter'){addCommunityTag();event.preventDefault()}">
+    <button class="btn sm" onclick="addCommunityTag()">Add</button>
+  </div>
+  <div id="tag-input-err" class="err" style="display:none;margin-top:8px"></div>
+
+  <div class="divider"></div>
+
+  <div style="display:flex;flex-direction:column;gap:14px">
+    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0">
+      <input type="checkbox" id="tag-pin" style="width:16px;height:16px;accent-color:var(--acc)">
+      <span>
+        <strong>Pin community tags first</strong>
+        <span style="display:block;color:var(--mu);font-size:12px">Community tags appear before any member-added tags in the feed filter bar and composer.</span>
+      </span>
+    </label>
+    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0">
+      <input type="checkbox" id="tag-mem" checked style="width:16px;height:16px;accent-color:var(--acc)">
+      <span>
+        <strong>Allow member tags</strong>
+        <span style="display:block;color:var(--mu);font-size:12px">Members can type their own tags. Uncheck to restrict them to community tags only.</span>
+      </span>
+    </label>
+    <label style="margin:0">
+      <strong style="color:var(--tx);font-size:14px">Max tags per post</strong>
+      <span style="display:block;color:var(--mu);font-size:12px;margin-bottom:6px">Cap how many tags a single post may carry. The relay rejects posts over the limit. <strong>0 = unlimited.</strong></span>
+      <input type="text" id="tag-max" value="0" style="width:90px;height:34px;padding:0 11px;font-size:13px">
+    </label>
+  </div>
+
+  <div class="divider"></div>
+  <div class="row" style="margin-top:0">
+    <button class="btn" id="pub-tags-btn" onclick="saveTagPolicy()">
+      <span id="tag-save-spin" class="spin" style="display:none"></span>
+      Save &amp; Publish to relay
+    </button>
+  </div>
+  <div id="tag-save-ok" class="ok" style="display:none">Tag policy published. Members receive it live over Nostr.</div>
+  <div id="tag-save-err" class="err" style="display:none"></div>
+</section>
+
+<!-- MODERATORS -->
+<section id="tab-mods">
+  <h2>Moderators <span class="badge" id="mod-count">—</span></h2>
+  <p class="sub">Grant or withdraw moderation power by Nostr npub, then <strong>Publish roster</strong> — it signs a kind-30078 event with your organizer key and sends it to the relay. The change takes effect for every client with no app rebuild.</p>
+  <div class="row" style="margin-top:0">
+    <input type="text" id="npub-in" placeholder="npub1…" style="flex:1;min-width:240px;height:40px;padding:0 11px;font-size:13px">
+    <button class="btn" onclick="addMod()">Add moderator</button>
+  </div>
+  <div id="mod-err" class="err" style="display:none"></div>
+  <div id="mod-list" style="margin-top:16px">
+    <span style="color:var(--mu);font-size:13px">No moderators yet.</span>
+  </div>
+  <div class="row">
+    <button class="btn" id="pub-roster-btn" onclick="publishRoster()">⇪ Publish roster to relay</button>
+  </div>
+  <div id="roster-pub" class="ok" style="display:none"></div>
+  <div class="divider"></div>
+  <h3 style="font-size:14px;font-weight:600;margin-bottom:6px">Legacy export for moderators.ts <span style="color:var(--mu);font-weight:400">(build-time fallback only)</span></h3>
+  <div class="ts" id="mod-ts">
+    <button class="cpbtn" onclick="copyEl('mod-ts-inner')">Copy</button>
+    <span id="mod-ts-inner"></span>
+  </div>
+</section>
+
+<!-- LIMITS -->
+<section id="tab-limits">
+  <h2>Rate Limits</h2>
+  <p class="sub">Per-user caps on posts, comments, and channel messages (daily / weekly / monthly), plus a community-wide DM rate. The relay enforces these to curb spam and keep storage bounded. <strong>0 = unlimited.</strong> Publishing signs a kind-30078 stiq:limits event with your organizer key.</p>
+  <table>
+    <thead><tr><th>Category</th><th>Daily</th><th>Weekly</th><th>Monthly</th></tr></thead>
+    <tbody>
+      <tr><td>Posts</td>
+        <td><input type="text" id="lim-posts-daily" class="lim"></td>
+        <td><input type="text" id="lim-posts-weekly" class="lim"></td>
+        <td><input type="text" id="lim-posts-monthly" class="lim"></td></tr>
+      <tr><td>Comments</td>
+        <td><input type="text" id="lim-comments-daily" class="lim"></td>
+        <td><input type="text" id="lim-comments-weekly" class="lim"></td>
+        <td><input type="text" id="lim-comments-monthly" class="lim"></td></tr>
+      <tr><td>Channel</td>
+        <td><input type="text" id="lim-channel-daily" class="lim"></td>
+        <td><input type="text" id="lim-channel-weekly" class="lim"></td>
+        <td><input type="text" id="lim-channel-monthly" class="lim"></td></tr>
+    </tbody>
+  </table>
+  <label>Community-wide DM rate (gift wraps per minute — per-user DM caps aren't possible since senders are anonymous)</label>
+  <input type="text" id="lim-dm" style="width:120px;height:36px;padding:0 11px;font-size:13px">
+  <div class="divider"></div>
+  <h3 style="margin:0 0 4px;font-size:14px">Mailbox flood protection</h3>
+  <p class="sub" style="margin-top:0">Caps on credential-exchange requests (enrollment + token draws) the relay forwards to your organizer mailbox. These requests are anonymous, so — like DMs — they can only be capped globally and per-connection. They shield the single-threaded mailbox from a request flood. A real member sends about one request per connection, so the per-connection cap can be tight. <strong>0 = unlimited.</strong> Published with the limits below.</p>
+  <label>Mailbox requests — community-wide per minute <span style="color:var(--mu);font-size:11px">— default 240</span></label>
+  <input type="text" id="lim-mailbox" style="width:120px;height:36px;padding:0 11px;font-size:13px">
+  <label style="margin-top:12px">Mailbox requests — per connection per minute <span style="color:var(--mu);font-size:11px">— default 12</span></label>
+  <input type="text" id="lim-mailbox-conn" style="width:120px;height:36px;padding:0 11px;font-size:13px">
+  <div class="divider"></div>
+  <label style="display:flex;align-items:center;gap:8px;margin-top:16px;cursor:pointer">
+    <input type="checkbox" id="lim-exempt" style="width:auto"> Exempt moderators from these caps
+  </label>
+  <label style="display:flex;align-items:center;gap:8px;margin-top:12px;cursor:pointer">
+    <input type="checkbox" id="lim-voice" style="width:auto"> Allow voice messages (NIP-A0) — when off, the relay rejects voice posts community-wide
+  </label>
+  <div class="row">
+    <button class="btn" id="pub-limits-btn" onclick="publishLimits()">⇪ Save &amp; publish limits</button>
+  </div>
+  <div id="limits-err" class="err" style="display:none"></div>
+  <div id="limits-pub" class="ok" style="display:none"></div>
+</section>
+
+<!-- TOKENS (blind posting) -->
+<section id="tab-tokens">
+  <h2>Posting Tokens</h2>
+  <p class="sub">Blind posts spend an anonymous <strong>token</strong> so the relay can limit spam without seeing who posted. This sets how many tokens each member may draw <strong>per epoch (1 day)</strong> — the anti-spam cap for blind posting. Tokens are blind-signed, so you can't link one to a member and there is <strong>no revoke</strong>: this only controls how many are handed out. Saved on this box (not published to the relay); takes effect immediately.</p>
+  <label style="margin-top:0">Tokens per member, per day <span style="color:var(--mu);font-size:11px">— default 50</span></label>
+  <input type="text" id="tok-per-epoch" style="width:120px;height:36px;padding:0 11px;font-size:13px">
+  <div class="row">
+    <button class="btn" id="save-tokens-btn" onclick="saveTokens()">Save token quota</button>
+  </div>
+  <p class="sub" id="tok-stats" style="margin-top:14px">—</p>
+  <div id="tokens-err" class="err" style="display:none"></div>
+  <div id="tokens-ok" class="ok" style="display:none"></div>
+
+  <div class="divider"></div>
+  <h3 style="margin:0 0 4px;font-size:14px">Draw protection</h3>
+  <p class="sub" style="margin-top:0">Defence-in-depth for the mailbox on <strong>this box</strong> (not published to the relay), complementing the relay's mailbox rate caps in the Limits tab. Takes effect immediately.</p>
+  <label style="margin-top:0">Max draw requests per member, per day <span style="color:var(--mu);font-size:11px">— distinct requests, not tokens; keep it well above (daily token quota ÷ 100), or a member's tokens strand mid-day; 0 = unlimited</span></label>
+  <input type="text" id="mbx-maxdraws" style="width:120px;height:36px;padding:0 11px;font-size:13px">
+  <label style="margin-top:12px">Max concurrent mailbox requests <span style="color:var(--mu);font-size:11px">— excess are shed; the client retries; 0 = unlimited</span></label>
+  <input type="text" id="mbx-maxconc" style="width:120px;height:36px;padding:0 11px;font-size:13px">
+  <label style="display:flex;align-items:center;gap:8px;margin-top:14px;cursor:pointer">
+    <input type="checkbox" id="mbx-dropinvalid" style="width:auto"> Silently drop draws with an invalid credential (send no reply — removes the work a credential-less flood forces)
+  </label>
+  <div class="row">
+    <button class="btn" id="save-mbx-btn" onclick="saveMailboxPolicy()">Save draw protection</button>
+  </div>
+  <div id="mbx-err" class="err" style="display:none"></div>
+  <div id="mbx-ok" class="ok" style="display:none"></div>
+</section>
+
+<!-- ACTIVATION -->
+<section id="tab-activation">
+  <h2>Token &amp; sealing activation</h2>
+  <p class="sub">Turn the community-wide token &amp; encryption features on or off. These are <strong>relay</strong> switches (not published to Nostr), flipped live here — the relay hot-reloads within a second. <strong style="color:#c0392b">One-way for members:</strong> a member whose app hasn't updated yet will break when you enable a feature they can't speak, so only enable each one <strong>after your members have updated</strong>.</p>
+  <div id="activation-unavailable" class="sub" style="display:none;margin-bottom:12px"></div>
+
+  <div class="divider" style="margin-top:4px"></div>
+  <h3 style="margin:0 0 4px;font-size:14px">Fleet key-sync (stiq:token-keys)</h3>
+  <p class="sub" style="margin-top:0">Every purpose key (post / read / picture / audio / space-write) is re-broadcast to the whole community at startup and on every flip below, so already-enrolled members converge without re-inviting — this is the fix for the "swk" incident (a key added after members joined never reaching them). This line reports whether that broadcast actually reached the relay.</p>
+  <p class="sub" id="act-tokenkeys-note" style="margin:6px 0 0"></p>
+
+  <div class="divider"></div>
+  <h3 style="margin:0 0 4px;font-size:14px">Space tokens — channels, groups &amp; DMs</h3>
+  <p class="sub" style="margin-top:0">Requires an anonymous token for every channel message, group post, and DM — the same anti-spam brake feed posts already use, extended to every space. Messages stay signed by the member (roles &amp; names unaffected); the token just proves they paid the spam price. Posting stays uncensorable.</p>
+  <label style="display:flex;align-items:center;gap:8px;margin-top:8px;cursor:pointer">
+    <input type="checkbox" id="act-space" style="width:auto" onchange="toggleActivation('spaceTokens', this.checked)"> Require space tokens on channels / groups / DMs
+  </label>
+  <p class="sub" id="act-space-note" style="margin:6px 0 0"></p>
+
+  <div class="divider"></div>
+  <h3 style="margin:0 0 4px;font-size:14px">Media token domains — pictures &amp; audio</h3>
+  <p class="sub" style="margin-top:0">Meters pictures and audio on their own token budgets (separate from text), so you can price/limit media independently. <strong>Soft:</strong> updated apps opt in automatically; older apps keep paying from the normal post budget, so this one does not break anyone.</p>
+  <label style="display:flex;align-items:center;gap:8px;margin-top:8px;cursor:pointer">
+    <input type="checkbox" id="act-media" style="width:auto" onchange="toggleActivation('mediaTokens', this.checked)"> Advertise the picture / audio token domains
+  </label>
+  <p class="sub" id="act-media-note" style="margin:6px 0 0"></p>
+
+  <div class="divider"></div>
+  <h3 style="margin:0 0 4px;font-size:14px">Content encryption — censorable reads</h3>
+  <p class="sub" style="margin-top:0">Seals post bodies so only members who spend a <strong>read</strong> token can decrypt them — and lets you stop a specific member from reading (revoke them under <strong>Read access</strong>). Posting stays uncensorable; the most this does to a writer is nothing. Enabling flips the relay advertisement <strong>and</strong> this box's read-auth enforcement together.</p>
+  <label style="display:flex;align-items:center;gap:8px;margin-top:8px;cursor:pointer">
+    <input type="checkbox" id="act-ce" style="width:auto" onchange="toggleActivation('contentEncryption', this.checked)"> Seal post bodies + enforce read access
+  </label>
+  <p class="sub" id="act-ce-note" style="margin:6px 0 0"></p>
+
+  <div id="activation-err" class="err" style="display:none;margin-top:12px"></div>
+  <div id="activation-ok" class="ok" style="display:none;margin-top:12px"></div>
+</section>
+
+<!-- LABELS -->
+<section id="tab-labels">
+  <h2>Post Labels</h2>
+  <p class="sub">The post "types" members can apply, shown as colored chips. Rename, recolor, reorder, add, or remove freely — past posts keep their label, so removing one never deletes anything. The <strong>Applies to</strong> selector scopes a label to articles, tweets, or all posts — the composer only offers it on the matching post type. Publishing signs a kind-30078 stiq:labels event your members receive live.</p>
+  <div id="label-rows"></div>
+  <button class="btn sm" onclick="addLabel()">+ Add label</button>
+  <div class="divider"></div>
+  <div class="row" style="margin-top:0">
+    <button class="btn" id="pub-labels-btn" onclick="publishLabels()">⇪ Save &amp; publish labels</button>
+  </div>
+  <div id="labels-err" class="err" style="display:none"></div>
+  <div id="labels-pub" class="ok" style="display:none"></div>
+</section>
+
+<!-- POST RULES -->
+<section id="tab-postrules">
+  <h2>Post Rules</h2>
+  <p class="sub">Length limits, media allowance, and whether a label is required, per post type. Notes (short posts) are measured in <strong>characters</strong>; articles (titled long-form) in <strong>words</strong>. <strong>Pictures and voice notes never count toward the length</strong> — they are capped separately by the <strong>Media</strong> column (max inline pictures + voice notes per post; a note is typically 1, an article more). <strong>0 = no limit.</strong> The app enforces these as members type; the relay rejects over-length and over-media posts. Publishing signs a kind-30078 stiq:post-rules event.</p>
+  <table>
+    <thead><tr><th>Type</th><th>Min</th><th>Max</th><th>Media</th><th>Label required</th></tr></thead>
+    <tbody>
+      <tr><td>Note <span style="color:var(--mu);font-size:11px">(chars)</span></td>
+        <td><input type="text" id="pr-note-min" class="lim"></td>
+        <td><input type="text" id="pr-note-max" class="lim"></td>
+        <td><input type="text" id="pr-note-media" class="lim" title="Max pictures + voice notes per note"></td>
+        <td style="text-align:center"><input type="checkbox" id="pr-note-lbl" style="width:16px;height:16px;accent-color:var(--acc)"></td></tr>
+      <tr><td>Article <span style="color:var(--mu);font-size:11px">(words)</span></td>
+        <td><input type="text" id="pr-article-min" class="lim"></td>
+        <td><input type="text" id="pr-article-max" class="lim"></td>
+        <td><input type="text" id="pr-article-media" class="lim" title="Max pictures + voice notes per article"></td>
+        <td style="text-align:center"><input type="checkbox" id="pr-article-lbl" style="width:16px;height:16px;accent-color:var(--acc)"></td></tr>
+    </tbody>
+  </table>
+  <label style="margin-top:14px">
+    <strong style="color:var(--tx);font-size:14px">Author's note — max characters</strong>
+    <span style="display:block;color:var(--mu);font-size:12px;margin-bottom:6px">Length cap on the running author's note an author can pin to their post. Enforced in the app as the author types (the note is a comment the relay does not length-check). <strong>0 = unlimited.</strong></span>
+    <input type="text" id="pr-authornote-max" value="280" style="width:90px;height:34px;padding:0 11px;font-size:13px">
+  </label>
+  <div class="row">
+    <button class="btn" id="pub-postrules-btn" onclick="publishPostRules()">⇪ Save &amp; publish rules</button>
+  </div>
+  <div id="postrules-err" class="err" style="display:none"></div>
+  <div id="postrules-pub" class="ok" style="display:none"></div>
+</section>
+
+<!-- PICTURES -->
+<section id="tab-pictures">
+  <h2>Pictures</h2>
+  <p class="sub">Limits for the Pictures modality (tiny, private, load-on-tap pixel-art posts). The per-period allowance, resolution/colour caps, and on/off are <strong>enforced in the app</strong> as members compose (posts are relay-blind, so a member's cumulative picture bytes can't be attributed at the relay). The per-picture cap is additionally backstopped by the relay's content-neutral event-size limit — keep it ≤ the relay's <code>max_event_bytes</code>. Publishing signs a kind-30078 stiq:picture-limits event.</p>
+  <label style="margin-bottom:14px">
+    <input type="checkbox" id="pic-allow" style="width:auto"> Allow pictures — when off, the "Add picture" option is hidden in every composer
+  </label>
+  <table>
+    <thead><tr><th>Setting</th><th>Value</th></tr></thead>
+    <tbody>
+      <tr><td>Per-period allowance <span style="color:var(--mu);font-size:11px">(KB, 0 = unlimited)</span></td>
+        <td><input type="text" id="pic-allowance-kb" class="lim"></td></tr>
+      <tr><td>Allowance period <span style="color:var(--mu);font-size:11px">(hours)</span></td>
+        <td><input type="text" id="pic-period-hours" class="lim"></td></tr>
+      <tr><td>Max per picture <span style="color:var(--mu);font-size:11px">(KB)</span></td>
+        <td><input type="text" id="pic-maxbytes-kb" class="lim"></td></tr>
+      <tr><td>Max resolution <span style="color:var(--mu);font-size:11px">(px: 48–256)</span></td>
+        <td><input type="text" id="pic-maxres" class="lim"></td></tr>
+      <tr><td>Max colours <span style="color:var(--mu);font-size:11px">(16–64)</span></td>
+        <td><input type="text" id="pic-maxcolours" class="lim"></td></tr>
+    </tbody>
+  </table>
+  <div class="row">
+    <button class="btn" id="pub-pictures-btn" onclick="publishPictureRules()">⇪ Save &amp; publish picture limits</button>
+  </div>
+  <div id="pictures-err" class="err" style="display:none"></div>
+  <div id="pictures-pub" class="ok" style="display:none"></div>
+</section>
+
+<section id="tab-audio">
+  <h2>Audio</h2>
+  <p class="sub">Limits for voice messages (NIP-A0 inline audio). Recording <strong>bitrate</strong> and <strong>sample rate</strong> are the compression knobs — lower values shrink every clip community-wide (24&nbsp;kbps mono is plenty for speech, roughly half the size of the old 48&nbsp;kbps). The allowance, size/duration caps, and on/off are <strong>enforced in the app</strong> as members record (posts are relay-blind, so a member's cumulative audio bytes can't be attributed at the relay). The per-clip cap is additionally backstopped by the relay's content-neutral event-size limit. This is separate from the <strong>Allow voice</strong> toggle on the Limits tab (that hard-gates voice at the relay); this tunes size/quality. Publishing signs a kind-30078 stiq:audio-limits event.</p>
+  <label style="margin-bottom:14px">
+    <input type="checkbox" id="aud-allow" style="width:auto"> Allow voice messages — when off, the mic + upload are hidden in every composer
+  </label>
+  <table>
+    <thead><tr><th>Setting</th><th>Value</th></tr></thead>
+    <tbody>
+      <tr><td>Per-period allowance <span style="color:var(--mu);font-size:11px">(KB, 0 = unlimited)</span></td>
+        <td><input type="text" id="aud-allowance-kb" class="lim"></td></tr>
+      <tr><td>Allowance period <span style="color:var(--mu);font-size:11px">(hours)</span></td>
+        <td><input type="text" id="aud-period-hours" class="lim"></td></tr>
+      <tr><td>Max per clip <span style="color:var(--mu);font-size:11px">(KB, decoded audio)</span></td>
+        <td><input type="text" id="aud-maxbytes-kb" class="lim"></td></tr>
+      <tr><td>Max duration <span style="color:var(--mu);font-size:11px">(seconds)</span></td>
+        <td><input type="text" id="aud-maxdur-sec" class="lim"></td></tr>
+      <tr><td>Recording bitrate <span style="color:var(--mu);font-size:11px">(kbps: 8–128)</span></td>
+        <td><input type="text" id="aud-bitrate" class="lim"></td></tr>
+      <tr><td>Sample rate <span style="color:var(--mu);font-size:11px">(Hz: 8000–48000)</span></td>
+        <td><input type="text" id="aud-samplerate" class="lim"></td></tr>
+    </tbody>
+  </table>
+  <div class="row">
+    <button class="btn" id="pub-audio-btn" onclick="publishAudioRules()">⇪ Save &amp; publish audio limits</button>
+  </div>
+  <div id="audio-err" class="err" style="display:none"></div>
+  <div id="audio-pub" class="ok" style="display:none"></div>
+</section>
+
+<section id="tab-readaccess">
+  <h2>Read access</h2>
+  <p class="sub">Stop a specific member from <strong>reading</strong>. When read-auth enforcement is on (<code>STIQ_READ_AUTH=1</code>) and content is sealed, a revoked member gets no fresh read tokens, so cannot decrypt new posts. <strong>Posting is never affected</strong> — the most a mod can do to a poster is ban, which only moves their posts to the mod log. Revoking is purely organizer-side (nothing is published); reinstating restores reading. Identify the member by their npub (visible in the app / mod console).</p>
+  <div id="readaccess-status" class="sub" style="margin-bottom:12px"></div>
+  <div class="row">
+    <input type="text" id="readaccess-npub" placeholder="npub1… or 64-hex pubkey" style="flex:1;height:36px;padding:0 11px;font-size:13px">
+    <button class="btn" id="readaccess-revoke-btn" onclick="revokeRead()">Revoke reading</button>
+  </div>
+  <div id="readaccess-list" style="margin-top:16px"></div>
+  <div id="readaccess-err" class="err" style="display:none;margin-top:10px"></div>
+</section>
+
+<!-- REASONS -->
+<section id="tab-reasons">
+  <h2>Moderation Reasons</h2>
+  <p class="sub">The reason buckets a moderator — or the automatic layer — must pick when removing a post, comment, or channel message. Each carries a color shown in the mod log and on the "removed" banner. Publishing signs a kind-30078 stiq:reasons event.</p>
+  <div id="reason-rows"></div>
+  <button class="btn sm" onclick="addReason()">+ Add reason</button>
+  <div class="divider"></div>
+  <label style="margin:0">
+    <strong style="color:var(--tx);font-size:14px">Member-report auto-hide threshold</strong>
+    <span style="display:block;color:var(--mu);font-size:12px;margin-bottom:6px">Once this many different members report the same item, it auto-hides pending moderator review. <strong>0 = off.</strong></span>
+    <input type="text" id="reason-threshold" value="0" style="width:90px;height:34px;padding:0 11px;font-size:13px">
+  </label>
+  <div class="row">
+    <button class="btn" id="pub-reasons-btn" onclick="publishReasons()">⇪ Save &amp; publish reasons</button>
+  </div>
+  <div id="reasons-err" class="err" style="display:none"></div>
+  <div id="reasons-pub" class="ok" style="display:none"></div>
+</section>
+
+<!-- PERMISSIONS -->
+<section id="tab-perms">
+  <h2>Moderator Permissions</h2>
+  <p class="sub">Scope each moderator to the actions they may take. The <strong>Default</strong> row applies to any moderator not listed individually below. Publishing signs a kind-30078 stiq:permissions event your members + relay honor.</p>
+  <div id="perm-rows"></div>
+  <div class="divider"></div>
+  <div class="row" style="margin-top:0">
+    <button class="btn" id="pub-perms-btn" onclick="publishPermissions()">⇪ Save &amp; publish permissions</button>
+  </div>
+  <div id="perms-err" class="err" style="display:none"></div>
+  <div id="perms-pub" class="ok" style="display:none"></div>
+</section>
+
+<!-- MOD LIMITS -->
+<section id="tab-modlimits">
+  <h2>Moderator Limits</h2>
+  <p class="sub">Caps on a moderator's <strong>own</strong> actions, to curb a rogue or compromised account. Daily / weekly counts per action. <strong>0 = unlimited.</strong> Publishing signs a kind-30078 stiq:mod-limits event the relay enforces.</p>
+  <table>
+    <thead><tr><th>Action</th><th>Daily</th><th>Weekly</th></tr></thead>
+    <tbody>
+      <tr><td>Hide</td>
+        <td><input type="text" id="ml-hide-d" class="lim"></td>
+        <td><input type="text" id="ml-hide-w" class="lim"></td></tr>
+      <tr><td>Ban</td>
+        <td><input type="text" id="ml-ban-d" class="lim"></td>
+        <td><input type="text" id="ml-ban-w" class="lim"></td></tr>
+      <tr><td>Restore</td>
+        <td><input type="text" id="ml-restore-d" class="lim"></td>
+        <td><input type="text" id="ml-restore-w" class="lim"></td></tr>
+      <tr><td>Lock</td>
+        <td><input type="text" id="ml-lock-d" class="lim"></td>
+        <td><input type="text" id="ml-lock-w" class="lim"></td></tr>
+      <tr><td>Unlock</td>
+        <td><input type="text" id="ml-unlock-d" class="lim"></td>
+        <td><input type="text" id="ml-unlock-w" class="lim"></td></tr>
+      <tr><td>Retag</td>
+        <td><input type="text" id="ml-retag-d" class="lim"></td>
+        <td><input type="text" id="ml-retag-w" class="lim"></td></tr>
+      <tr><td>Pin</td>
+        <td><input type="text" id="ml-pin-d" class="lim"></td>
+        <td><input type="text" id="ml-pin-w" class="lim"></td></tr>
+      <tr><td>Unpin</td>
+        <td><input type="text" id="ml-unpin-d" class="lim"></td>
+        <td><input type="text" id="ml-unpin-w" class="lim"></td></tr>
+    </tbody>
+  </table>
+  <div class="row">
+    <button class="btn" id="pub-modlimits-btn" onclick="publishModLimits()">⇪ Save &amp; publish mod limits</button>
+  </div>
+  <div id="modlimits-err" class="err" style="display:none"></div>
+  <div id="modlimits-pub" class="ok" style="display:none"></div>
+</section>
+
+<!-- GOVERNANCE -->
+<section id="tab-gov">
+  <h2>Governance</h2>
+  <p class="sub">Newcomer restrictions and who may create channels. Publishing signs a kind-30078 stiq:gov event your members + relay honor.</p>
+  <label style="margin-top:0">
+    <strong style="color:var(--tx);font-size:14px">Newcomer period (days)</strong>
+    <span style="display:block;color:var(--mu);font-size:12px;margin-bottom:6px">How long a freshly-enrolled member counts as a "newcomer" for the restrictions below. <strong>0 = off.</strong></span>
+    <input type="text" id="gov-ncd" value="0" style="width:90px;height:34px;padding:0 11px;font-size:13px">
+  </label>
+  <div class="divider"></div>
+  <div style="display:flex;flex-direction:column;gap:14px">
+    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0">
+      <input type="checkbox" id="gov-nl" style="width:16px;height:16px;accent-color:var(--acc)">
+      <span>
+        <strong>New members can't post links</strong>
+        <span style="display:block;color:var(--mu);font-size:12px">Posts from newcomers may not contain URLs — a common spam/scam vector.</span>
+      </span>
+    </label>
+    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0">
+      <input type="checkbox" id="gov-nc" style="width:16px;height:16px;accent-color:var(--acc)">
+      <span>
+        <strong>New members can't create channels</strong>
+        <span style="display:block;color:var(--mu);font-size:12px">Newcomers may post and comment but not spin up new channels.</span>
+      </span>
+    </label>
+    <label style="margin:0">
+      <strong style="color:var(--tx);font-size:14px">Who can create channels</strong>
+      <span style="display:block;color:var(--mu);font-size:12px;margin-bottom:6px">Restrict channel creation across the whole community.</span>
+      <select id="gov-cc" style="height:34px;padding:0 10px;font-size:13px;background:var(--surf);border:1px solid var(--bdr);color:var(--tx);border-radius:6px;outline:none">
+        <option value="any">Any member</option>
+        <option value="mods">Moderators only</option>
+        <option value="org">Organizer only</option>
+      </select>
+    </label>
+  </div>
+  <div class="row">
+    <button class="btn" id="pub-gov-btn" onclick="publishGov()">⇪ Save &amp; publish governance</button>
+  </div>
+  <div id="gov-err" class="err" style="display:none"></div>
+  <div id="gov-pub" class="ok" style="display:none"></div>
+</section>
+
+<!-- COMMUNITY (config) -->
+<section id="tab-community-cfg">
+  <h2>Community</h2>
+  <p class="sub">Your community's identity and posting settings. Name, description, and icon show in the app shell; the accent tints the UI; the announcement banner appears at the top of the <strong>Log</strong> tab. Publishing signs a kind-30078 stiq:community event your members receive live.</p>
+  <label style="margin-top:0">Name</label>
+  <input type="text" id="cc-nm" placeholder="My community" style="width:100%;height:36px;padding:0 11px;font-size:13px">
+  <label>Description</label>
+  <textarea id="cc-desc" rows="3" placeholder="A short tagline shown in the app." style="width:100%;padding:11px;font-size:13px;font-family:inherit;line-height:1.5;resize:vertical"></textarea>
+  <label>Icon (emoji or image URL)</label>
+  <input type="text" id="cc-icn" placeholder="🌿  or  https://…/icon.png" style="width:100%;height:36px;padding:0 11px;font-size:13px">
+  <label>Accent color</label>
+  <input type="color" id="cc-acc" value="#8a8f98" style="width:54px;height:38px;padding:0;border:1px solid var(--bdr);border-radius:8px;background:none;cursor:pointer">
+  <label>Default feed view</label>
+  <select id="cc-dv" style="height:34px;padding:0 10px;font-size:13px;background:var(--surf);border:1px solid var(--bdr);color:var(--tx);border-radius:6px;outline:none">
+    <option value="list">List</option>
+    <option value="topics">Topics</option>
+    <option value="conversation">Conversation</option>
+  </select>
+  <label>Edit window (seconds)</label>
+  <span style="display:block;color:var(--mu);font-size:12px;margin-bottom:6px">How long after posting a member may still edit their own post. <strong>0 = no edits.</strong></span>
+  <input type="text" id="cc-ew" value="0" style="width:90px;height:34px;padding:0 11px;font-size:13px">
+  <div class="divider"></div>
+  <div style="display:flex;flex-direction:column;gap:12px">
+    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0">
+      <input type="checkbox" id="cc-ae" style="width:16px;height:16px;accent-color:var(--acc)">
+      <span><strong>Allow members to edit their own posts</strong></span>
+    </label>
+    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin:0">
+      <input type="checkbox" id="cc-ad" style="width:16px;height:16px;accent-color:var(--acc)">
+      <span><strong>Allow members to delete their own posts</strong></span>
+    </label>
+  </div>
+  <div class="divider"></div>
+  <label style="margin-top:0">Announcement banner</label>
+  <span style="display:block;color:var(--mu);font-size:12px;margin-bottom:6px">⚠ Shown only by <strong>older app builds</strong> — the redesigned Log tab replaced this banner with the <strong>Log Page</strong> note (edit the note there; a changed note re-opens itself for every member). Keep this filled only while members are still on old builds. Leave blank for none.</span>
+  <textarea id="cc-ann-t" rows="2" placeholder="e.g. Welcome! Read the guide before posting." style="width:100%;padding:11px;font-size:13px;font-family:inherit;line-height:1.5;resize:vertical"></textarea>
+  <label>Auto-hide the banner (optional)</label>
+  <span style="display:block;color:var(--mu);font-size:12px;margin-bottom:6px">Pick a date &amp; time to hide it automatically, or leave blank to keep it up until you clear the text above.</span>
+  <input type="datetime-local" id="cc-ann-u" style="width:220px;height:34px;padding:0 11px;font-size:13px">
+  <div class="row">
+    <button class="btn" id="pub-community-btn" onclick="publishCommunity()">⇪ Save &amp; publish community</button>
+  </div>
+  <div id="community-err" class="err" style="display:none"></div>
+  <div id="community-pub" class="ok" style="display:none"></div>
+</section>
+
+<!-- LOG PAGE (the hearth: replaces the old Featured + Guide tabs) -->
+<section id="tab-logpage">
+  <h2>Log Page</h2>
+  <p class="sub">This panel controls <strong>everything</strong> members see on the <strong>Log</strong> tab's front room — every piece of text below is yours. The moderation log itself (the append-only record behind the doorway) is <strong>not editable by anyone, you included</strong>. Publishing signs one kind-30078 <strong>stiq:log-page</strong> event your members receive live.</p>
+  <div id="lp-seeded-note" class="info" style="display:none">This form was pre-filled from your old <strong>Guide</strong> + <strong>Featured</strong> settings. Publishing once migrates them into the new Log Page — nothing changes for members until you do.</div>
+
+  <h3 style="font-size:13px;margin:18px 0 0">🖊 A note from you</h3>
+  <p class="sub" style="margin-top:4px">A warm, first-person letter at the top of the Log tab, set in the app's own font. Members can tuck it away — it only re-opens for everyone when you change its <strong>text</strong> (the server bumps its version then; edits elsewhere on this page never do). Leave the body empty to show no note at all.</p>
+  <label style="margin-top:0">Title <span style="color:var(--mu);font-size:11px">— blank uses "A note from &lt;your display name&gt;"</span></label>
+  <input type="text" id="lp-note-title" placeholder="A note from your display name" style="width:100%;height:36px;padding:0 11px;font-size:13px">
+  <label>Sub-line <span style="color:var(--mu);font-size:11px">— blank uses "started this community · npub…"</span></label>
+  <input type="text" id="lp-note-sub" placeholder="started this community · npub…" style="width:100%;height:36px;padding:0 11px;font-size:13px">
+  <label>Note body <span style="color:var(--mu);font-size:11px">— empty = no note shown at all</span></label>
+  <textarea id="lp-note-body" rows="7" placeholder="Welcome. This space is yours as much as it is ours…" style="width:100%;padding:11px;font-size:13px;font-family:inherit;line-height:1.5;resize:vertical"></textarea>
+  <label>Signature</label>
+  <input type="text" id="lp-note-sig" placeholder="— Mara ✦" style="width:260px;height:36px;padding:0 11px;font-size:13px">
+
+  <label style="margin-top:16px">Note avatar gradient</label>
+  <div class="info">The little gradient circle at the note's top-left. Off = the app shows your live profile gradient.</div>
+  <label style="display:flex;align-items:center;gap:8px;margin-top:10px">
+    <input type="checkbox" id="lp-grad-on" onchange="lpGradControlsEnabled(); updateLpGradPreview()" style="width:16px;height:16px;accent-color:var(--acc)">
+    Pick a custom gradient
+  </label>
+  <div class="row" style="align-items:center;gap:10px">
+    <select id="lp-grad-type" onchange="updateLpGradPreview()" style="height:34px;padding:0 10px;font-size:13px;background:var(--surf);border:1px solid var(--bdr);color:var(--tx);border-radius:6px;outline:none">
+      <option value="linear">Linear</option>
+      <option value="radial">Radial</option>
+    </select>
+    <input type="number" id="lp-grad-angle" min="0" max="359" value="135" oninput="updateLpGradPreview()" style="width:70px;height:34px;padding:0 8px;font-size:13px">
+    <input type="color" id="lp-grad-c1" value="#f472b6" oninput="updateLpGradPreview()" style="width:44px;height:34px;padding:0;border:1px solid var(--bdr);border-radius:6px;background:none;cursor:pointer">
+    <input type="color" id="lp-grad-c2" value="#7cb2ff" oninput="updateLpGradPreview()" style="width:44px;height:34px;padding:0;border:1px solid var(--bdr);border-radius:6px;background:none;cursor:pointer">
+    <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--mu);margin-top:0">
+      <input type="checkbox" id="lp-grad-c3-on" onchange="updateLpGradPreview()" style="width:16px;height:16px;accent-color:var(--acc)">
+      3rd stop
+    </label>
+    <input type="color" id="lp-grad-c3" value="#b89aff" oninput="updateLpGradPreview()" style="width:44px;height:34px;padding:0;border:1px solid var(--bdr);border-radius:6px;background:none;cursor:pointer">
+    <span id="lp-grad-preview" style="width:42px;height:42px;border-radius:50%;display:inline-block;vertical-align:middle;border:1px solid var(--bdr)"></span>
+  </div>
+
+  <h3 style="font-size:13px;margin:26px 0 0">👋 Welcome message <span style="color:var(--mu);font-weight:normal;font-size:11px">— a first greeting, then it hands over to your note</span></h3>
+  <p class="sub" style="margin-top:4px">Shown when a member <strong>first enters</strong> the community. After the time below — counted per member, from their own first entry — it's replaced by the note above. Leave the body empty to show no welcome (members go straight to the note). Uses your profile gradient for its avatar.</p>
+  <label style="margin-top:0">Title <span style="color:var(--mu);font-size:11px">— blank uses "A welcome from &lt;your display name&gt;"</span></label>
+  <input type="text" id="lp-wel-title" placeholder="Welcome!" style="width:100%;height:36px;padding:0 11px;font-size:13px">
+  <label>Sub-line</label>
+  <input type="text" id="lp-wel-sub" placeholder="glad you're here" style="width:100%;height:36px;padding:0 11px;font-size:13px">
+  <label>Welcome body <span style="color:var(--mu);font-size:11px">— empty = no welcome shown</span></label>
+  <textarea id="lp-wel-body" rows="6" placeholder="Welcome to the community. Here's what to check out first…" style="width:100%;padding:11px;font-size:13px;font-family:inherit;line-height:1.5;resize:vertical"></textarea>
+  <label>Signature</label>
+  <input type="text" id="lp-wel-sig" placeholder="— the organizers" style="width:260px;height:36px;padding:0 11px;font-size:13px">
+  <label style="margin-top:14px">Shows for</label>
+  <div class="row" style="align-items:center;gap:8px">
+    <input type="number" id="lp-wel-dur-n" min="1" value="2" style="width:80px;height:34px;padding:0 8px;font-size:13px">
+    <select id="lp-wel-dur-u" style="height:34px;padding:0 10px;font-size:13px;background:var(--surf);border:1px solid var(--bdr);color:var(--tx);border-radius:6px;outline:none">
+      <option value="days">days</option>
+      <option value="hours">hours</option>
+    </select>
+    <span style="color:var(--mu);font-size:12px">from each member's first entry</span>
+  </div>
+
+  <h3 style="font-size:13px;margin:26px 0 0">📜 Standing rules <span style="color:var(--mu);font-weight:normal;font-size:11px">— shown inside the note, behind a toggle</span></h3>
+  <p class="sub" style="margin-top:4px">Empty body = no rules, and the note's rules toggle disappears for members.</p>
+  <label style="margin-top:0">Eyebrow <span style="color:var(--mu);font-size:11px">— blank uses "Standing rules"</span></label>
+  <input type="text" id="lp-rules-eyebrow" placeholder="Standing rules" style="width:100%;height:36px;padding:0 11px;font-size:13px">
+  <label>Rules body (Markdown supported)</label>
+  <textarea id="lp-rules-body" rows="10" placeholder="1. Be kind.&#10;2. …" style="width:100%;padding:11px;font-size:13px;font-family:inherit;line-height:1.5;resize:vertical"></textarea>
+  <label>Meta-line override <span style="color:var(--mu);font-size:11px">— blank derives "Set by the organizers · updated 2d ago"</span></label>
+  <input type="text" id="lp-rules-meta" placeholder="Set by the organizers · updated 2d ago" style="width:100%;height:36px;padding:0 11px;font-size:13px">
+  <label style="display:flex;align-items:center;gap:8px;margin-top:14px">
+    <input type="checkbox" id="lp-rules-x" style="width:16px;height:16px;accent-color:var(--acc)">
+    Start expanded inside the note
+  </label>
+
+  <h3 style="font-size:13px;margin:26px 0 0">📌 Picked by the organizers</h3>
+  <p class="sub" style="margin-top:4px">Channels and groups you want members to find first. <strong>The order here is the order members see</strong>; use ↑/↓ to rank and ✕ to remove. <strong>You choose what to pick, not its name</strong> — a channel's live title always wins; the <em>Fallback name</em> below is only ever used if a member's app can't see it yet.</p>
+
+  <!-- PICKER: load the community's channels + groups + featureable people from the relay, click to add. -->
+  <div style="border:1px solid var(--bdr);border-radius:10px;padding:12px;margin-top:14px">
+    <div class="row" style="align-items:center;gap:10px">
+      <button class="btn secondary sm" id="lp-load-btn" onclick="loadLpDiscover()">🔄 Load from relay</button>
+      <input type="text" id="lp-search" placeholder="Filter by name…" oninput="renderLpPicker()"
+             style="flex:1;min-width:140px;height:34px;padding:0 11px;font-size:13px">
+    </div>
+    <p class="sub" style="margin:8px 0 0">Channels ride the firehose so they all appear here and add to your <strong>picks</strong>. Groups are found from their create events and add to your <strong>picks</strong> too. People are your moderators plus channel/group owners/admins, and add to <strong>people worth knowing</strong> below.</p>
+    <div id="lp-picker" style="margin-top:10px"></div>
+  </div>
+
+  <label style="margin-top:16px;display:block">Picks, in order</label>
+  <div id="lp-pick-rows" style="margin-top:8px"></div>
+  <div class="row">
+    <button class="btn secondary" onclick="addLpPick()">+ Add manually</button>
+  </div>
+
+  <h3 style="font-size:13px;margin:26px 0 0">👥 People worth knowing</h3>
+  <p class="sub" style="margin-top:4px">Moderators, hosts, anyone you want to introduce. The <em>role</em> is your one-line description; the <em>fallback name</em> is only used if a member's app can't yet see this person's own display name.</p>
+  <div id="lp-people-rows" style="margin-top:8px"></div>
+  <div class="row">
+    <button class="btn secondary" onclick="addLpPerson()">+ Add person</button>
+  </div>
+  <label style="display:flex;align-items:center;gap:8px;margin-top:14px">
+    <input type="checkbox" id="lp-sp" checked style="width:16px;height:16px;accent-color:var(--acc)">
+    Show the people rail
+  </label>
+
+  <h3 style="font-size:13px;margin:26px 0 0">🕯 Doorway &amp; copy</h3>
+  <p class="sub" style="margin-top:4px">The wording around the doorway into the moderation log, and the headers above your picks/people. Leave any field blank to use the app's built-in copy (shown as its placeholder below).</p>
+  <label style="margin-top:0">Doorway title</label>
+  <input type="text" id="lp-dt" placeholder="Open the community log" style="width:100%;height:36px;padding:0 11px;font-size:13px">
+  <label>Doorway sub <span style="color:var(--mu);font-size:11px">— <code>{n}</code> = live action count, <code>{m}</code> = distinct moderators; the app fills them in</span></label>
+  <input type="text" id="lp-ds" placeholder="{n} actions · {m} moderators · every one explained" style="width:100%;height:36px;padding:0 11px;font-size:13px">
+  <label>Motto</label>
+  <input type="text" id="lp-mo" placeholder="✦ nothing here ever disappears quietly ✦" style="width:100%;height:36px;padding:0 11px;font-size:13px">
+  <label>Picks header</label>
+  <input type="text" id="lp-ph" placeholder="Picked by the organizers" style="width:100%;height:36px;padding:0 11px;font-size:13px">
+  <label>People header</label>
+  <input type="text" id="lp-pph" placeholder="People worth knowing" style="width:100%;height:36px;padding:0 11px;font-size:13px">
+
+  <details style="margin-top:16px">
+    <summary style="cursor:pointer;color:var(--mu);font-size:12px">Advanced labels</summary>
+    <label>Rules — show label</label>
+    <input type="text" id="lp-rs" placeholder="Read the standing rules" style="width:100%;height:36px;padding:0 11px;font-size:13px">
+    <label>Rules — hide label</label>
+    <input type="text" id="lp-rh" placeholder="Hide the standing rules" style="width:100%;height:36px;padding:0 11px;font-size:13px">
+    <label>Tuck-away label</label>
+    <input type="text" id="lp-tk" placeholder="Tuck away" style="width:100%;height:36px;padding:0 11px;font-size:13px">
+    <label>Reopen label</label>
+    <input type="text" id="lp-ro" placeholder="reopen" style="width:100%;height:36px;padding:0 11px;font-size:13px">
+  </details>
+
+  <label style="display:flex;align-items:center;gap:8px;margin-top:16px">
+    <input type="checkbox" id="lp-au" checked style="width:16px;height:16px;accent-color:var(--acc)">
+    Aurora wash behind the page
+  </label>
+
+  <div class="row">
+    <button class="btn" id="pub-lp-btn" onclick="publishLogPage()">⇪ Save &amp; publish log page</button>
+  </div>
+  <div id="lp-err" class="err" style="display:none"></div>
+  <div id="lp-pub" class="ok" style="display:none"></div>
+</section>
+
+<!-- RISING -->
+<section id="tab-ranking">
+  <h2>Rising Algorithm</h2>
+  <p class="sub">Tune the feed's <strong>Rising</strong> sort. A post's score adds up <strong>four independent signals</strong> — time, votes, comments, and all-time score — then scales the total by the post's <strong>type</strong> and <strong>length</strong>. Every weight is <strong>0 = off</strong>, so any signal can be switched out of the algorithm entirely. All four are measured on the same scale, so the weights are directly comparable: at equal weight, a vote and a comment count the same. Publishing signs a kind-30078 stiq:ranking event applied live in every app.</p>
+  <pre style="background:var(--surf);border:1px solid var(--bdr);border-radius:6px;padding:11px;font-family:var(--mono);font-size:11px;color:var(--mu);overflow-x:auto;margin:0 0 4px">( time×freshness + votes×log(1+recent votes) + comments×log(1+recent commenters) + score×log(1+score) ) × type × ( 1 + length×log(1+words) )</pre>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:22px;align-items:start">
+   <div>
+    <h3 style="font-size:13px;margin:18px 0 0">⏱ Time <span style="color:var(--mu);font-weight:normal;font-size:11px">— freshness, on its own clock</span></h3>
+    <p class="sub" style="margin-top:4px">Time is its <strong>own signal, independent of votes</strong>: a post starts at full freshness the moment it's published and decays from there, whether or not anyone has voted. This is what lets a brand-new post surface before it gets its first vote. Set the weight to 0 and age only reaches the feed through the timestamps of a post's votes.</p>
+    <label style="margin-top:0">Time weight <span style="color:var(--mu);font-size:11px">— default 1</span></label>
+    <input type="text" id="rank-tw" style="width:110px;height:34px;padding:0 11px;font-size:13px">
+    <label>Freshness half-life (hours) <span style="color:var(--mu);font-size:11px">— time until a post is half as fresh (default 6)</span></label>
+    <input type="text" id="rank-thl" style="width:110px;height:34px;padding:0 11px;font-size:13px">
+
+    <h3 style="font-size:13px;margin:22px 0 0">▲ Votes</h3>
+    <p class="sub" style="margin-top:4px">Recent votes, each decaying on its own half-life, so a burst of interest now outranks a stale favourite. Damped, so a landslide can't drown every other signal. <strong>Score</strong> is separate: it's the post's all-time approval, which keeps proven posts visible below actively-rising ones.</p>
+    <label style="margin-top:0">Vote weight <span style="color:var(--mu);font-size:11px">— default 1</span></label>
+    <input type="text" id="rank-vw" style="width:110px;height:34px;padding:0 11px;font-size:13px">
+    <label>Vote half-life (hours) <span style="color:var(--mu);font-size:11px">— lower = recent votes dominate (default 3.85)</span></label>
+    <input type="text" id="rank-hl" style="width:110px;height:34px;padding:0 11px;font-size:13px">
+    <label>Score weight <span style="color:var(--mu);font-size:11px">— 0 = pure velocity (default 0.1)</span></label>
+    <input type="text" id="rank-sw" style="width:110px;height:34px;padding:0 11px;font-size:13px">
+   </div>
+   <div>
+    <h3 style="font-size:13px;margin:18px 0 0">💬 Comments</h3>
+    <p class="sub" style="margin-top:4px">How much active discussion lifts a post. Counts <strong>distinct people</strong>, not comments — one member replying fifty times is one person talking, not a crowd — and each commenter decays on the half-life below, so a thread that died yesterday stops rising however long it got. <strong>Default 0 = comments don't affect Rising.</strong></p>
+    <label style="margin-top:0">Comment weight <span style="color:var(--mu);font-size:11px">— same scale as votes (default 0)</span></label>
+    <input type="text" id="rank-cw" style="width:110px;height:34px;padding:0 11px;font-size:13px">
+    <label>Comment half-life (hours) <span style="color:var(--mu);font-size:11px">— independent of the vote half-life (default 6)</span></label>
+    <input type="text" id="rank-chl" style="width:110px;height:34px;padding:0 11px;font-size:13px">
+
+    <h3 style="font-size:13px;margin:22px 0 0">📏 Length</h3>
+    <p class="sub" style="margin-top:4px">Rewards longer, more substantial writing. Measured in <strong>words of prose</strong> — pictures and voice notes never count, so a one-word note carrying a big picture is not a long post. The boost saturates, so a 5,000-word wall doesn't bury a good 500-word piece. <strong>Default 0 = length doesn't affect Rising.</strong></p>
+    <label style="margin-top:0">Length weight <span style="color:var(--mu);font-size:11px">— at 0.5 a 500-word post ranks ~2.6× a two-word one (default 0)</span></label>
+    <input type="text" id="rank-lw" style="width:110px;height:34px;padding:0 11px;font-size:13px">
+
+    <h3 style="font-size:13px;margin:22px 0 0">📄 Type</h3>
+    <p class="sub" style="margin-top:4px">Promote a whole post type — e.g. set <strong>Article</strong> to 1.5 to rank articles half again as high as notes. This multiplies a post's <em>whole</em> score, so it's proportional, not a handout: a dead article still won't outrank a lively note. Pictures and voice notes ride inside a note or an article, so they follow their carrier's weight. <strong>1 = neutral.</strong></p>
+    <p class="sub" style="margin-top:6px"><strong>These two stack.</strong> Articles are long by definition, so raising Article <em>and</em> Length multiplies the same posts twice — an article at 1.5 with Length 0.3 ends up around 4–5× a short note, not 1.5×. The preview below shows the real total; trust it over the individual numbers.</p>
+    <table>
+      <thead><tr><th>Type</th><th>Weight</th></tr></thead>
+      <tbody>
+        <tr><td>Note <span style="color:var(--mu);font-size:11px">(short, tweet-like)</span></td>
+          <td><input type="text" id="rank-ty-n" class="lim" title="Multiplier on a note's Rising score; 1 = neutral"></td></tr>
+        <tr><td>Article <span style="color:var(--mu);font-size:11px">(titled long-form)</span></td>
+          <td><input type="text" id="rank-ty-a" class="lim" title="Multiplier on an article's Rising score; 1 = neutral"></td></tr>
+      </tbody>
+    </table>
+   </div>
+  </div>
+
+  <h3 style="font-size:13px;margin:26px 0 0">👁 Preview <span style="color:var(--mu);font-weight:normal;font-size:11px">— how these weights would order a sample feed, live as you type</span></h3>
+  <p class="sub" style="margin-top:4px">Six representative posts, ranked by the weights above. The bar shows what each signal contributed, so you can see <em>why</em> a post is where it is. Illustrative only — it does not read your live feed, and nothing here is published until you press the button.</p>
+  <div id="rank-preview" style="background:var(--surf);border:1px solid var(--bdr);border-radius:6px;padding:13px"></div>
+
+  <div class="row">
+    <button class="btn" id="pub-ranking-btn" onclick="publishRanking()">⇪ Save &amp; publish ranking</button>
+  </div>
+  <div id="ranking-err" class="err" style="display:none"></div>
+  <div id="ranking-pub" class="ok" style="display:none"></div>
+</section>
+
+<!-- STORAGE -->
+<section id="tab-storage">
+  <h2>Storage &amp; Retention</h2>
+  <p class="sub">Tune how aggressively members' phones compact their local database. Higher caps keep more history but use more storage; lower caps suit low-storage phones. Publishing signs a kind-30078 stiq:storage event applied live in every app. Leave unpublished to keep each app's built-in defaults (nothing changes).</p>
+  <label style="margin-top:0">Reaction cap <span style="color:var(--mu);font-size:11px">— max reaction/vote rows kept (200–100000, default 8000)</span></label>
+  <input type="number" id="sto-rc" min="200" max="100000" step="100" style="width:140px;height:36px;padding:0 11px;font-size:13px">
+  <label>Timeline cap <span style="color:var(--mu);font-size:11px">— max timeline/post rows kept per kind (200–100000, default 3000)</span></label>
+  <input type="number" id="sto-tc" min="200" max="100000" step="100" style="width:140px;height:36px;padding:0 11px;font-size:13px">
+  <label>Max age (days) <span style="color:var(--mu);font-size:11px">— expire transient events older than this; 0 = off (default 0)</span></label>
+  <input type="number" id="sto-ma" min="0" step="1" style="width:140px;height:36px;padding:0 11px;font-size:13px">
+  <label style="display:flex;align-items:center;gap:8px;margin-top:14px">
+    <input type="checkbox" id="sto-cr" style="width:auto;height:auto"> Collapse superseded replaceable events <span style="color:var(--mu);font-size:11px">— keep only the newest version (default on)</span>
+  </label>
+  <div class="row">
+    <button class="btn" id="pub-storage-btn" onclick="publishStorage()">⇪ Save &amp; publish storage policy</button>
+  </div>
+  <div id="storage-err" class="err" style="display:none"></div>
+  <div id="storage-pub" class="ok" style="display:none"></div>
+</section>
+
+<section id="tab-safebrowsing">
+  <h2>Safe Browsing</h2>
+  <p class="sub">Optional per-link reputation check. When a key is set, the relay checks links your members open against Google Safe Browsing <strong>over Tor</strong> — the URL never leaves the device (only 4-byte hash prefixes reach the relay, which forwards them to Google). This key is a <strong>relay secret</strong>: it is written to the relay config on this box only, never published or shared with members. Leave it off and members still get the local checks (punycode, dangerous schemes, tracker stripping).</p>
+  <div id="sb-status" class="sub" style="margin:0 0 14px">Loading…</div>
+  <label style="margin-top:0">
+    <strong style="color:var(--tx);font-size:14px">Google Safe Browsing API key</strong>
+    <span style="display:block;color:var(--mu);font-size:12px;margin-bottom:6px">Enable the free (non-commercial) “Safe Browsing API” at <span style="color:var(--tx)">console.cloud.google.com/apis/library/safebrowsing.googleapis.com</span>, create an API key under <strong>Credentials</strong>, and paste it here.</span>
+    <input type="password" id="sb-key" placeholder="AIza…" autocomplete="off" style="width:100%;height:36px;padding:0 11px;font-size:13px">
+  </label>
+  <div class="row">
+    <button class="btn" id="sb-save-btn" onclick="saveSafeBrowsing()">Save key</button>
+    <button class="btn" id="sb-clear-btn" onclick="clearSafeBrowsing()" style="background:none;border:1px solid var(--bdr);color:var(--mu)">Turn off</button>
+  </div>
+  <div id="sb-err" class="err" style="display:none"></div>
+  <div id="sb-ok" class="ok" style="display:none"></div>
+</section>
+
+<!-- RELAYS (community mirrors) -->
+<section id="tab-relays">
+  <h2>Relays <span class="badge" id="mirror-count">—</span></h2>
+  <p class="sub">Publish extra relay mirrors for the community by onion address, then <strong>Publish relay list</strong> — it signs a kind-30078 event with your organizer key and sends it to the relay. Every app already tries these mirrors if the primary relay is unreachable, no app rebuild. <strong>Mirrors are additive for members</strong>: a published list can only ADD relays the app tries — it can never remove a relay a member already added or trusts themselves.</p>
+  <div class="row" style="margin-top:0">
+    <input type="text" id="mirror-url-in" placeholder="ws://<56-char-base32>.onion" style="flex:2;min-width:260px;height:40px;padding:0 11px;font-size:13px">
+    <input type="text" id="mirror-auth-in" placeholder="onion auth key (optional)" style="flex:1;min-width:180px;height:40px;padding:0 11px;font-size:13px">
+    <button class="btn" onclick="addMirror()">Add relay</button>
+  </div>
+  <span style="display:block;color:var(--mu);font-size:11px;margin-top:6px">URL must be a v3 onion WebSocket address — <code>ws://</code> or <code>wss://</code> plus a 56-character base32 host ending in <code>.onion</code>. Leave the auth key blank for a public onion. Up to 5 relays.</span>
+  <div id="mirror-err" class="err" style="display:none"></div>
+  <div id="mirror-list" style="margin-top:16px">
+    <span style="color:var(--mu);font-size:13px">No relay mirrors yet.</span>
+  </div>
+  <div class="row">
+    <button class="btn" id="pub-mirrors-btn" onclick="publishMirrors()">⇪ Publish relay list</button>
+  </div>
+  <div id="mirrors-pub" class="ok" style="display:none"></div>
+</section>
+
+<!-- POSTING GUIDELINES -->
+<section id="tab-guidelines">
+  <h2>Guidelines <span class="badge" id="gl-status">—</span></h2>
+  <p class="sub">Powers the rules banner members see at the top of the post composer, and the full covenant sheet behind <strong>"Read the full covenant ›"</strong>. The version bumps only when the content actually changes — members see the banner re-open once per new version. Publishing signs a kind-30078 stiq:posting-guidelines event.</p>
+
+  <label style="margin-top:0">Rules blurb <span style="color:var(--mu);font-size:11px">— one rule per line, up to 4 lines, shown in the composer banner</span></label>
+  <textarea id="gl-blurb" rows="4" placeholder="Be kind.&#10;No spam.&#10;Credit your sources.&#10;Stay on topic." style="width:100%;padding:11px;font-size:13px;font-family:inherit;line-height:1.5;resize:vertical"></textarea>
+
+  <div class="divider"></div>
+
+  <h3 style="font-size:13px;margin:0 0 4px">Covenant sections <span style="color:var(--mu);font-weight:normal;font-size:11px">— the full covenant sheet, up to 8 sections</span></h3>
+  <p class="sub" style="margin-top:4px">Each section is a heading plus a list of items — one per line, up to 10 items, 300 characters each.</p>
+  <div id="gl-sections"></div>
+  <button class="btn sm" onclick="addGuidelinesSection()">+ Add section</button>
+
+  <div class="divider"></div>
+
+  <label style="margin-top:0">What changed <span style="color:var(--mu);font-size:11px">— one row per line: <code>~</code> a change, <code>+</code> an addition (other lines ignored), up to 6 rows</span></label>
+  <textarea id="gl-diff" rows="4" placeholder="~ Clarified the media rule&#10;+ Added a section on sourcing" style="width:100%;padding:11px;font-size:13px;font-family:inherit;line-height:1.5;resize:vertical"></textarea>
+
+  <div class="row">
+    <button class="btn" id="pub-guidelines-btn" onclick="publishGuidelines()">⇪ Save &amp; publish guidelines</button>
+  </div>
+  <div id="guidelines-err" class="err" style="display:none"></div>
+  <div id="guidelines-pub" class="ok" style="display:none"></div>
+</section>
+
+<!-- MAINTENANCE -->
+<section id="tab-maintenance">
+  <h2>Maintenance</h2>
+  <p class="sub">Housekeeping to keep the dashboard fast and tidy. Nothing here touches live members or
+    active invites.</p>
+
+  <h3 style="margin-top:22px">Spent invite codes</h3>
+  <p class="sub">Delete every invite that's expired or fully used. Active and partially-used codes are
+    kept. This shrinks the invite list the dashboard loads each time you open it. A leftover code that
+    was still mid-redemption simply re-issues a fresh credential — never a duplicate member.</p>
+  <div class="row" style="margin-top:12px">
+    <button class="btn danger" id="mnt-purge-btn" onclick="purgeSpentInvites()">Delete spent codes</button>
+  </div>
+  <div id="mnt-purge-out" class="ok" style="display:none;margin-top:10px"></div>
+
+  <div class="divider"></div>
+
+  <h3>Dashboard app files</h3>
+  <p class="sub">The dashboard now caches its own code (about 360 KB) so it doesn't re-download on every
+    page load — a big deal over Tor. It refreshes automatically whenever the organizer service
+    restarts. Use this only if the interface looks stale or you've just deployed an update and want to
+    force every device to pull the newest files.</p>
+  <div class="row" style="margin-top:12px">
+    <button class="btn" id="mnt-bust-btn" onclick="bustAssetCache()">Refresh app files</button>
+  </div>
+</section>
+
+</main>
+
+<script src="/organizer-ui.js?v=__ASSET_V_TOKEN__"></script>
+</body>
+</html>

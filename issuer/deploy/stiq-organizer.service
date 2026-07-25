@@ -1,0 +1,32 @@
+[Unit]
+Description=STIQ Organizer (dashboard + auto-enrollment Tor mailbox)
+Documentation=https://github.com/stiq
+After=network-online.target stiq-relay.service
+Wants=network-online.target
+# The mailbox talks to the relay over loopback; start after it when both are present.
+After=stiq-relay.service
+
+[Service]
+Type=simple
+User=stiq
+Group=stiq
+WorkingDirectory=/opt/stiq-organizer/issuer
+# Reach the co-located relay directly over loopback (no Tor hop needed on the organizer side).
+Environment=RELAY_WS=ws://127.0.0.1:3334
+# NIP-13 difficulty mined on enroll responses — MUST equal the relay's enroll_pow.
+Environment=STIQ_ENROLL_POW=12
+# Dashboard binds loopback only; reach it via SSH tunnel (ssh -L 7799:127.0.0.1:7799 ...).
+Environment=STIQ_BIND=127.0.0.1
+Environment=STIQ_COMMUNITY_NAME=stiq community
+Environment=STIQ_ORGANIZER_LABEL=organizer
+ExecStart=/usr/bin/node organizer-server.mjs 7799
+Restart=on-failure
+RestartSec=5
+# Hardening — the issuer RSA key + organizer Nostr key live in this process.
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

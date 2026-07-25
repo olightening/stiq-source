@@ -1,0 +1,68 @@
+# Resolve react_native_pods.rb with node to allow for hoisting
+require Pod::Executable.execute_command('node', ['-p',
+  'require.resolve(
+    "react-native/scripts/react_native_pods.rb",
+    {paths: [process.argv[1]]},
+  )', __dir__]).strip
+
+# Old Architecture, pinned — parity with Android's android/gradle.properties `newArchEnabled=false`.
+# RN 0.76 defaults New Arch (Fabric/TurboModules) ON unless RCT_NEW_ARCH_ENABLED=0 is set at
+# pod-install time. STIQ runs on the OLD architecture on both platforms: the sync StiqSchnorr module
+# depends on old-arch bridge macros (RCT_EXTERN__BLOCKING_SYNCHRONOUS_METHOD), and every other native
+# module here is a classic RCTEventEmitter/RCTBridgeModule. Leaving this unset silently builds a
+# Fabric app that diverges from the shipping Android binary — set it before prepare_react_native_project!.
+ENV['RCT_NEW_ARCH_ENABLED'] = '0'
+
+platform :ios, min_ios_version_supported
+prepare_react_native_project!
+
+linkage = ENV['USE_FRAMEWORKS']
+if linkage != nil
+  Pod::UI.puts "Configuring Pod with #{linkage}ally linked Frameworks".green
+  use_frameworks! :linkage => linkage.to_sym
+end
+
+target 'stiq' do
+  config = use_native_modules!
+
+  use_react_native!(
+    :path => config[:reactNativePath],
+    # An absolute path to your application root.
+    :app_path => "#{Pod::Config.instance.installation_root}/.."
+  )
+
+  # Bundled Tor daemon (StiqTor.swift, behind #if canImport(Tor)) — PLAN.md §3.2 / Step 4.
+  #   Tor       — Tor.framework (iCepa), tor 0.4.9.x. Builds tor/openssl/libevent from source.
+  #   IPtProxy  — obfs4/webtunnel/snowflake pluggable transports (Lyrebird). 5.5.0 matches the
+  #               Android build (IPtProxy 5.5.0), same Controller API.
+  # RE-VERIFY BY 2027-01-12: on 2026-07-10 the community's onions went dark for ~5 days because a
+  # still-widely-deployed tor 0.4.6.10 hit its network EOL and stopped receiving a valid consensus
+  # (see the stiq-tor-eol-consensus-outage handoff). This pin (iCepa's "409.10" encodes tor 0.4.9.x)
+  # and client/src/tor/torVersion.ts's TOR_MIN_SUPPORTED_VERSION (warn-only runtime guard in the
+  # SHARED TorManager.ts — both platforms report torVersion on the 'connected' event) MUST be bumped
+  # TOGETHER whenever either moves — a newer bundled daemon with a stale floor (or vice versa)
+  # silently reintroduces that same outage risk. client/src/tor/torVersionPin.test.ts checks this
+  # pin AND the Podfile.lock-resolved pod version against that floor.
+  # :modular_headers is REQUIRED. Without use_frameworks!, CocoaPods builds Tor/Core (the Obj-C
+  # TORConfiguration/TORController/TORThread wrapper) as a plain static lib with NO module map, so
+  # `import Tor` fails and StiqTor.swift silently falls into its offline `#else` (now an #error).
+  # modular_headers generates the module map that makes `import Tor` / `canImport(Tor)` resolve.
+  # IPtProxy ships as a binary xcframework that already carries its own module map.
+  pod 'Tor', '~> 409.10', :modular_headers => true
+  pod 'IPtProxy', '~> 5.5'
+
+  target 'stiqTests' do
+    inherit! :complete
+    # Pods for testing
+  end
+
+  post_install do |installer|
+    # https://github.com/facebook/react-native/blob/main/packages/react-native/scripts/react_native_pods.rb#L197-L202
+    react_native_post_install(
+      installer,
+      config[:reactNativePath],
+      :mac_catalyst_enabled => false,
+      # :ccache_enabled => true
+    )
+  end
+end

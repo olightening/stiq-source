@@ -1,0 +1,17 @@
+pluginManagement { includeBuild("../node_modules/@react-native/gradle-plugin") }
+plugins { id("com.facebook.react.settings") }
+extensions.configure(com.facebook.react.ReactSettingsExtension){ ex -> ex.autolinkLibrariesFromCommand() }
+rootProject.name = 'stiq'
+include ':app'
+includeBuild('../node_modules/@react-native/gradle-plugin')
+
+// Additional maven repos needed for Tor + pluggable transport dependencies.
+// These are injected via dependencyResolutionManagement so they apply to all modules.
+dependencyResolutionManagement {
+    repositories {
+        google()
+        mavenCentral()
+        // Guardian Project: tor-android (info.guardianproject:tor-android)
+        maven { url "https://raw.githubusercontent.com/guardianproject/gpmaven/master" }
+    }
+}

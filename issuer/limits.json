@@ -1,0 +1,7 @@
+{
+  "posts": {"daily": 50, "weekly": 200, "monthly": 600},
+  "comments": {"daily": 200, "weekly": 800, "monthly": 2400},
+  "channel": {"daily": 100, "weekly": 400, "monthly": 1200},
+  "dm_global_per_min": 60,
+  "exempt_moderators": true
+}

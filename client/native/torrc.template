@@ -1,0 +1,36 @@
+# torrc fragment assembled at runtime by the native StiqTor module (PLAN.md Step 4).
+#
+# Lines marked [native] are added by the native module (it knows the bundled PT binary
+# path and the app-private data dir). Lines marked [ts] come from
+# client/src/tor/bridges.ts via buildTorrcBridgeLines().
+
+# [native] App-private state directory (TorStartConfig.dataDir)
+DataDirectory {{DATA_DIR}}
+
+# [native] Local SOCKS proxy the app routes ALL traffic through (TorStartConfig.socksPort;
+#          0 lets Tor pick a free port, reported back via the 'connected' event).
+SOCKSPort {{SOCKS_PORT}}
+
+# [native] Pluggable transport binary (IPtProxy bundles obfs4proxy + snowflake).
+#          For obfs4:
+ClientTransportPlugin obfs4 exec {{PT_BINARY}}
+#          For snowflake instead:
+# ClientTransportPlugin snowflake exec {{PT_BINARY}}
+
+# [ts] Enable bridges and list them (from buildTorrcBridgeLines):
+UseBridges 1
+Bridge {{BRIDGE_LINE_1}}
+# Bridge {{BRIDGE_LINE_2}} ...
+
+# [native] v3 onion client authorization (lever 2 — npub-blind relay-reach restriction).
+#          Present ONLY when the community code carried a shared onion-auth key (community-code v4).
+#          The native module writes {{ONION_AUTH_DIR}}/<host>.auth_private containing the single line
+#          `<host>:descriptor:x25519:<BASE32 privkey>` (see src/tor/onionAuth.ts) and adds:
+# ClientOnionAuthDir {{ONION_AUTH_DIR}}
+#          Without it a non-member who only knows the .onion address cannot resolve the descriptor,
+#          so cannot connect at all. The whole community shares one keypair, so reach stays
+#          npub-blind (the relay never learns which member connected).
+
+# Quietness on the client side too: do not write verbose logs to disk.
+Log err stderr
+SafeLogging 1

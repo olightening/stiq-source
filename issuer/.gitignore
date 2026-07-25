@@ -1,0 +1,41 @@
+# issuer_private.pem stays ignored (absent here). organizer_nostr.json + limits.json ARE
+# committed for the shared TEST setup so the organizer key + community code stay consistent
+# across machines. NOTE: organizer_nostr.json holds a BURNT test key (derived from a documented
+# public seed — see its "_seed"/"_notice" fields; anyone can recompute it) — testing only. A REAL
+# deployment's organizer_nostr.json must NEVER be committed; see the root .gitignore rule for it.
+issuer_private.pem
+issuer_public.pem
+relay_onion.txt
+relay_ws.txt
+dashboard_auth/
+tag_policy.json
+guide.json
+invites.json
+mailbox_seen.json
+storage.json
+
+# Content-epoch symmetric keys (K_E, rotating — seals post bodies). SECRET key material: a leak lets
+# anyone decrypt community content. Written at runtime by contentEpochWatcher; NEVER commit.
+content_epochs.json
+
+# Per-member per-epoch draw ledger — the double-spend state that meters token draws. Runtime state
+# (machine-specific, reveals member draw activity); NEVER commit.
+draws.json
+
+# Seeded private bridge lines (T14) — the organizer's per-deployment obfs4/webtunnel bridges;
+# runtime state, NEVER commit (leaking them burns the bridges).
+bridges.json
+
+# Community relay mirrors (stiq:mirrors) — the organizer's own additional relay operators for the
+# community; runtime state, NEVER commit (like bridges.json, not part of the shared TEST setup).
+mirrors.json
+
+# Encrypted community-archive exports (T16-S5). Even encrypted, keep the blob out of the repo —
+# it concentrates every community secret behind only a passphrase.
+*.stiqarch
+
+# Token domain-separation purpose keys (minted when STIQ_TOKEN_DOMAIN_SEP=1) — NEVER commit.
+# Glob covers ALL purposes (post/read, picture/audio write+read, space-write, and any future one):
+# the earlier explicit list silently missed the four media key files.
+*_token_key_private.pem
+*_token_key_public.b64

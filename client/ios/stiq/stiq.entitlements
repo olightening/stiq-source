@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Keychain access group. StiqKeystore (ios/stiq/StiqKeystore.swift) stores the nsec + all
+	  secure state as Keychain generic-password items; without a declared access group the app has
+	  NO application-identifier, so SecItemCopyMatching/SecItemAdd fail with errSecMissingEntitlement
+	  (-34018). That rejection propagates out of AppRuntime.init()'s pre-hydration keystore read and
+	  silently kills the boot, pinning the launch splash forever (Android needs no analogue — its
+	  KeyStore is process-scoped). The $(AppIdentifierPrefix) prefix resolves to the team prefix on a
+	  signed device build and to the empty/simulator prefix under ad-hoc "Sign to Run Locally", so the
+	  same value is correct in both. This is the canonical Xcode keychain-sharing form.
+	-->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)com.stiq.client</string>
+	</array>
+</dict>
+</plist>

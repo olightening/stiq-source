@@ -1,0 +1,65 @@
+# =============================================================================
+# systemd unit for the STIQ keyless push watcher (T1).
+#
+# This is a REFERENCE template. deploy/stiq-up.sh (PUSH_WATCHER=1) writes the live
+# /etc/systemd/system/stiq-pushwatcher.service itself, substituting the resolved
+# relay onion into WATCHER_ALLOWED_NTFY_HOST. Use this file for a manual install or
+# to review the hardening; replace REPLACE_WITH_RELAY_ONION with your relay .onion.
+#
+# The watcher (relay/cmd/pushwatcher) subscribes to the relay firehose over
+# LOOPBACK, matches ONLY already-public tag values (p on kind-1059 DMs, h on
+# NIP-29 group/channel kinds, e on kind-1111 comment roots), and POSTs an EMPTY
+# "wake" to a self-hosted ntfy. It holds NO community key, NO K_E, NO issuer keys
+# and NEVER decrypts. It writes nothing to disk (register state is in-memory).
+#
+# Install (manual):
+#   sudo install -o stiq -g stiq -m0755 pushwatcher /opt/stiq/pushwatcher
+#   sudo cp stiq-pushwatcher.service /etc/systemd/system/
+#   # edit WATCHER_ALLOWED_NTFY_HOST below, then:
+#   sudo systemctl daemon-reload && sudo systemctl enable --now stiq-pushwatcher
+#
+# Env knobs (see relay/cmd/pushwatcher/main.go): WATCHER_RELAY_WS, WATCHER_LISTEN,
+# WATCHER_NTFY_BASE, WATCHER_ALLOWED_NTFY_HOST (required — fail-closed),
+# WATCHER_MAX_KEYS, WATCHER_MAX_TTL_SECONDS, WATCHER_WAKE_MIN_INTERVAL_MS.
+
+[Unit]
+Description=STIQ keyless push watcher (loopback firehose → content-free ntfy wakes)
+After=network.target stiq-relay.service tor.service
+Wants=stiq-relay.service
+
+[Service]
+User=stiq
+Group=stiq
+# Reach the co-located relay + ntfy over loopback; front them only via the relay onion.
+Environment=WATCHER_RELAY_WS=ws://127.0.0.1:3334
+Environment=WATCHER_LISTEN=127.0.0.1:8787
+Environment=WATCHER_NTFY_BASE=http://127.0.0.1:2586
+# Fail-closed sentinel: the ntfy host the watcher is allowed to poke (your relay onion).
+Environment=WATCHER_ALLOWED_NTFY_HOST=REPLACE_WITH_RELAY_ONION
+ExecStart=/opt/stiq/pushwatcher
+WorkingDirectory=/var/lib/stiq-relay
+Restart=on-failure
+RestartSec=5
+
+# --- Zero logging: discard anything the process might emit (it logs counters only) ---
+StandardOutput=null
+StandardError=null
+
+# --- Sandbox hardening (writes nothing to disk, so no ReadWritePaths) ---
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+# MemoryDenyWriteExecute intentionally omitted: the Go runtime uses W+X memory
+# mappings for goroutine stacks, which this flag blocks (SIGBUS/SIGSEGV at startup).
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

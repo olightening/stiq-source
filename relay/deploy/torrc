@@ -1,0 +1,126 @@
+# stiq relay — Tor v3 hidden service config (PLAN.md §3.1, Step 3)
+#
+# Fronts the local relay (127.0.0.1:3334) as a v3 .onion. The relay binds loopback only;
+# Tor forwards onion traffic to it locally. There is NO clearnet exposure.
+#
+# ── This file is a MERGED REFERENCE, not what's live ──────────────────────────────────────────
+# deploy/stiq-up.sh never installs this file verbatim. It writes the equivalent directives as
+# separate drop-ins under /etc/tor/torrc.d/ (loaded via `%include /etc/tor/torrc.d/*.conf`
+# appended to the box's real /etc/tor/torrc):
+#   stiq-base.conf        — SocksPort 0 + HiddenServiceNonAnonymousMode/SingleHopMode 1
+#                            (RELAY_SINGLE_ONION=1, the default; ABSENT under --no-single-onion)
+#   stiq-controlport.conf — ControlPort unix:/var/run/tor/control + CookieAuthentication 1
+#                            (ONLY when STIQ_VANGUARDS=1 AND RELAY_SINGLE_ONION=0)
+#   stiq-relay.conf        — the relay HiddenService block below (+ optional SSH-recovery block)
+#   stiq-dashboard.conf    — the dashboard HiddenService block (DASHBOARD_ONION=1, the default)
+# This file shows them all merged together (as the DEFAULT, single-onion-on config actually
+# behaves) so the whole picture reads in one place. Treat it as documentation/source-of-truth for
+# the Tor hardening, not as a file you `cp` into place — see relay/deploy/README.md.
+
+DataDirectory /var/lib/tor
+
+# --- Zero logging (PLAN.md §3.2) -------------------------------------------------------
+# Discard logs entirely. Do NOT add a 'Log notice ...' line: we never want access logs,
+# connection logs, or IP addresses written anywhere. SafeLogging scrubs any sensitive
+# strings should a log line ever be emitted.
+Log err file /dev/null
+SafeLogging 1
+
+# --- Single-onion mode (RELAY_SINGLE_ONION=1, the DEFAULT — stiq-base.conf) -------------
+# Tor's official "single onion service" mode. Every HiddenService this PROCESS fronts (relay +
+# dashboard + the optional SSH-recovery onion below) drops its own 3-hop path to the rendezvous
+# point down to a single hop — trimming a full circuit build off first-connect (a meaningful slice
+# of onion connect latency/jitter). This affects ONLY the server's own circuit-anonymity toward the
+# rendezvous point; it is invisible to clients, who still reach a completely normal v3 .onion the
+# completely normal (3-hop, anonymous) way. Acceptable here because this box's location/operator
+# was never actually hidden (rented hosting, SSH access, billing trail) — only members' connections
+# are meant to stay anonymous, and this does not touch that.
+#
+# These are PROCESS-WIDE options, not per-HiddenService — they apply to every onion below.
+# SocksPort 0 (further down) is REQUIRED the instant either of these is 1; tor refuses to start
+# otherwise. Comment out both (and drop SocksPort back to its default) to run the standard,
+# fully-anonymous-both-ways hidden service instead — equivalent to `stiq-up.sh --no-single-onion`.
+HiddenServiceNonAnonymousMode 1
+HiddenServiceSingleHopMode 1
+
+# --- Hidden service v3 -----------------------------------------------------------------
+HiddenServiceDir /var/lib/tor/stiq-relay/
+HiddenServiceVersion 3
+# onion:80  ->  local relay WebSocket. Clients connect to ws://<onion>/ (default port 80).
+HiddenServicePort 80 127.0.0.1:3334
+
+# Reliability: more introduction points => more independent rendezvous entry paths, so the
+# service stays reachable if some intro points are slow, attacked, or churning (default 3,
+# max 20). 5 is a good resilience/overhead balance for a single long-lived relay.
+HiddenServiceNumIntroductionPoints 5
+
+# Intro-point denial-of-service defenses for the hidden service. These raise the cost of
+# flooding the service without identifying any client (defense in depth on top of the
+# app-layer allow list).
+HiddenServiceEnableIntroDoSDefense 1
+HiddenServiceEnableIntroDoSRatePerSec 25
+HiddenServiceEnableIntroDoSBurstPerSec 200
+
+# Onion-service proof-of-work DoS defense (tor >= 0.4.8; this deploy targets >= 0.4.9).
+# The PoW puzzle is OFF until the service is actually under load, then it prioritises clients
+# that solve a small puzzle — throttling floods without any client-side UX (modern clients,
+# incl. the bundled IPtProxy/Tor, solve it transparently). Pairs with the intro-DoS defense
+# above: intro-DoS rate-limits introductions, PoW prioritises rendezvous under sustained load.
+#
+# REQUIRES a tor built WITH the 'pow' module (equix). The official Tor Project apt repo
+# (deb.torproject.org) ships it; some third-party builds (e.g. Homebrew) do NOT, and tor will
+# refuse to start with: "this build of tor does not include the required 'pow' module".
+# Verify with:  tor --verify-config -f /etc/tor/torrc   (and `tor --list-modules` shows pow: yes)
+# If your build lacks it, comment out the three HiddenServicePoW* lines below.
+HiddenServicePoWDefensesEnabled 1
+HiddenServicePoWQueueRate 250
+HiddenServicePoWQueueBurst 2500
+
+# Long-lived high-value service: vanguards-lite (pinned layer-2 guards) is built in and ON by
+# default since tor 0.4.7 — no config needed. For layer-3 guards + Rendguard/Bandguards, run
+# the standalone `vanguards` addon against the ControlPort below (leave HSLayer2/3Nodes UNSET;
+# static pinning is a deanonymisation risk — let the addon manage them).
+#
+# ⚠ INCOMPATIBLE with single-onion mode above: vanguards defends the hidden service's own 3-hop
+# path to its rendezvous point, and HiddenServiceSingleHopMode removes that path entirely — there
+# is nothing left for vanguards to protect. deploy/stiq-up.sh only emits the ControlPort lines
+# below (as a SEPARATE drop-in, stiq-controlport.conf) and installs the vanguards addon when
+# STIQ_VANGUARDS=1 AND RELAY_SINGLE_ONION=0 (--no-single-onion) — see step 8/12b there. This is a
+# reconciliation of a formerly-stale claim: earlier versions of this comment (and of
+# stiq-vanguards.service's) said ControlPort was "always on"; it was NEVER emitted by any live
+# torrc.d drop-in — only this unused reference file carried it — so vanguards silently had no
+# control socket to attach to until stiq-up.sh started writing it conditionally.
+ControlPort unix:/var/run/tor/control
+CookieAuthentication 1
+# See: https://github.com/mikeperry-tor/vanguards
+#
+# Zero-downtime restarts / HA: reload config with `kill -HUP` (after `tor --verify-config`)
+# instead of a cold restart; for true HA put OnionBalance v3 in front of N backends sharing
+# this onion key. See: https://blog.torproject.org/cooking-onions-reclaiming-onionbalance/
+
+# Strongest gate: v3 client authorization — ON BY DEFAULT, provisioned by the installer.
+# Only clients holding the shared community auth key can even resolve/reach the onion
+# (defeats "a government actor who discovers the .onion address"). This needs NO torrc
+# directive: tor enforces client-auth purely from the PRESENCE of authorized_clients/*.auth
+# in the HiddenServiceDir. deploy/stiq-up.sh does it — it mints ONE shared community
+# keypair, writes /var/lib/tor/stiq-relay/authorized_clients/community.auth, and emits the
+# matching private key into the v4 community code every member holds (which the client loads
+# via ClientOnionAuthDir). Run the installer with RELAY_ONION_AUTH=0 to leave the onion
+# public instead (community.auth removed); the v4 code then carries an inert reach key.
+# See: https://community.torproject.org/onion-services/advanced/client-auth/
+
+# --- This is a service-only node, not a relay/exit/SOCKS proxy -------------------------
+# SocksPort 0 serves double duty: it was already correct policy for a service-only node (no
+# outbound SOCKS anonymity offered to anything on this box), and it is now ALSO a hard REQUIREMENT
+# of single-onion mode above (tor refuses HiddenServiceNonAnonymousMode/SingleHopMode without it).
+#
+# Consequence: relay/main.go's own Safe-Browsing SOCKS use (STIQ_TOR_SOCKS, default
+# 127.0.0.1:9050) can no longer use THIS tor instance. When Safe-Browsing is configured
+# (safe_browsing_api_key set) AND single-onion is on, deploy/stiq-up.sh provisions a SEPARATE,
+# minimal, client-only tor instance (Debian tor-instance-create convention: SocksPort only, no
+# HiddenService blocks — see /etc/tor/instances/stiq-client/torrc) purely to keep that default
+# resolving. See step 8c in deploy/stiq-up.sh. Not needed when Safe-Browsing is unconfigured (it
+# fails closed / 503s by design either way) or when running with --no-single-onion.
+SocksPort 0
+ExitRelay 0
+ExitPolicy reject *:*

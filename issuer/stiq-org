@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Stiq Organizer — terminal client shim.
+# Runs organizer-cli.mjs (which lives next to this script) so operators can just `./stiq-org status`
+# instead of `node organizer-cli.mjs status`. Passes every arg straight through.
+#
+#   ./stiq-org status                 # health + key facts
+#   ./stiq-org invite --link          # mint a join code (with the stiq:// deep link)
+#   ./stiq-org mods                   # list moderators
+#   ./stiq-org help                   # full command list
+#
+# Targets http://127.0.0.1:7799 by default (override with STIQ_ORG_URL). For a password-protected
+# dashboard, export STIQ_ORG_PASSWORD first. From a laptop, forward the port:
+#   ssh -L 7799:127.0.0.1:7799 root@<host>
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec node "${DIR}/organizer-cli.mjs" "$@"

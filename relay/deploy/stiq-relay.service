@@ -1,0 +1,46 @@
+# systemd unit for the stiq relay (PLAN.md Step 3).
+# Runs as a dedicated unprivileged user, binds loopback only, writes NO logs.
+#
+# Install:
+#   sudo useradd --system --home /var/lib/stiq-relay --shell /usr/sbin/nologin stiq
+#   sudo mkdir -p /var/lib/stiq-relay /etc/stiq-relay
+#   sudo install -o stiq -g stiq -m0755 stiq-relay /usr/local/bin/stiq-relay
+#   sudo install -o stiq -g stiq -m0600 config.json /etc/stiq-relay/config.json
+#   sudo cp stiq-relay.service /etc/systemd/system/ && sudo systemctl enable --now stiq-relay
+
+[Unit]
+Description=STIQ membership-gated Nostr relay (Tor-fronted, loopback-only)
+After=network.target
+
+[Service]
+User=stiq
+Group=stiq
+Environment=STIQ_RELAY_CONFIG=/etc/stiq-relay/config.json
+# Do NOT set STIQ_RELAY_DEBUG_LOG: keep the relay silent (zero logging, PLAN.md §3.2).
+ExecStart=/usr/local/bin/stiq-relay
+WorkingDirectory=/var/lib/stiq-relay
+Restart=on-failure
+
+# --- Zero logging: discard anything the process might emit ---
+StandardOutput=null
+StandardError=null
+
+# --- Sandbox hardening ---
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/stiq-relay
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+# MemoryDenyWriteExecute intentionally omitted: newer Go runtime (1.21+) uses W+X memory
+# mappings for goroutine stacks, which this flag blocks (causes SIGBUS/SIGSEGV at startup).
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

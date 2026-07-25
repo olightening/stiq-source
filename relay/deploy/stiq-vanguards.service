@@ -1,0 +1,74 @@
+# =============================================================================
+# systemd unit for the optional vanguards addon (layer-3 guard selection +
+# Rendguard/Bandguards on top of tor's built-in vanguards-lite).
+#
+# OPT-IN / OFF BY DEFAULT, and INCOMPATIBLE with single-onion mode. deploy/stiq-up.sh only
+# installs + enables this unit when STIQ_VANGUARDS=1 AND RELAY_SINGLE_ONION=0 (--no-single-onion);
+# a normal run (single-onion is the default) never touches it — see step 12b in deploy/stiq-up.sh.
+# Reason: vanguards defends the hidden service's own 3-hop path to its rendezvous point (guard
+# discovery / Rendguard / Bandguards), and RELAY_SINGLE_ONION=1's HiddenServiceSingleHopMode
+# removes that path entirely, so there is nothing left for vanguards to protect.
+#
+# Requires ControlPort unix:/var/run/tor/control + CookieAuthentication 1 to be active. NOTE: this
+# is NOT "always on" — an earlier version of this comment (and of relay/deploy/torrc's) claimed
+# torrc always carried it, which was never true of the live torrc.d drop-ins deploy/stiq-up.sh
+# actually writes (only the unused relay/deploy/torrc reference file had it). stiq-up.sh now emits
+# it itself, in /etc/tor/torrc.d/stiq-controlport.conf, exactly when this unit is about to be
+# installed (STIQ_VANGUARDS=1 && RELAY_SINGLE_ONION=0) — see step 8 there. The `vanguards` Python
+# package must also be installed (pip3 install vanguards).
+#
+# Runs as debian-tor (the same account that owns /var/run/tor/control) so it can open the
+# control socket without any elevated privilege. Talks to tor over the UNIX control socket
+# ONLY — no network access needed, so RestrictAddressFamilies is AF_UNIX only (tighter than
+# the relay/pushwatcher units, which need AF_INET/AF_INET6).
+#
+# HSLayer2Nodes / HSLayer3Nodes are deliberately left UNSET in torrc: static pinning is a
+# deanonymisation risk if the pinned relays are ever identified; the addon manages guard
+# selection dynamically instead. See: https://github.com/mikeperry-tor/vanguards
+#
+# Install (manual, mirrors deploy/stiq-up.sh's STIQ_VANGUARDS=1 + --no-single-onion path):
+#   printf 'ControlPort unix:/var/run/tor/control\nCookieAuthentication 1\n' \
+#     | sudo tee /etc/tor/torrc.d/stiq-controlport.conf && sudo systemctl reload tor@default
+#   sudo pip3 install --break-system-packages vanguards
+#   sudo cp stiq-vanguards.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now stiq-vanguards
+#   (first confirm this box is NOT running single-onion mode:
+#    test -f /etc/tor/torrc.d/stiq-base.conf && echo "single-onion is ON — vanguards has nothing to
+#    protect, see above" — that file must be ABSENT for vanguards to be meaningful)
+
+[Unit]
+Description=vanguards addon (Tor layer-3 guard selection + Rendguard/Bandguards)
+After=tor@default.service
+Requires=tor@default.service
+PartOf=tor@default.service
+
+[Service]
+User=debian-tor
+Group=debian-tor
+ExecStart=/usr/bin/python3 -m vanguards --control_socket /var/run/tor/control
+Restart=on-failure
+
+# --- Zero logging: discard anything the process might emit ---
+StandardOutput=null
+StandardError=null
+
+# --- Sandbox hardening ---
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+# Only the UNIX control socket is needed — no network sockets at all (tighter than the
+# relay/pushwatcher units, which need AF_INET/AF_INET6).
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+# MemoryDenyWriteExecute is FINE here (Python, not Go — no W+X goroutine-stack mappings to block).
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

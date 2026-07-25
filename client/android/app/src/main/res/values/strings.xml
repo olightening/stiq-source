@@ -1,0 +1,9 @@
+﻿<resources>
+    <string name="app_name">Stiq</string>
+    <!-- Foreground-service notifications (W2). Deliberately NEUTRAL: no "Tor" anywhere. Channels are
+         created at IMPORTANCE_MIN so these are the quietest persistent notifications the OS allows. -->
+    <string name="stiq_connection_channel">Connection</string>
+    <string name="stiq_connection_notification">Stiq · connected</string>
+    <string name="stiq_sync_channel">Background sync</string>
+    <string name="stiq_sync_notification">Stiq</string>
+</resources>

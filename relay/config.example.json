@@ -1,0 +1,12 @@
+{
+  "listen": "127.0.0.1:3334",
+  "issuer_public_keys": [
+    "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOC...REPLACE_WITH_REAL_ISSUER_RSA_PUBLIC_KEY...\n-----END PUBLIC KEY-----"
+  ],
+  "_comment_allowed_kinds": "Omit allowed_kinds to accept every kind the app uses (config.DefaultAllowedKinds). Set an explicit list ONLY to restrict a deployment.",
+  "data_dir": "/var/lib/stiq-relay/data",
+  "membership_file": "/var/lib/stiq-relay/membership.json",
+  "pow_difficulty": 20,
+  "_comment_enroll_pow": "The shipped client mines enroll responses at difficulty 12 (ENROLL_POW_DIFFICULTY). enroll_pow falls back to pow_difficulty (20) when omitted, which the client never satisfies -- copying this file as-is breaks every enrollment. Set enroll_pow to match whatever the organizer/client actually mine (12 for the shipped app).",
+  "enroll_pow": 12
+}

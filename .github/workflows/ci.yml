@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  client:
+    name: Client (lint + typecheck + test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test -- --ci
+
+  # No-telemetry guard (PLAN.md §3.2): fail if a known analytics/crash SDK is added.
+  issuer:
+    name: Issuer mailbox (test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: issuer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            issuer/package-lock.json
+            client/package-lock.json
+      - run: npm ci
+      # The issuer is not a self-contained package: issuer.js, organizer-server.mjs,
+      # mailbox.mjs and organizer-nostr.mjs resolve @cloudflare/blindrsa-ts, nostr-tools and
+      # ws out of ../client/node_modules at RUNTIME, and four of the chained tests do too.
+      # That is deliberate -- issuer/deploy/client-deps.package.json installs them the same
+      # way on a real box. Without this step the suite dies at draw_idempotency_test with
+      # ERR_MODULE_NOT_FOUND, which is a CI-fidelity bug, not an issuer bug.
+      - name: Install client deps (issuer imports them via ../client/node_modules)
+        working-directory: client
+        run: npm ci
+      - run: npm test
+
+  no-telemetry:
+    name: No telemetry guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan for banned analytics/telemetry packages
+        run: |
+          BANNED='sentry|firebase-analytics|@amplitude|segment|mixpanel|bugsnag|datadog|appcenter|google-analytics|posthog'
+          if grep -REn "$BANNED" client/package.json 2>/dev/null; then
+            echo "::error::Banned telemetry/analytics dependency detected (PLAN.md §3.2)"; exit 1
+          fi
+          echo "No banned telemetry packages found."
+
+  relay:
+    name: Relay (build + vet + test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: relay
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: relay/go.sum
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./... -count=1
+
+  # The native shells MUST be built by CI. The iOS scaffold drifted for months precisely because
+  # nothing here ever ran `pod install` / `xcodebuild` (only ubuntu typecheck/test jobs existed), so
+  # a green pipeline said nothing about whether the app links against Tor/OpenSSL or even compiles.
+  # This job is that structural fix: a real device (arm64) build. `pod install` is not evidence —
+  # xcodebuild is.
+  ios-build:
+    name: iOS (pod install + device build)
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci
+      - name: pod install
+        working-directory: client/ios
+        run: pod install
+      - name: xcodebuild (generic iOS device, arm64)
+        working-directory: client/ios
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -workspace stiq.xcworkspace \
+            -scheme stiq \
+            -configuration Debug \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+      - name: Assert Tor + single-OpenSSL link (the drift that hid for months)
+        working-directory: client/ios
+        run: |
+          DYL="$(find build -name 'stiq.debug.dylib' -o -name 'stiq' -path '*Debug-iphoneos*' | head -1)"
+          APP="$(find build -name 'stiq.debug.dylib' | head -1)"
+          BIN="${APP:-$DYL}"
+          echo "inspecting: $BIN"
+          strings "$BIN" | grep -q "tor 0.4.9" || { echo "::error::tor 0.4.9.x not linked"; exit 1; }
+          # Exactly one SSL_CTX_new symbol (tor's OpenSSL is static+hidden, op-sqlite's is a dynamic
+          # import) — more than one means the two-static-OpenSSL collision reappeared.
+          COUNT="$(nm "$BIN" | grep -c 'SSL_CTX_new' || true)"
+          test "$COUNT" -le 1 || { echo "::error::multiple SSL_CTX_new symbols ($COUNT) — OpenSSL collision"; exit 1; }
+          echo "OK: tor linked, SSL_CTX_new count=$COUNT"
