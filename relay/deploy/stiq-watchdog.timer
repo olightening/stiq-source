@@ -1,0 +1,15 @@
+# Canonical timer for the stiq relay reachability watchdog (installed by deploy/stiq-up.sh).
+# 2-minute cadence: with the watchdog's 2-strike/3-strike policy this bounds silent-onion-death
+# at roughly 6-10 minutes before auto-heal, versus the ~1.5 hours the 2026-07-28 outage lasted
+# waiting for a human.
+
+[Unit]
+Description=Run the stiq relay watchdog every 2 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

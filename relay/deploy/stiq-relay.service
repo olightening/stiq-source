@@ -19,7 +19,10 @@ Environment=STIQ_RELAY_CONFIG=/etc/stiq-relay/config.json
 # Do NOT set STIQ_RELAY_DEBUG_LOG: keep the relay silent (zero logging, PLAN.md §3.2).
 ExecStart=/usr/local/bin/stiq-relay
 WorkingDirectory=/var/lib/stiq-relay
-Restart=on-failure
+# always (not on-failure): a clean-but-unexpected exit must not leave the community's only
+# relay down until a human notices (2026-07-28 reliability hardening).
+Restart=always
+RestartSec=3
 
 # --- Zero logging: discard anything the process might emit ---
 StandardOutput=null

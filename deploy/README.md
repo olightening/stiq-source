@@ -98,6 +98,34 @@ billing trail) was never actually hidden. The `.onion` address itself never chan
   to run before trusting it in production. Client-auth is non-negotiable and wins if the two ever
   conflict.
 
+## Reliability: the reachability watchdog
+
+A v3 onion can die silently: tor keeps running, systemd sees `active (running)`, but the
+descriptor goes stale or the intro circuits rot, and nobody outside Tor can reach the
+service until the daemon restarts. That exact failure took the reference deployment down
+for ~1.5 hours on 2026-07-28 — with zero log evidence, because the torrc of that era sent
+tor's log to `/dev/null`.
+
+The installer now deploys three layers against a repeat:
+
+- **Real tor logs** — `torrc.d/stiq-logging.conf` writes notice-level logs to
+  `/var/log/tor/notices.log` *and* the journal (`SafeLogging 1` scrubs client addresses),
+  with a logrotate policy that actually HUPs `tor@default` (the stock Debian one reloads
+  the dummy master unit and would lose the log after the first rotation).
+- **stiq-watchdog** (`relay/deploy/stiq-watchdog.sh` + `.service`/`.timer`) — every 2
+  minutes: probe the Go relay locally, then probe the onion **end-to-end** through the
+  client tor instance's SOCKS with the community's client-auth key (descriptor fetch +
+  auth decrypt + intro + rendezvous + HTTP answer, the same path a member's phone takes).
+  Two consecutive onion failures restart the probe-path instance; three restart
+  `tor@default`. Strike counts, a 180s bootstrap grace, and per-target cooldowns make it
+  flap-proof; incidents append pre-restart forensics to `/var/log/stiq-watchdog.log`.
+- **systemd backstops** — `Restart=always` on the relay and both tor instances, plus
+  `WatchdogSec=120` on the tor instances (tor is `Type=notify` and pings the systemd
+  watchdog, so a hung-but-alive tor is killed and restarted within 2 minutes).
+
+A box that has none of this yet picks all of it up from a plain re-run of
+`deploy/stiq-up.sh`.
+
 ## Security model: co-location is the point
 
 The relay and the dashboard share one host **by design**, and that design is the

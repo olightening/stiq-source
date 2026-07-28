@@ -489,6 +489,25 @@ apt-get update -qq
 apt-get install -y -qq curl ca-certificates gnupg openssl python3 >/dev/null
 
 # ---------------------------------------------------------------------------
+# Swap (2026-07-28 reliability hardening). The reference deployment is a ~1.6GB VPS running
+# two tor daemons, the Go relay, and the Node organizer with ZERO swap — under memory pressure
+# the kernel has nowhere to shed cold pages and an allocation hiccup in tor degrades the onion
+# front silently. 1GB of swapfile at swappiness 10 is a pressure-relief valve, not a perf tool.
+# Skipped when any swap is already active. Opt out with STIQ_SWAPFILE=0.
+# ---------------------------------------------------------------------------
+if [[ "${STIQ_SWAPFILE:-1}" == "1" ]] && ! swapon --show 2>/dev/null | grep -q .; then
+  say "No active swap — provisioning a 1GB swapfile (STIQ_SWAPFILE=0 to skip)..."
+  if fallocate -l 1G /swapfile 2>/dev/null && chmod 600 /swapfile && mkswap /swapfile >/dev/null && swapon /swapfile; then
+    grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    echo 'vm.swappiness=10' > /etc/sysctl.d/99-stiq-swap.conf
+    sysctl -w vm.swappiness=10 >/dev/null || true
+  else
+    warn "swapfile provisioning failed (filesystem without fallocate support?) — continuing without swap."
+    rm -f /swapfile 2>/dev/null || true
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Ensure a CURRENT tor via the official Tor Project apt repo.
 # WHY: the distro `tor` on Ubuntu 22.04 (jammy) is 0.4.6.10 — END-OF-LIFE since ~2023. Its built-in
 # directory-authority keys are too old to validate today's Tor consensus (a dir-auth set change in
@@ -930,6 +949,48 @@ else
   rm -f /etc/tor/torrc.d/stiq-dashboard.conf 2>/dev/null || true
 fi
 
+# --- stiq-logging.conf: PERMANENT notice-level logging (2026-07-28 reliability hardening) --------
+# The 2026-07-28 onion outage was undiagnosable because the then-live torrc carried
+# `Log err file /dev/null`: tor ran for 12 days — including the silent death of the relay onion —
+# without writing a single line anywhere (a torrc Log line REPLACES the Debian default
+# `Log notice syslog`, it does not add to it). Notice-level is cheap (~tens of lines/day) and
+# SafeLogging 1 scrubs client addresses, so there is no privacy cost to keeping real logs.
+cat > /etc/tor/torrc.d/stiq-logging.conf <<'LOGCONF'
+# stiq tor logging — managed by deploy/stiq-up.sh (post 2026-07-28 onion outage: tor previously
+# logged to /dev/null, leaving zero evidence). notice -> file for history, notice -> syslog for
+# journald. SafeLogging 1 (main torrc) scrubs client addresses from both sinks.
+Log notice file /var/log/tor/notices.log
+Log notice syslog
+LOGCONF
+# Scrub the old discard-everything line from the main torrc on already-provisioned boxes.
+sed -i 's|^Log err file /dev/null|# logging: see torrc.d/stiq-logging.conf (notice -> file + syslog)|' /etc/tor/torrc 2>/dev/null || true
+# The Debian tor logrotate reloads the dummy `tor` master unit, which never HUPs the real
+# writer (tor@default) — after the first rotation tor would keep logging into the deleted
+# inode forever. Point postrotate at the actual instance.
+cat > /etc/logrotate.d/tor <<'LOGROTATE'
+/var/log/tor/*log {
+	daily
+	rotate 14
+	compress
+	delaycompress
+	missingok
+	notifempty
+	create 0640 debian-tor adm
+	sharedscripts
+	postrotate
+		# multi-instance tor: the writer of /var/log/tor is tor@default, not the dummy master unit
+		systemctl reload tor@default 2>/dev/null || true
+	endscript
+}
+LOGROTATE
+# Restart + hang-detection for the onion front: tor is Type=notify and sends systemd watchdog
+# pings (verified on tor 0.4.9.11), so WatchdogSec catches "process alive, event loop dead" —
+# the failure shape of a silent onion death that probes can only see from outside.
+install -d /etc/systemd/system/tor@default.service.d
+printf '[Service]\nRestart=always\nRestartSec=3\nWatchdogSec=120\n' \
+  > /etc/systemd/system/tor@default.service.d/stiq-reliability.conf
+systemctl daemon-reload
+
 chown -R "${TOR_USER}:${TOR_USER}" /etc/tor/torrc.d 2>/dev/null || true
 grep -q '%include /etc/tor/torrc.d/' /etc/tor/torrc 2>/dev/null || \
   echo '%include /etc/tor/torrc.d/*.conf' >> /etc/tor/torrc
@@ -1119,8 +1180,12 @@ sys.exit(0 if c.get('safe_browsing_api_key') else 1)
   SAFE_BROWSING_CONFIGURED=1
 fi
 
-if [[ "$RELAY_SINGLE_ONION" == "1" && "$SAFE_BROWSING_CONFIGURED" == "1" ]]; then
-  say "Provisioning a client-only tor instance for Safe-Browsing's SOCKS proxy (single-onion set SocksPort 0 on the main instance)..."
+# 2026-07-28 reliability hardening: under single-onion mode this instance is no longer only
+# Safe-Browsing's proxy — it is ALSO the watchdog's probe path (the only local route that can
+# exercise the relay onion end-to-end, since the main instance has SocksPort 0). So provision it
+# whenever single-onion is on, Safe-Browsing or not; an idle client tor costs ~30MB.
+if [[ "$RELAY_SINGLE_ONION" == "1" ]]; then
+  say "Provisioning a client-only tor instance (Safe-Browsing SOCKS proxy + watchdog onion-probe path)..."
   if [[ ! -d "/etc/tor/instances/${TOR_CLIENT_INSTANCE}" ]]; then
     if command -v tor-instance-create >/dev/null 2>&1; then
       tor-instance-create "$TOR_CLIENT_INSTANCE" \
@@ -1134,29 +1199,74 @@ if [[ "$RELAY_SINGLE_ONION" == "1" && "$SAFE_BROWSING_CONFIGURED" == "1" ]]; the
     fi
   fi
   cat > "/etc/tor/instances/${TOR_CLIENT_INSTANCE}/torrc" <<TORCONF
-# stiqclient — client-only tor instance, managed by deploy/stiq-up.sh (Safe-Browsing + RELAY_SINGLE_ONION=1)
-# SOLE purpose: give relay/main.go's STIQ_TOR_SOCKS (default 127.0.0.1:9050) a normal, anonymous
-# 3-hop SOCKS proxy for Safe-Browsing hash-prefix lookups over Tor. NO HiddenService blocks here —
-# this instance never fronts the community onion, never touches the onion key, and is fully
-# independent of single-onion mode (which applies only to the main stiq instance's hidden services).
+# stiqclient — client-only tor instance, managed by deploy/stiq-up.sh (RELAY_SINGLE_ONION=1)
+# Two jobs: (1) give relay/main.go's STIQ_TOR_SOCKS (default 127.0.0.1:9050) a normal, anonymous
+# 3-hop SOCKS proxy for Safe-Browsing hash-prefix lookups over Tor; (2) carry the stiq-watchdog's
+# end-to-end onion probe (ClientOnionAuthDir below decrypts the auth-gated relay descriptor).
+# NO HiddenService blocks here — this instance never fronts the community onion and never touches
+# the onion key.
 DataDirectory /var/lib/tor-instances/${TOR_CLIENT_INSTANCE}
 SocksPort 127.0.0.1:9050
-Log err file /dev/null
+Log notice syslog
 SafeLogging 1
+ClientOnionAuthDir /var/lib/tor-instances/${TOR_CLIENT_INSTANCE}/onion-auth
 TORCONF
   chown "${TOR_USER}:${TOR_USER}" "/etc/tor/instances/${TOR_CLIENT_INSTANCE}/torrc"
   chmod 640 "/etc/tor/instances/${TOR_CLIENT_INSTANCE}/torrc"
+  # Watchdog probe credentials: the shared community x25519 key (already minted in step 8, and
+  # already root-readable on this box) lets the probe decrypt the auth-gated relay descriptor —
+  # WITHOUT touching authorized_clients/, so a probe key can never break member reach. The
+  # instance user varies (tor-instance-create makes _tor-<name>; the by-hand fallback uses
+  # ${TOR_USER}), so derive it from the data directory it must read from.
+  INSTANCE_USER="$(stat -c '%U' "/var/lib/tor-instances/${TOR_CLIENT_INSTANCE}" 2>/dev/null || echo "${TOR_USER}")"
+  install -d -o "$INSTANCE_USER" -g "$INSTANCE_USER" -m 0700 "/var/lib/tor-instances/${TOR_CLIENT_INSTANCE}/onion-auth"
+  if [[ "$RELAY_ONION_AUTH" == "1" && -f "$RELAY_AUTH_KEY" && -s "${TOR_HS_DIR}/hostname" ]]; then
+    PROBE_ONION="$(cat "${TOR_HS_DIR}/hostname")"
+    PROBE_PRIV_B32="$(openssl pkey -in "$RELAY_AUTH_KEY" -outform DER 2>/dev/null | tail -c 32 | base32 | tr -d '=')"
+    printf '%s:descriptor:x25519:%s\n' "${PROBE_ONION%.onion}" "$PROBE_PRIV_B32" \
+      > "/var/lib/tor-instances/${TOR_CLIENT_INSTANCE}/onion-auth/stiq-relay.auth_private"
+    chown "$INSTANCE_USER:$INSTANCE_USER" "/var/lib/tor-instances/${TOR_CLIENT_INSTANCE}/onion-auth/stiq-relay.auth_private"
+    chmod 600 "/var/lib/tor-instances/${TOR_CLIENT_INSTANCE}/onion-auth/stiq-relay.auth_private"
+  fi
+  # A mode flip from --no-single-onion leaves a stale main-instance clientauth drop-in behind —
+  # the probe path is this client instance now, so clear it.
+  rm -f /etc/tor/torrc.d/stiq-clientauth.conf 2>/dev/null || true
+  # Same restart + hang-detection policy as the onion front (tor pings the systemd watchdog).
+  install -d "/etc/systemd/system/tor@${TOR_CLIENT_INSTANCE}.service.d"
+  printf '[Service]\nRestart=always\nRestartSec=3\nWatchdogSec=120\n' \
+    > "/etc/systemd/system/tor@${TOR_CLIENT_INSTANCE}.service.d/stiq-reliability.conf"
   systemctl daemon-reload
-  systemctl enable --now "tor@${TOR_CLIENT_INSTANCE}" \
-    || warn "tor@${TOR_CLIENT_INSTANCE} failed to start — check: journalctl -u tor@${TOR_CLIENT_INSTANCE} -n 50. Safe-Browsing will 503 (fails closed) until this instance is up."
-  say "  Safe-Browsing SOCKS proxy ready on 127.0.0.1:9050 (tor@${TOR_CLIENT_INSTANCE}, client-only, no HS)."
+  systemctl enable "tor@${TOR_CLIENT_INSTANCE}" >/dev/null 2>&1 || true
+  # restart, not `enable --now`: re-runs can change this torrc (logging, onion-auth) and
+  # `enable --now` is a no-op on an already-active unit, silently keeping the old config.
+  systemctl restart "tor@${TOR_CLIENT_INSTANCE}" \
+    || warn "tor@${TOR_CLIENT_INSTANCE} failed to start — check: journalctl -u tor@${TOR_CLIENT_INSTANCE} -n 50. Safe-Browsing will 503 (fails closed) and the watchdog's onion probe stays dark until this instance is up."
+  say "  SOCKS proxy ready on 127.0.0.1:9050 (tor@${TOR_CLIENT_INSTANCE}, client-only, no HS; Safe-Browsing + watchdog probe path)."
 else
-  # Not needed: either single-onion is off (the main instance's own SocksPort is untouched by this
-  # feature, exactly as before RELAY_SINGLE_ONION existed) or Safe-Browsing isn't configured. Tear
-  # down a stray instance from a prior run whose mode has since changed, so we don't leave an idle
-  # tor process running for nothing. Non-fatal either way — this is cleanup, not provisioning.
+  # Single-onion is off: the main instance's own SocksPort (tor's default 9050) is untouched by
+  # this feature, exactly as before RELAY_SINGLE_ONION existed, and it carries both Safe-Browsing
+  # and the watchdog probe. Tear down a stray client instance from a prior run whose mode has
+  # since changed, so we don't leave an idle tor process running for nothing.
   systemctl disable --now "tor@${TOR_CLIENT_INSTANCE}" >/dev/null 2>&1 \
     && say "  ${TOR_CLIENT_INSTANCE} tor instance no longer needed — stopped." || true
+  # The watchdog's onion probe then rides the MAIN instance's SOCKS, so the auth credential for
+  # the gated descriptor must live there instead (a torrc.d drop-in keeps it self-contained).
+  INSTANCE_USER="$(stat -c '%U' /var/lib/tor 2>/dev/null || echo "${TOR_USER}")"
+  install -d -o "$INSTANCE_USER" -g "$INSTANCE_USER" -m 0700 /var/lib/tor/onion-auth
+  if [[ "$RELAY_ONION_AUTH" == "1" && -f "$RELAY_AUTH_KEY" && -s "${TOR_HS_DIR}/hostname" ]]; then
+    PROBE_ONION="$(cat "${TOR_HS_DIR}/hostname")"
+    PROBE_PRIV_B32="$(openssl pkey -in "$RELAY_AUTH_KEY" -outform DER 2>/dev/null | tail -c 32 | base32 | tr -d '=')"
+    printf '%s:descriptor:x25519:%s\n' "${PROBE_ONION%.onion}" "$PROBE_PRIV_B32" \
+      > /var/lib/tor/onion-auth/stiq-relay.auth_private
+    chown "$INSTANCE_USER:$INSTANCE_USER" /var/lib/tor/onion-auth/stiq-relay.auth_private
+    chmod 600 /var/lib/tor/onion-auth/stiq-relay.auth_private
+    printf '# stiq watchdog probe credentials — managed by deploy/stiq-up.sh\nClientOnionAuthDir /var/lib/tor/onion-auth\n' \
+      > /etc/tor/torrc.d/stiq-clientauth.conf
+  else
+    rm -f /etc/tor/torrc.d/stiq-clientauth.conf 2>/dev/null || true
+  fi
+  # The main instance already restarted in step 8, BEFORE this drop-in existed — apply it now.
+  systemctl reload "$TOR_UNIT" 2>/dev/null || true
 fi
 
 # ---------------------------------------------------------------------------
@@ -1497,6 +1607,32 @@ RELAY_STATE="$(systemctl is-active stiq-relay.service || true)"
 ORG_STATE="$(systemctl is-active stiq-organizer.service || true)"
 [[ "$RELAY_STATE" == "active" ]] || warn "stiq-relay is '${RELAY_STATE}' — check: journalctl -u stiq-relay -n 50"
 [[ "$ORG_STATE"   == "active" ]] || warn "stiq-organizer is '${ORG_STATE}' — check: journalctl -u stiq-organizer -n 50"
+
+# ---------------------------------------------------------------------------
+# 12a. Reachability watchdog (2026-07-28 reliability hardening)
+# WHY: on 2026-07-28 the relay onion went silently unreachable for ~1.5h — tor@default stayed
+# "active (running)", systemd saw nothing wrong, and recovery required a human noticing from a
+# phone and restarting tor. The watchdog probes the relay locally AND end-to-end through the
+# onion (SOCKS + client-auth) every 2 minutes and restarts the exact layer that failed, with
+# strike counts, bootstrap grace, and cooldowns so it can never flap a healthy stack. Incidents
+# (with pre-restart forensics) append to /var/log/stiq-watchdog.log.
+# ---------------------------------------------------------------------------
+say "Installing the stiq reachability watchdog (probe every 2 min, auto-heal)..."
+install -m 0755 "${REPO}/relay/deploy/stiq-watchdog.sh" /usr/local/bin/stiq-watchdog.sh
+install -m 0644 "${REPO}/relay/deploy/stiq-watchdog.service" /etc/systemd/system/stiq-watchdog.service
+install -m 0644 "${REPO}/relay/deploy/stiq-watchdog.timer"   /etc/systemd/system/stiq-watchdog.timer
+cat > /etc/logrotate.d/stiq-watchdog <<'WDLOGROTATE'
+/var/log/stiq-watchdog.log {
+	monthly
+	rotate 6
+	compress
+	missingok
+	notifempty
+}
+WDLOGROTATE
+systemctl daemon-reload
+systemctl enable --now stiq-watchdog.timer >/dev/null 2>&1 \
+  || warn "stiq-watchdog.timer failed to enable — the relay has no reachability auto-heal. Check: systemctl status stiq-watchdog.timer"
 if [[ "$PUSH_WATCHER" == "1" ]]; then
   WATCHER_STATE="$(systemctl is-active stiq-pushwatcher.service || true)"
   NTFY_STATE="$(systemctl is-active ntfy.service || true)"

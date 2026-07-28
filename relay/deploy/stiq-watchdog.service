@@ -1,0 +1,12 @@
+# Canonical unit for the stiq relay reachability watchdog (installed by deploy/stiq-up.sh).
+# Oneshot, driven by stiq-watchdog.timer every 2 minutes. See stiq-watchdog.sh for the
+# probe ladder and auto-heal policy.
+
+[Unit]
+Description=stiq relay reachability watchdog (local + onion end-to-end probe, auto-heal)
+After=network.target tor@default.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/stiq-watchdog.sh
+TimeoutStartSec=280
