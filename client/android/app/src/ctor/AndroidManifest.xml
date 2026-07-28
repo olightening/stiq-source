@@ -1,0 +1,18 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <application>
+    <!-- TorService from tor-android: the ctor flavor's bundled Tor daemon.
+         foregroundServiceType required on Android 14+ (API 34).
+         android:process=":tor" runs the daemon in its OWN process so a JS/UI-process crash never
+         drops the circuit, and the daemon's memory is accounted separately.
+         StiqTorService (W2 change 4) subclasses org.torproject.jni.TorService purely to promote
+         the daemon to a FOREGROUND service with a NEUTRAL IMPORTANCE_MIN notification, keeping it
+         alive while the app is backgrounded. This entry lives in the ctor flavor manifest (merged
+         by AGP) because the class only exists in this flavor's source set. -->
+    <service
+      android:name=".StiqTorService"
+      android:exported="false"
+      android:process=":tor"
+      android:stopWithTask="false"
+      android:foregroundServiceType="dataSync" />
+  </application>
+</manifest>

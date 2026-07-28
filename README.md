@@ -87,6 +87,23 @@ cd relay
 go build ./... && go vet ./... && go test ./...
 ```
 
+### One app, two Tor engines (Android)
+
+The Android client builds in **two flavors from the same codebase** — identical features, one JS
+bundle, same application ID and signing key, so a device can switch engines without losing its
+identity:
+
+| Flavor | Tor engine | Build command |
+|---|---|---|
+| `arti` | [Arti](https://gitlab.torproject.org/tpo/core/arti) — Rust, in-process; connects in seconds and bundles the Lyrebird / Snowflake / WebTunnel bridge transports | `./gradlew assembleArtiRelease` |
+| `ctor` | Classic C-tor daemon (`tor-android` + IPtProxy) — the battle-tested engine | `./gradlew assembleCtorRelease` |
+
+A plain `assembleRelease` builds both. An installed APK reports its engine in the version name
+(`…-arti` / `…-ctor`). The JavaScript layer probes at startup for whichever native engine is
+present — there is no per-flavor JS, and engine-specific Kotlin lives only in the `src/arti/` and
+`src/ctor/` source sets, so neither flavor ever compiles against the other's engine. Flavor
+details and traps are in [BUILDING.md](BUILDING.md).
+
 > **[BUILDING.md](BUILDING.md) is not optional reading.** A bare `npm install` can hoist a
 > dependency that makes the app build cleanly and then fail to enrol anyone at runtime; debug
 > APKs ship `android:debuggable=true`, which slows the whole native layer on real devices; and the

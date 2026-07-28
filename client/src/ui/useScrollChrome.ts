@@ -11,7 +11,7 @@
  * Show sequence: mount in DOM → animate opacity/translate → 1 (220ms).
  * This way the layout jump always coincides with the invisible state.
  */
-import {useCallback, useRef, useState} from 'react';
+import {useCallback, useEffect, useRef, useState} from 'react';
 import {
   Animated,
   Easing,
@@ -20,7 +20,10 @@ import {
 } from 'react-native';
 
 const HIDE_AFTER = 80;    // px scrolled down before chrome hides
-const JUMP_AFTER = 240;   // px from top before the jump button appears (design .to-top threshold)
+// px from top before the jump button appears (design .to-top threshold). Exported so MainScreen's
+// "N new posts" pill (Task: instant-refresh overhaul) can treat the SAME band as "caught up" for
+// marking the feed seen — one threshold, not two numbers that could drift apart.
+export const JUMP_AFTER = 240;
 const DURATION = 220;     // animation duration in ms
 
 export interface ScrollChrome {
@@ -48,6 +51,29 @@ export function useScrollChrome(): ScrollChrome {
 
   const visibleRef = useRef(true);
 
+  // Guards the hide animation's completion callback below (setChromeMounted(false)) against firing
+  // once this hook is gone. Before this, nothing stopped an in-flight animation on unmount, so a
+  // hide started right before unmount still had its .start(callback) pending. Under Jest, that
+  // straggler can fire after the module registry is torn down between test files, re-entering this
+  // hook with `Animated` itself gone: "TypeError: TaskQueue: Error with task : Cannot read
+  // properties of undefined (reading 'Value')" at this file's import line, reached via
+  // InteractionManager's TaskQueue — which kills the whole worker process mid-run. In production
+  // it's quieter but just as real: a setState on an unmounted component, animating chrome for a
+  // screen nobody can see.
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      // Stop whatever's in flight — covers both branches of setChrome below, since they share this
+      // one Animated.Value. Starting a NEW animation on chromeAnim already self-interrupts whatever
+      // was previously running (Animated.Value.animate() stops the old one before starting the
+      // next), so this cleanup only matters for the unmount case, where no new .start() is coming
+      // to supersede it.
+      chromeAnim.stopAnimation();
+    };
+  }, [chromeAnim]);
+
   const setChrome = useCallback(
     (next: boolean): void => {
       if (visibleRef.current === next) return;
@@ -70,7 +96,11 @@ export function useScrollChrome(): ScrollChrome {
           easing: Easing.in(Easing.quad),
           useNativeDriver: true,
         }).start(({finished}) => {
-          if (finished) setChromeMounted(false);
+          // isMountedRef: see the cleanup effect above. stopAnimation() on unmount already makes
+          // this callback fire with finished:false (so `if (finished)` alone would block it) —
+          // isMountedRef is a second, independent layer so this can never touch state post-unmount
+          // even if that upstream stop→callback behaviour ever changes.
+          if (finished && isMountedRef.current) setChromeMounted(false);
         });
       }
     },

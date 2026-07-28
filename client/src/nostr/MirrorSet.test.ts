@@ -423,6 +423,68 @@ describe('MirrorSet', () => {
     }
   });
 
+  // ── A Tor-offline createSocket() throw during a secondary connect attempt must retry, not crash. ──
+  //    createSocket dials Tor exactly like the primary's own connect path (App.tsx's startRelay) and
+  //    throws SYNCHRONOUSLY when Tor is momentarily offline (torSocket.ts's requireTorTransport).
+  //    startRelay wraps that call in a try/catch for exactly this reason; connectSecondary used not
+  //    to — so a staggered start (or this same test's real target, its OWN onClose-driven auto-retry)
+  //    firing while Tor was still mid-reconnect threw UNCAUGHT out of a bare setTimeout callback, with
+  //    no caller in a position to catch it.
+  it('retries on a backoff instead of throwing when createSocket fails (Tor momentarily offline)', () => {
+    jest.useFakeTimers();
+    try {
+      const primarySocket = new FakeRelaySocket();
+      const store = new InMemoryEventStore();
+      const secondarySpec: MirrorSpec = {url: 'wss://mirror1.onion'};
+      let calls = 0;
+      let failNext = false;
+      const sockets: FakeRelaySocket[] = [];
+      const createSocket = (): RelaySocket => {
+        calls++;
+        if (failNext) {
+          failNext = false;
+          throw new Error('offline: no Tor circuit; refusing any non-Tor connection');
+        }
+        const socket = new FakeRelaySocket();
+        sockets.push(socket);
+        return socket;
+      };
+      const mirrors = new MirrorSet(primarySocket, store, {
+        primaryOptions: {kinds: [1]},
+        createSocket,
+        secondaryMirrors: [secondarySpec],
+        secondaryConnectDelayMs: 5,
+        // A real (non-empty) plan so the recovered secondary actually opens a sub to ingest through —
+        // the default `() => []` would leave knownSubIds empty and silently drop the proof-of-life
+        // event below regardless of whether the reconnect itself worked.
+        secondaryPlan: () => [{subId: 'recon', filter: {kinds: [1]}}],
+      });
+
+      primarySocket.simulateOpen();
+      primarySocket.emitEose('feed'); // primary syncs -> startSecondaries schedules the staggered connect
+      failNext = true; // the staggered first attempt finds Tor offline
+      // Advancing past the staggered delay must not throw out of this call — that IS the bug.
+      expect(() => jest.advanceTimersByTime(5)).not.toThrow();
+      expect(calls).toBe(1);
+      expect(sockets).toHaveLength(0); // the throwing attempt never produced a socket
+
+      // The retry is scheduled on the SAME relayBackoffMs(1) schedule a post-connect failure gets
+      // (streak 1 -> 4000-6000ms with jitter); advancing past its ceiling must fire exactly one retry.
+      expect(() => jest.advanceTimersByTime(6_000)).not.toThrow();
+      expect(calls).toBe(2);
+      expect(sockets).toHaveLength(1); // this attempt succeeded
+
+      // The recovered secondary is a genuinely live child — it ingests like any other.
+      sockets[0]!.simulateOpen();
+      sockets[0]!.emitEvent('recon', makePost('recovered mirror', 1000));
+      expect(store.size()).toBe(1);
+
+      mirrors.close();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   // ── Fix 3: a durably-adopted mirror is used WITHOUT a reconnect — newcomers connect, existing
   //    children are left running, dropped children are torn down. ────────────────────────────────
   it('updateSecondaryMirrors connects a newcomer, leaves an existing child untouched, and drops a removed one', () => {
@@ -457,6 +519,52 @@ describe('MirrorSet', () => {
       expect(socketsFor(first.url)[0]!.closed).toBe(true);
       jest.advanceTimersByTime(60_000);
       expect(callCount(first.url)).toBe(1); // torn-down child never auto-reconnects
+
+      mirrors.close();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  // ── Fix 4: a pre-connect retry (createSocket() threw before any ChildEntry existed) must not
+  //    resurrect a mirror the organizer has since REMOVED via updateSecondaryMirrors. There is no
+  //    ChildEntry for updateSecondaryMirrors's de-list loop to walk and tear down in this case — the
+  //    armed retry closure is only visible to connectSecondary itself. ──────────────────────────────
+  it('abandons a pending pre-connect retry once its mirror is removed from the set', () => {
+    jest.useFakeTimers();
+    try {
+      const primarySocket = new FakeRelaySocket();
+      const store = new InMemoryEventStore();
+      const secondarySpec: MirrorSpec = {url: 'wss://mirror1.onion'};
+      let calls = 0;
+      const createSocket = (): RelaySocket => {
+        calls++;
+        throw new Error('offline: no Tor circuit; refusing any non-Tor connection');
+      };
+      const mirrors = new MirrorSet(primarySocket, store, {
+        primaryOptions: {kinds: [1]},
+        createSocket,
+        secondaryMirrors: [secondarySpec],
+        secondaryConnectDelayMs: 5,
+      });
+
+      primarySocket.simulateOpen();
+      primarySocket.emitEose('feed'); // primary syncs -> startSecondaries schedules the staggered connect
+      // The staggered first attempt finds Tor offline; connectSecondary arms a pre-connect retry keyed
+      // on the URL alone (preConnectFailureStreak) since no ChildEntry was ever created.
+      jest.advanceTimersByTime(5);
+      expect(calls).toBe(1);
+
+      // Organizer removes this mirror from stiq:mirrors BEFORE the retry fires. Without the fix, this
+      // pending retry is invisible to updateSecondaryMirrors's de-list loop (it only walks ChildEntrys)
+      // and keeps going regardless.
+      mirrors.updateSecondaryMirrors([]);
+
+      // Advance past the retry's backoff (relayBackoffMs(1): 4000-6000ms with jitter, same schedule the
+      // sibling "retries on a backoff" test above pins).
+      jest.advanceTimersByTime(6_000);
+      // The retry must have abandoned itself instead of dialing a mirror that's no longer wanted.
+      expect(calls).toBe(1);
 
       mirrors.close();
     } finally {

@@ -470,6 +470,23 @@ export function groupChatMessages(store: EventStore, groupId: string): Event[] {
   return folded.sort((a, b) => a.created_at - b.created_at);
 }
 
+/**
+ * The single-message analogue of the {@link groupChatMessages} fold: `original` with its author's
+ * latest edit applied in place, or null when unedited. Same author-scoping rule as the full fold —
+ * see foldChannelEdit in channels.ts for why single-event resolvers (embed previews) need this.
+ */
+export function foldGroupChatEdit(store: EventStore, original: Event): Event | null {
+  if (original.kind !== GroupKind.Chat || groupEditTargetId(original)) return null;
+  let latest: Event | null = null;
+  for (const ev of store.query({kinds: [GroupKind.Chat]})) {
+    if (groupEditTargetId(ev) !== original.id || ev.pubkey !== original.pubkey) continue;
+    if (!latest || ev.created_at > latest.created_at) latest = ev;
+  }
+  return latest
+    ? {...original, content: latest.content, tags: [...original.tags, ['edited', String(latest.created_at)], ...promotedTagFrom(latest)]}
+    : null;
+}
+
 /** The parent message id a kind-12 reply targets (its `e` tag), or undefined. */
 export function replyParentId(event: Event): string | undefined {
   return event.tags.find(t => t[0] === 'e' && t[1])?.[1];

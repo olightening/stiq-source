@@ -24,6 +24,41 @@ export interface CalmRejection {
   retryable: boolean;
 }
 
+/**
+ * The reject codes whose calm copy claims the member is OUT OF TOKENS. Grouped so the runtime can
+ * recognise the family from the stored rejection string: when the relay rejects a send for a
+ * missing/invalid token while the app KNOWS the last token draw merely timed out over Tor (the
+ * 2026-07-28 arti outage: EVENT frames rode the surviving WS while draws — fresh isolated
+ * rendezvous circuits — died), "You're out of tokens" blames the member's quota for what was a
+ * transport failure. AppRuntime.sendReasonsSnapshot substitutes {@link DRAW_TIMEOUT_TOKEN_REASON}
+ * for these — and only these — codes in that window.
+ */
+const TOKEN_FAMILY_CODES = new Set([
+  'token_required',
+  'token_insufficient',
+  'token_invalid',
+  'token_malformed',
+  'token_spent',
+  'too_many_tokens',
+  'space_token_required',
+  'holder_proof_invalid',
+]);
+
+/** True when a relay rejection message carries a token-family code (see {@link TOKEN_FAMILY_CODES}). */
+export function isTokenFamilyRejection(message: string): boolean {
+  return TOKEN_FAMILY_CODES.has(parseRejection(message).code ?? '');
+}
+
+/**
+ * The calm reason substituted for a token-family rejection that landed while the last token draw
+ * had TIMED OUT (not been refused): honest about the transport, and directs to the action that
+ * actually works — a fresh send re-signs with a fresh draw, whereas Retry re-delivers the same
+ * token-less bytes and fails identically. Rendered verbatim by calmRejection's unknown-code
+ * fallback (it carries no [code]), so no view changes are needed.
+ */
+export const DRAW_TIMEOUT_TOKEN_REASON =
+  'The app couldn’t top up your tokens over the connection when this was sent. Cancel it and send again.';
+
 /** Map a relay rejection `message` to calm copy. Never throws; unknown codes fall back to raw prose. */
 export function calmRejection(message: string): CalmRejection {
   const p = parseRejection(message);

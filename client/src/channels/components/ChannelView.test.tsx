@@ -1,6 +1,6 @@
 import 'react-native';
 import React from 'react';
-import {TextInput} from 'react-native';
+import {FlatList, TextInput} from 'react-native';
 import renderer, {act} from 'react-test-renderer';
 import {ChannelView} from './ChannelView';
 import * as displayName from '../../profile/displayName';
@@ -53,6 +53,52 @@ it('renders channel header, messages, and the owner composer', () => {
 
   const broadcast = tree!.root.findAll(n => n.props.accessibilityLabel === 'broadcast')[0]!;
   expect(broadcast).toBeDefined(); // owner sees the composer
+});
+
+it('anchors the broadcast list with maintainVisibleContentPosition so a new broadcast cannot yank a reader scrolled into history', () => {
+  let tree: renderer.ReactTestRenderer | undefined;
+  act(() => {
+    tree = renderer.create(
+      <ChannelView channel={channel} messages={messages} isOwner onBroadcast={() => undefined} />,
+    );
+  });
+  const list = tree!.root.findAllByType(FlatList)[0]!;
+  expect(list.props.maintainVisibleContentPosition).toEqual({minIndexForVisible: 0});
+});
+
+it('does NOT pair removeClippedSubviews with maintainVisibleContentPosition (they fight over the same native child list)', () => {
+  // On Android, removeClippedSubviews detaches off-screen child views from the same ScrollView
+  // content ViewGroup that MaintainVisibleScrollPositionHelper walks by index to find/track its
+  // anchor (see ThreadView.test.tsx's identical guard) — a view clipped away mid-update can vanish
+  // out from under the tracked anchor. This list has never carried removeClippedSubviews; this pins
+  // that so it can't be added later without also re-litigating the interaction.
+  let tree: renderer.ReactTestRenderer | undefined;
+  act(() => {
+    tree = renderer.create(
+      <ChannelView channel={channel} messages={messages} isOwner onBroadcast={() => undefined} />,
+    );
+  });
+  const list = tree!.root.findAllByType(FlatList)[0]!;
+  expect(list.props.removeClippedSubviews).not.toBe(true);
+});
+
+it('the initial-scroll onContentSizeChange never force-scrolls — it only flips a settle flag', () => {
+  // GroupView was caught calling scrollToEnd() unconditionally on every onContentSizeChange, which
+  // fires on ANY content-size change (not just a new broadcast — an image/gradient settling its
+  // height too), defeating maintainVisibleContentPosition for a reader scrolled into history. This
+  // pins that ChannelView's own onContentSizeChange never regresses to that pattern: it only flips
+  // `initialScrollDone`, with no imperative scroll call at all.
+  let tree: renderer.ReactTestRenderer | undefined;
+  act(() => {
+    tree = renderer.create(
+      <ChannelView channel={channel} messages={messages} isOwner onBroadcast={() => undefined} />,
+    );
+  });
+  const list = tree!.root.findAllByType(FlatList)[0]!;
+  const scrollToEnd = jest.spyOn(FlatList.prototype, 'scrollToEnd').mockImplementation(() => {});
+  act(() => { (list.props.onContentSizeChange as () => void)(); });
+  expect(scrollToEnd).not.toHaveBeenCalled();
+  scrollToEnd.mockRestore();
 });
 
 it('isolates composer keystrokes — typing a broadcast does NOT re-render the memoized cards', () => {

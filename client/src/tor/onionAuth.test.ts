@@ -1,13 +1,14 @@
 import {
   isValidAuthKeyBase32,
   onionHostOf,
-  authPrivateFileName,
-  authPrivateFileContent,
   deriveOnionAuthSet,
   setActiveOnionAuthExtra,
   getActiveOnionAuthExtra,
   sameOnionAuthSet,
   preserveDisplacedActivePrimary,
+  setActiveRelayOnion,
+  getActiveRelayOnion,
+  relayOnionHostOf,
 } from './onionAuth';
 
 const HOST = 'a'.repeat(56); // stand-in v3 onion host (56 base32 chars)
@@ -35,16 +36,6 @@ describe('onionAuth', () => {
     expect(onionHostOf('ws://example.com')).toBeNull();
     expect(onionHostOf(`ws://${'a'.repeat(40)}.onion`)).toBeNull(); // wrong length
     expect(onionHostOf('')).toBeNull();
-  });
-
-  it('builds the auth_private filename and line', () => {
-    expect(authPrivateFileName(HOST)).toBe(`${HOST}.auth_private`);
-    expect(authPrivateFileContent(HOST, KEY)).toBe(`${HOST}:descriptor:x25519:${KEY}\n`);
-  });
-
-  it('refuses to build a line for a malformed host or key', () => {
-    expect(authPrivateFileContent('short', KEY)).toBeNull();
-    expect(authPrivateFileContent(HOST, 'bad')).toBeNull();
   });
 
   describe('deriveOnionAuthSet (P2 §1.7 multi-relay client transport)', () => {
@@ -137,5 +128,51 @@ describe('onionAuth', () => {
       // active community's primary credential must still be preserved so its relay stays reachable.
       expect(preserveDisplacedActivePrimary([], activePrimary, true, null)).toEqual([activePrimary]);
     });
+  });
+});
+
+/**
+ * The reachability-probe target (TorStartConfig.relayOnion). Its whole reason for existing is that
+ * a PUBLIC community — no auth key, therefore no `onionAuth` — still has a relay onion, and keying
+ * the native probe off `onionAuth` left exactly those users exposed to Arti's "bootstrap 100% with
+ * no usable guards" lie. So these tests care most about the no-credential case.
+ */
+describe('active relay onion (reachability-probe target)', () => {
+  afterEach(() => setActiveRelayOnion(null));
+
+  describe('relayOnionHostOf', () => {
+    it('accepts a relay URL, a suffixed host, and a bare host alike', () => {
+      expect(relayOnionHostOf(`ws://${HOST}.onion`)).toBe(HOST);
+      expect(relayOnionHostOf(`ws://${HOST}.onion/`)).toBe(HOST);
+      expect(relayOnionHostOf(`wss://${HOST}.onion:443/relay`)).toBe(HOST);
+      expect(relayOnionHostOf(`${HOST}.onion`)).toBe(HOST);
+      expect(relayOnionHostOf(HOST)).toBe(HOST);
+    });
+
+    it('normalizes case and surrounding whitespace', () => {
+      expect(relayOnionHostOf(`  ${HOST.toUpperCase()}.ONION  `)).toBe(HOST);
+    });
+
+    it('returns null for anything that is not a v3 onion', () => {
+      expect(relayOnionHostOf('wss://relay.example.com')).toBeNull();
+      expect(relayOnionHostOf('a'.repeat(16) + '.onion')).toBeNull(); // v2 length
+      expect(relayOnionHostOf('')).toBeNull();
+      expect(relayOnionHostOf(null)).toBeNull();
+      expect(relayOnionHostOf(undefined)).toBeNull();
+    });
+  });
+
+  it('publishes a PUBLIC community relay onion even though it carries no auth credential', () => {
+    expect(getActiveRelayOnion()).toBeNull();
+    setActiveRelayOnion(`ws://${HOST}.onion`);
+    expect(getActiveRelayOnion()).toBe(HOST);
+  });
+
+  it('clears on null and refuses to store a non-onion relay', () => {
+    setActiveRelayOnion(`ws://${HOST}.onion`);
+    setActiveRelayOnion(null);
+    expect(getActiveRelayOnion()).toBeNull();
+    setActiveRelayOnion('wss://relay.example.com');
+    expect(getActiveRelayOnion()).toBeNull();
   });
 });

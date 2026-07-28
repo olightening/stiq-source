@@ -12,13 +12,15 @@
  * the app resolves to onboarding — driven by real logic (see AppRuntime tests).
  */
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
-import {Alert, AppState, DeviceEventEmitter, InteractionManager, Linking, NativeModules, PermissionsAndroid, Platform, Pressable, SafeAreaView, StatusBar, StyleSheet, Text, View} from 'react-native';
+import {Alert, AppState, DeviceEventEmitter, InteractionManager, Linking, PermissionsAndroid, Platform, Pressable, SafeAreaView, StatusBar, StyleSheet, Text, View} from 'react-native';
 
 // Ask Tor for fresh circuits. Onion rendezvous circuits are per-circuit flaky on a throttling
 // network, so the relay-retry path rotates the circuit instead of reusing the dead one.
 const requestNewTorCircuit = (): void => {
   try {
-    (NativeModules as {StiqTor?: {newCircuit?: () => void}}).StiqTor?.newCircuit?.();
+    // Resolves NativeModules.StiqArti via getTorDaemonControl() rather than reading it directly —
+    // see daemonControl.ts for why every off-seam native call is routed through that one chokepoint.
+    getTorDaemonControl()?.newCircuit?.();
   } catch {
     // native module absent (non-Android build) — ignore
   }
@@ -28,6 +30,7 @@ import {
   createTorManager,
   deriveOnionAuth,
   getActiveOnionAuth,
+  getTorDaemonControl,
   type OnionAuth,
   type TorManager,
 } from './src/tor';
@@ -41,6 +44,7 @@ import {Toast} from './src/ui/Toast';
 import {SplashScreen} from './src/app/screens/SplashScreen';
 import {colors, radius, space, type as typeScale, weight} from './src/ui/theme';
 import {AppRuntime, type AppSnapshot} from './src/app/AppRuntime';
+import {createDeferredSlot, type DeferredSlot} from './src/app/deferredSnapshotSlot';
 import {EMPTY_TOKEN_STATUS} from './src/app/tokenEconomyStatus';
 import {isCurrentInitAttempt} from './src/app/initAttempt';
 import {MAX_JOIN_CODE_LEN, enrollKeyMatchesCid} from './src/onboarding/join';
@@ -59,7 +63,7 @@ import {
   shouldRotateCircuit,
   isTransportCondemned,
 } from './src/nostr/reconnectBackoff';
-import {createFeedAndDmPlan, buildFeedFilter, buildReconcileFilter, SYNC_ROUTINE_WINDOW_SECONDS, TEXT_ONLY_FEED_KINDS, highWaterSince, FEED_KINDS, FIREHOSE_FEED_KINDS, groupChatSince, channelChatSince} from './src/nostr/subscriptionPlan';
+import {createFeedAndDmPlan, buildFeedFilter, buildReconcileFilter, SYNC_ROUTINE_WINDOW_SECONDS, TEXT_ONLY_FEED_KINDS, highWaterSince, FEED_KINDS, FIREHOSE_FEED_KINDS, groupChatSince, channelChatSince, buildOpenChatFilters, buildSpaceKeyRecoveryFilters} from './src/nostr/subscriptionPlan';
 import {loadWatermark, saveWatermark, setWatermarkRuntime, getWatermarkRuntime} from './src/nostr/syncWatermark';
 import {recordSyncStat} from './src/nostr/syncStats';
 import {buildFeedSnapshot, saveFeedSnapshot, loadFeedSnapshot} from './src/nostr/feedSnapshot';
@@ -123,6 +127,7 @@ import {
   DEFAULT_TOR_PREFS,
   getTorConnectionPrefs,
   inferCustomTransport,
+  TorSettingsStore,
   validateBridgeLine,
   type TorConnectionPrefs,
 } from './src/tor/torSettings';
@@ -145,7 +150,7 @@ import {
   type ConnectionPhase,
 } from './src/tor/ladder';
 // Coarse network class for the per-network-class warm cache (T2-S2).
-import {getNetworkClass} from './src/tor/nativeBackend';
+import {getNetworkClass} from './src/tor/daemonControl';
 // Native dormancy transitions (T4): SIGNAL DORMANT/ACTIVE instead of a force-kill on background.
 import {torDormant, torActive} from './src/tor/dormancy';
 // Battery-optimization exemption nudge (Tor stability+speed, contract C3 — the single App.tsx call
@@ -316,6 +321,40 @@ function App(): React.JSX.Element {
   // prop here so this subtask touches only App.tsx.
   const [torPhase, setTorPhase] = useState<ConnectionPhase | null>(null);
   const [snapshot, setSnapshot] = useState<AppSnapshot>(INITIAL);
+  /**
+   * Coalescing slot for NON-URGENT (throttled relay-churn) snapshots — see the runtime.subscribe
+   * handler in the mount effect for why those are deferred through InteractionManager rather than
+   * applied inline, and deferredSnapshotSlot.ts for the two guards (coalesce + supersede) it
+   * enforces and the bugs each one prevents.
+   *
+   * Lives at COMPONENT scope, not inside the mount effect where this logic used to be a pair of
+   * `let`s: a queued flush holds an OLDER snapshot, so any code path that applies a fresher one
+   * directly must be able to cancel it — and an effect-local closure is unreachable from the
+   * component body. handleMarkFeedSeen below is exactly such a path.
+   *
+   * `useRef(...)` rather than `useMemo`: this must be created exactly once for the component's
+   * lifetime (a re-created slot would silently orphan a queued flush), which useMemo does not
+   * guarantee. The lazy-init dance keeps the factory from running on every render.
+   */
+  const nonUrgentFlushRef = useRef<DeferredSlot<AppSnapshot> | null>(null);
+  if (nonUrgentFlushRef.current === null) {
+    // No `disposed` guard needed on the apply: the mount effect's cleanup calls
+    // cancelPendingSnapshotFlush(), and cancel() RETIRES the scheduled handle rather than leaving it
+    // to fire and no-op — so a flush cannot run after teardown at all. (That is precisely the
+    // difference between the two guards; see deferredSnapshotSlot.ts.)
+    nonUrgentFlushRef.current = createDeferredSlot<AppSnapshot>(setSnapshot, cb =>
+      InteractionManager.runAfterInteractions(cb),
+    );
+  }
+  const nonUrgentFlush = nonUrgentFlushRef.current;
+  /**
+   * Drop any queued non-urgent flush. MUST be called immediately before any setSnapshot() that
+   * applies a fresher snapshot outside the deferral path (an urgent emit, or a direct read like
+   * handleMarkFeedSeen's) — otherwise the queued flush later overwrites it with older state.
+   */
+  const cancelPendingSnapshotFlush = useCallback((): void => {
+    nonUrgentFlush.cancel();
+  }, [nonUrgentFlush]);
   // False until AppRuntime.init() has read the keystore and emitted the real enrolled state. The
   // initial snapshot defaults to enrolled:false, so without this gate an already-enrolled user
   // would see a flash of the onboarding welcome on every cold start before the lock screen appears.
@@ -575,18 +614,23 @@ function App(): React.JSX.Element {
     // `undefined` means no onboarding override; `null` deliberately selects a public onion.
     let onboardingOnionAuth: OnionAuth | null | undefined;
 
-    // Default per-attempt deadline (used by the cold bridge attempts). 90s: long enough for a
-    // live bridge to load the consensus, short enough that a dead-bridge stall fails fast and
-    // we retry instead of hanging for minutes.
+    // Fallback per-attempt deadline used ONLY if some future call site omits its own
+    // bootstrapTimeoutMs override — every call site in this cascade passes one explicitly today (see
+    // WARM_BOOTSTRAP_TIMEOUT_MS/DIRECT_BOOTSTRAP_TIMEOUT_MS/coldTimeoutFor below), so this is
+    // presently a defensive default rather than a live timeout. Kept coherent with those: 120s
+    // clears the MEASURED ~100s cold-consensus plateau (see WARM_BOOTSTRAP_TIMEOUT_MS) with the same
+    // margin, so a call site that forgets to pass its own deadline fails safe instead of dying at a
+    // C-tor-era 90s that would kill a healthy Arti connect mid-fetch.
     // resolveOnionAuth is pulled at each connect so the manager always reaches the ACTIVE
     // community's onion (lever 2). Null until a members-only (community-code v4) community is
     // active, so a public onion is unaffected.
     const manager = createTorManager({
       transport: 'webtunnel',
-      bootstrapTimeoutMs: 90_000,
-      // T4 (ship-dark): threads into TorStartConfig.dormancy → native buildTorrc's mobile padding
-      // block. false (default) omits the field entirely (buildStartConfig drops it), so the emitted
-      // torrc — and every connect — is byte-identical to today.
+      bootstrapTimeoutMs: 120_000,
+      // T4 (ship-dark): threads into TorStartConfig.dormancy → Arti's DormantMode::Soft, applied to
+      // the TorClient at construction (arti-ffi/src/lib.rs finish_start) and toggled live via
+      // arti_set_dormant thereafter. false (default) omits the field entirely (buildStartConfig
+      // drops it), so the client is built non-dormant — every connect is byte-identical to today.
       dormancy: TOR_DORMANCY,
       resolveOnionAuth: () =>
         onboardingOnionAuth !== undefined ? onboardingOnionAuth : getActiveOnionAuth(),
@@ -622,11 +666,15 @@ function App(): React.JSX.Element {
     });
     cleanups.push(() => setPreferredBrowserWriter(null));
 
-    // Deadline for the "warm" path (cached bridges + warm Tor dataDir). It must be generous:
-    // cached bridges that reach the consensus stage (~25%) are working but routinely need
-    // 60-90s to load the consensus + relay descriptors over a bridge. A too-short deadline
-    // abandons a working bridge set and falls back to a cold fetch that may get *worse*
-    // (dead) bridges.
+    // Deadline for the "warm" path (cached bridges + warm Tor dataDir). MEASURED (real device): a
+    // genuinely warm Arti connect (directory already cached) finishes in ~3.5s — but "warm" here
+    // only means the BRIDGES are known-good, not that Arti's own on-disk directory cache is still
+    // valid. When it isn't, this pays the same cold consensus fetch as a fresh start, which MEASURED
+    // ~100s on a real device while Arti's percent stream (conn*0.15 + dir*0.85) sat at a FLAT 15%
+    // the whole time — no intermediate progress at all to re-arm a shorter timer against. A
+    // too-short deadline abandons a working bridge set mid-fetch and falls back to a cold retry that
+    // may land on *worse* (dead) bridges. 120s clears that ~100s plateau with the same margin
+    // ladder.ts's AUTO_LADDER noProgressMs uses for the identical reason — keep the two coherent.
     const WARM_BOOTSTRAP_TIMEOUT_MS = 120_000;
 
     // Grace added to a guided rung's OUTER hard ceiling (T2) before the walker abandons it. The
@@ -635,24 +683,34 @@ function App(): React.JSX.Element {
     // to escalate on its own. Only consulted when GUIDED_AUTO_LADDER is on.
     const CEILING_GRACE_MS = 3_000;
 
-    // Deadline for a DIRECT Tor connection. Direct Tor to public guards bootstraps in
-    // ~10-20s on an open network; 60s is a generous ceiling before we conclude direct Tor is
-    // blocked here and fall back to bridges.
-    const DIRECT_BOOTSTRAP_TIMEOUT_MS = 60_000;
+    // Deadline for a DIRECT Tor connection with NO cached bridge to fall back on — this can be the
+    // very first connect this device has ever attempted, so Arti's dataDir may be completely empty.
+    // That is exactly the cold-consensus case MEASURED at ~100s of flat 15% (see
+    // WARM_BOOTSTRAP_TIMEOUT_MS above); anything shorter would abandon a healthy direct connect
+    // before the consensus finishes and fall back to bridges for no reason. 120s matches
+    // AUTO_LADDER's 'direct' rung noProgressMs (ladder.ts) — same daemon, same plateau, same bound.
+    const DIRECT_BOOTSTRAP_TIMEOUT_MS = 120_000;
 
     // Shorter deadline for RE-PROBING direct on a cold start when we already have a working cached
     // bridge to fall straight back to. This is what makes bridge escalation recoverable: a network
     // that has recovered (or simply changed) drops back to fast direct Tor instead of staying
-    // pinned to a slow cached bridge forever. Direct on an open network reaches a live circuit well
-    // within this; if it doesn't, we conclude direct is still blocked here and use the cached
-    // bridge — so a still-censored network pays only this brief check, not the full 60s ceiling.
+    // pinned to a slow cached bridge forever. Unlike DIRECT_BOOTSTRAP_TIMEOUT_MS above, a device
+    // that reaches this branch has already connected successfully once (that's where the cached
+    // bridge came from), so Arti's directory cache is very likely still warm here too — MEASURED at
+    // ~3.5s for a real warm connect. 20s is comfortable headroom on top of that while still failing
+    // fast: if direct hasn't produced a live circuit well within it, we conclude direct is still
+    // blocked here and use the cached bridge instead — so a still-censored network pays only this
+    // brief check, not the full 120s DIRECT_BOOTSTRAP_TIMEOUT_MS ceiling.
     const DIRECT_REPROBE_TIMEOUT_MS = 20_000;
 
-    // Per-transport cold bootstrap deadline. WebTunnel/obfs4 load the consensus over a bridge in
-    // ~60-90s; Snowflake's WebRTC rendezvous is slower to provision, so it gets a longer ceiling
-    // before we give up on a tier and escalate.
+    // Per-transport cold bootstrap deadline (legacy/preset cascade; connectGuided's equivalent is
+    // AUTO_LADDER in ladder.ts). WebTunnel/obfs4 face the same cold consensus fetch MEASURED at
+    // ~100s of flat 15% (see WARM_BOOTSTRAP_TIMEOUT_MS above), so 120s here matches ladder.ts's
+    // bridge-rung noProgressMs for the same reason. Snowflake's WebRTC rendezvous is slower to
+    // provision on top of that same consensus fetch, so it keeps a longer 180s ceiling before we
+    // give up on a tier and escalate.
     const coldTimeoutFor = (transport: TransportType): number =>
-      transport === 'snowflake' ? 180_000 : 90_000;
+      transport === 'snowflake' ? 180_000 : 120_000;
 
     // Whether we currently WANT a live Tor connection. Set false while the app is backgrounded
     // (after the grace period) so the reconnect cascade stops cleanly instead of fighting the
@@ -714,6 +772,19 @@ function App(): React.JSX.Element {
     // session so we never flap back to a path that already proved dead for the onion.
     let bridgeStartTier = -1;
     let activeTier = -1;
+    // Rungs condemned by the DEFERRED reachability verdict this session (manager.onReach below).
+    // A condemned rung "connects" off a cached consensus and only proves dead seconds later, so
+    // without this memory the retry cascade would re-pick it forever and never reach the rungs
+    // past it. Cleared wherever bridgeStartTier de-escalates (network change, prefs apply) and on
+    // ladder exhaustion, so a wrong verdict can never strand the app with zero rungs.
+    const deadRungs = new Set<TransportType>();
+    // The warm-cache write for the rung that just connected, deferred until the reachability
+    // verdict confirms it (saving at connect time is exactly how a lying rung used to poison the
+    // warm cache). Null when nothing is pending.
+    let pendingWarmSave: (() => Promise<void>) | null = null;
+    // Single-flight guard for startRelay()'s live reach-credential install (see its reach handoff).
+    let reachInstallInFlight = false;
+    let reachEnsured = false;
     // Wall-clock of when the CURRENT transport reached 'connected' (0 = not connected). Read only by
     // the escalation gate, to distinguish "this transport has been failing the onion for a while"
     // from "we got a fast burst of failures seconds after connecting".
@@ -1193,6 +1264,10 @@ function App(): React.JSX.Element {
       if (bridgeStartTier >= 0 && warm?.transport === 'direct') {
         warm = null;
       }
+      // A warm entry for a rung the deferred verdict condemned this session is poison, not warmth.
+      if (warm && deadRungs.has(warm.transport)) {
+        warm = null;
+      }
 
       if (warm && desiredConnected) {
         const rung = rungForTransport(warm.transport);
@@ -1228,6 +1303,10 @@ function App(): React.JSX.Element {
           return;
         }
         const rung = AUTO_LADDER[i]!;
+        // Condemned this session by the deferred reachability verdict — walk past it.
+        if (deadRungs.has(rung.transport)) {
+          continue;
+        }
         currentRung = rung;
         setTorPhase(describePhase(rung, 'starting'));
         // Fetched-bridge rungs go through resolveBridges (moat + any organizer-seeded lines); bundled
@@ -1260,8 +1339,11 @@ function App(): React.JSX.Element {
         if (r === 'connected') {
           activeTier = tierOf(rung.transport);
           if (secureStorage) {
-            // Skips 'unknown' internally, so a device that can't classify never poisons a bucket.
-            await saveCachedBridgesForClass(secureStorage, netClass, rung.transport, lines);
+            const storage = secureStorage;
+            // Deferred until the reachability verdict confirms the rung (manager.onReach below) —
+            // recording it at connect is exactly how a lying rung used to poison the warm cache.
+            // (Skips 'unknown' internally, so a device that can't classify never poisons a bucket.)
+            pendingWarmSave = () => saveCachedBridgesForClass(storage, netClass, rung.transport, lines);
           }
           currentRung = null;
           setTorPhase(describePhase(rung, 'connected'));
@@ -1284,6 +1366,9 @@ function App(): React.JSX.Element {
       // Every rung's ceiling fired without a connect. The onChange('offline') path + scheduleRetry
       // then reschedules a fresh runCascade, restarting the ladder from the top (or bridgeStartTier).
       currentRung = null;
+      // Exhaustion resets the condemned set: if every rung is dead we would otherwise have zero
+      // rungs forever, and a full re-walk re-earns each verdict at the cost of one probe apiece.
+      deadRungs.clear();
       setTorPhase(describePhase(AUTO_LADDER[AUTO_LADDER.length - 1]!, 'exhausted'));
     };
 
@@ -1393,10 +1478,13 @@ function App(): React.JSX.Element {
         } else {
           // ── Legacy resume (byte-identical to pre-T4) ──
           // Tor may have been stopped while backgrounded — by our grace timer, or by the OS
-          // killing the service. Native stopTor() now blocks for up to ~10s, and getState() only
-          // flips to 'disconnected' once that resolves — so a quick background→foreground bounce
-          // can land here while getState() still stale-reports 'connected' even though the SOCKS
-          // proxy is already gone. isLive() checks the real state+socks pair, so use that instead.
+          // killing the service. disconnect() nulls the socks proxy synchronously but only flips
+          // state to 'disconnected' AFTER backend.stop() resolves (see TorManager.isLive() doc) — so
+          // a quick background→foreground bounce can land here while getState() still stale-reports
+          // 'connected' for that brief window even though the SOCKS proxy is already gone. Under
+          // Arti that window is now tiny (StiqArtiModule.stopTor is a near-instant in-memory drop,
+          // not the old C-tor bounded poll), but it is not literally zero, so isLive() (the real
+          // state+socks pair) remains the correct check, not getState().
           if (!manager.isLive()) {
             if (backgroundSyncOwnsTorNow()) {
               // The headless WorkManager sync (a SEPARATE TorManager instance) is currently mid-flight
@@ -1407,7 +1495,7 @@ function App(): React.JSX.Element {
               // rather than starting a second daemon attempt on top of it.
               requestBackgroundSyncAbort();
               void (async () => {
-                await waitForBackgroundSyncRelease(10_000);
+                await waitForBackgroundSyncRelease(2_000);
                 if (desiredConnected && !manager.isLive()) {
                   void runCascade();
                 }
@@ -1693,24 +1781,26 @@ function App(): React.JSX.Element {
         // group view is on screen. Both filters are scoped, satisfying the relay's group query
         // rule. Closed when the view unmounts.
         subscribeGroup: groupId => {
-          // Incremental chat resub: only pull messages/reactions newer than this group's cached
-          // high-water mark (minus a 300s overlap for relay lag). Without this, every reconnect —
-          // and resubscribeGroups() re-opens EVERY joined group on every reconnect — re-streamed the
-          // whole chat history of every group over Tor and re-verified each event. On a FRESH group
-          // (no cached chat yet) `since` is bounded instead by a `limit` (newest-first) rather than
-          // the full history — this REQ then stays open and doubles as the live delivery tail, same
-          // shape as the feed's cold path (bug #3: no more oldest-first full-history download).
-          // State kinds (39000-39005) are replaceable/addressable, so the relay only returns their
-          // latest regardless.
-          const chatFilter: ReqFilter = {kinds: [9, 11, 12, 7], '#h': [groupId]};
-          const since = groupChatSince(store, groupId, 300);
-          if (since !== undefined) {
-            chatFilter.since = since;
-          } else {
-            chatFilter.limit = COLD_FEED_LIMIT;
-          }
+          // Incremental chat resub: the since tail only pulls messages/reactions newer than this
+          // group's cached high-water mark (minus a 300s overlap for relay lag). Without this, every
+          // reconnect — and resubscribeGroups() re-opens EVERY joined group on every reconnect —
+          // re-streamed the whole chat history of every group over Tor and re-verified each event.
+          // On a FRESH group (no cached chat yet) `since` is bounded instead by a `limit`
+          // (newest-first) rather than the full history — this REQ then stays open and doubles as
+          // the live delivery tail, same shape as the feed's cold path (bug #3: no more oldest-first
+          // full-history download). A newest-first bounded page ALWAYS rides alongside the since
+          // tail: the cached high-water can sit ABOVE a hole the tail can never see (the 2026-07-28
+          // "posts not loading" field bug — see buildOpenChatFilters), and these kinds have no
+          // reconcile pass to heal it. State kinds (39000-39005) are replaceable/addressable, so the
+          // relay only returns their latest regardless.
           relay?.subscribeScoped(`group:${groupId}`, [
-            chatFilter,
+            ...buildOpenChatFilters(
+              [9, 11, 12, 7],
+              '#h',
+              groupId,
+              groupChatSince(store, groupId, 300),
+              COLD_FEED_LIMIT,
+            ),
             {kinds: [39000, 39001, 39002, 39003, 39004], '#d': [groupId]},
             {kinds: [39005], '#h': [groupId]},
             // Raw join requests: 39004 above carries pending PUBKEYS only — the sealed intro note
@@ -1721,6 +1811,12 @@ function App(): React.JSX.Element {
             // NO delivery path at all — the feed sub omits 30078 and org-config is organizer-scoped
             // — so another admin's rules/reactions/pin never actually arrived until now.
             {kinds: [30078], '#d': [`space-invites:${groupId}`, `space-settings:${groupId}`]},
+            // Space-key recovery (2026-07-28): re-fetch this space's 30079 key deliveries on open
+            // (the standing space-keys sub's global `since` can pin itself above a delivery this
+            // member never received — the message backfill's since-poisoning shape, healed the same
+            // way), and pull any stranded member's key-redelivery request docs so a keyed admin
+            // opening the space can answer them. See buildSpaceKeyRecoveryFilters.
+            ...buildSpaceKeyRecoveryFilters(groupId),
           ]);
         },
         unsubscribeGroup: groupId => relay?.closeSub(`group:${groupId}`),
@@ -1736,20 +1832,25 @@ function App(): React.JSX.Element {
         // instead of leaving it whatever slice of the standing sub's shared `limit` it happened to get.
         //
         // Incremental `since` off this channel's own cached high-water (minus a 300s overlap for relay
-        // lag), falling back to a bounded newest-first `limit` on a channel we hold nothing for —
-        // identical in shape and rationale to subscribeGroup's chatFilter. Re-requested messages
-        // inside the overlap dedupe on id in ingest().
+        // lag), PLUS an always-present newest-first bounded page, in one REQ — identical in shape and
+        // rationale to subscribeGroup's chat filters. The bounded page is the 2026-07-28 field fix:
+        // the standing `channels` sub's shared limit page (and the retention prune) cache newest-only
+        // strays, so a since-only resub pinned itself above a hole it could never refetch and the
+        // channel read "posts not loading" forever (see buildOpenChatFilters). Re-requested messages
+        // dedupe on id in ingest() before the schnorr verify, so the overlap is bandwidth-only.
         subscribeChannelChat: !SCOPED_CHANNEL_SYNC
           ? undefined
           : channelId => {
-              const chatFilter: ReqFilter = {kinds: [Kind.LiveChat], '#a': [channelId]};
-              const since = channelChatSince(store, channelId, 300);
-              if (since !== undefined) {
-                chatFilter.since = since;
-              } else {
-                chatFilter.limit = COLD_FEED_LIMIT;
-              }
-              relay?.subscribeScoped(`channel:${channelId}`, [chatFilter]);
+              relay?.subscribeScoped(
+                `channel:${channelId}`,
+                buildOpenChatFilters(
+                  [Kind.LiveChat],
+                  '#a',
+                  channelId,
+                  channelChatSince(store, channelId, 300),
+                  COLD_FEED_LIMIT,
+                ),
+              );
             },
         unsubscribeChannelChat: !SCOPED_CHANNEL_SYNC
           ? undefined
@@ -1901,8 +2002,8 @@ function App(): React.JSX.Element {
       // but a blocking read won't notice for up to the ~90s watchdog — so if we're connected, bounce
       // the relay now. startRelay reconnects on the new network, and the relay-down chain (NEWNYM +
       // escalation) rebuilds circuits if the first attempt fails. Ignored unless actually live (not
-      // just getState() === 'connected', which can stale-report true for up to ~10s into a blocking
-      // native disconnect), so a spurious nudge is harmless.
+      // just getState() === 'connected', which can briefly stale-report true into a still-resolving
+      // disconnect() — see TorManager.isLive()'s doc), so a spurious nudge is harmless.
       const netChangeSub = DeviceEventEmitter.addListener('StiqTorNetworkChange', () => {
         // DE-ESCALATE: bridgeStartTier is otherwise a one-way ratchet for the whole session — once a
         // transport is condemned, every later cascade skips it until the app is relaunched. But the
@@ -1913,6 +2014,7 @@ function App(): React.JSX.Element {
         // working connection is never disturbed — and if direct really is still blocked, the cascade
         // re-condemns it at the cost of one probe.
         bridgeStartTier = -1;
+        deadRungs.clear();
         // T4: while dormant, DON'T wake the relay — stay idle and just remember that the network
         // changed, so the next exit() (foreground return) forces exactly one relay bounce onto the
         // new network. `dormant` is always false when TOR_DORMANCY is off, so this latch never fires
@@ -1949,6 +2051,7 @@ function App(): React.JSX.Element {
       // exactly what we want when the user lands on Automatic after trying other modes.
       applyTorPrefsRef.current = (): void => {
         bridgeStartTier = -1;
+        deadRungs.clear();
         activeTier = -1;
         relayFailureStreak = 0;
         desiredConnected = true;
@@ -2399,6 +2502,20 @@ function App(): React.JSX.Element {
         if (relay !== null || !manager.isLive()) {
           return;
         }
+        // A DORMANT daemon is still isLive(): enter() deliberately never disconnect()s it (that is the
+        // whole point — see foregroundLock.ts's dormant-daemon doc, "its TorManager keeps reporting
+        // connected/isLive() and a live SOCKS proxy"), so the guard above cannot tell "Tor is up" from
+        // "Tor is idled". Dialling here would open a relay socket over a daemon that is not building
+        // circuits: it can never carry a frame, yet it sets `relay` non-null — and resumeFromDormant()
+        // treats a non-null relay as "already connected, nothing to do". The foreground would then come
+        // back to a socket that is dead by construction, with NOTHING scheduled to replace it until the
+        // 90s RELAY_DATA_TIMEOUT_MS watchdog finally condemns it and starts the 5-60s backoff on top.
+        // exit() clears `dormant` BEFORE calling resumeFromDormant(), so the resume path is unaffected;
+        // the only caller this turns away is a stale backoff retry (see doEnter, which also clears it).
+        // Always false when TOR_DORMANCY is off, so this is inert there.
+        if (dormant) {
+          return;
+        }
         // Honour the backoff floor, but ONLY while a failure streak is live. Every path that resets
         // the streak to 0 (a successful sync via markRelayAlive, a community switch, a transport
         // escalation) therefore keeps its immediate first dial with no extra bookkeeping — the floor
@@ -2415,6 +2532,48 @@ function App(): React.JSX.Element {
         // credential exchange uses its own socket against the join code's relay, so the feed relay
         // simply stays closed until enrollment makes a community active.
         if (!activeRelayUrl) {
+          return;
+        }
+        // EARLY-START GUARD: Tor may now be live before runtime.init() has hydrated (the early
+        // cascade — see the kick above attemptInit()). The relay layer must not dial before the
+        // active community's stores and credential exist; the init completion handler re-enters.
+        if (!initComplete) {
+          return;
+        }
+        // REACH HANDOFF: an early-started daemon bootstrapped credential-less. Install the active
+        // community's reach credential into the LIVE daemon — Arti reads its keystore at
+        // descriptor-fetch time, so unlike C-tor this needs no restart — then dial. Runs ONCE per
+        // setup, keyed on reachEnsured ALONE: adding `|| !allOnionAuthLoaded()` here would re-enter
+        // the install at native-call speed forever if a successful install ever failed to satisfy
+        // that predicate (e.g. an extras/active-set mismatch during a switch). A later community
+        // switch that changes the needed credential is owned by reconnectActiveRelayRef, which
+        // already restarts the cascade when auth isn't loaded.
+        if (!reachEnsured) {
+          if (reachInstallInFlight) {
+            return; // the settle handler below re-enters startRelay
+          }
+          reachInstallInFlight = true;
+          void manager.installReach().then(
+            ok => {
+              reachInstallInFlight = false;
+              reachEnsured = true;
+              if (ok || allOnionAuthLoaded()) {
+                startRelay();
+                return;
+              }
+              // No live install path (backend predates installReach, or the native write failed):
+              // fall back to the restart the pre-early-start flow always used — the new start
+              // config carries the credential, and the cascade re-dials the relay when done.
+              rerunRequested = cascadeRunning;
+              void (async () => {
+                await manager.disconnect();
+                void runCascade();
+              })();
+            },
+            () => {
+              reachInstallInFlight = false;
+            },
+          );
           return;
         }
         try {
@@ -2454,8 +2613,10 @@ function App(): React.JSX.Element {
             relayFailureStreak = receivedData ? 0 : relayFailureStreak + 1;
             // The onion was unreachable over this circuit — rotate to a fresh one before the next
             // attempt so we don't keep riding the same dead rendezvous circuit. Only every Nth
-            // failure, though: Tor rate-limits NEWNYM to ~once/10s, so asking on every fast failure
-            // wasted the rotation (Tor ignored it) and churned half-built circuits.
+            // failure, though: Arti's arti_new_identity() has no rate limit (unlike C-tor's NEWNYM,
+            // which Tor itself throttles to ~once/10s) — every call immediately retires ALL onion
+            // circuits, so rotating on every fast failure would fully execute each time and churn
+            // half-built circuits rather than being harmlessly ignored.
             if (!receivedData && shouldRotateCircuit(relayFailureStreak)) {
               requestNewTorCircuit();
             }
@@ -2844,6 +3005,18 @@ function App(): React.JSX.Element {
         relayRef.current = null;
         activeSocket = null;
         clearProactiveTimer();
+        // A backoff retry scheduled BEFORE we went dormant must not fire while we ARE dormant. This is
+        // reachable, not theoretical: the backoff reaches 32-60s at a streak of 4+, which comfortably
+        // outlives the 30s background grace period that precedes this call, so the pending timer really
+        // does straddle the transition. Unlike the legacy teardown path (which disconnect()s, so
+        // startRelay()'s isLive() guard stops the dial by itself), dormancy keeps the daemon live and
+        // the dial would go straight through. Nothing is lost by dropping it: exit() →
+        // resumeFromDormant() calls startRelay() again, which re-consults the same (deliberately
+        // untouched) nextRelayAttemptAt floor and re-schedules whatever wait is left.
+        if (relayRetryTimer !== undefined) {
+          clearTimeout(relayRetryTimer);
+          relayRetryTimer = undefined;
+        }
       };
 
       // TS-3: enter() fires ~30s after backgrounding (the grace timer above), by which point a
@@ -2876,6 +3049,16 @@ function App(): React.JSX.Element {
             } else if (bounce) {
               forceRelayReconnectRef.current?.(activeRelayUrl);
             } else {
+              // Nothing on this branch reconnects, so nothing re-issues the standing feed REQ — and a
+              // relay can silently drop a REQ without closing the socket, which then sits invisible
+              // until the next reconnect (dead feed, "Connected" chip, the reader pulls to refresh).
+              // The legacy resume does the lightweight resync backstop for exactly this case — but it
+              // lives in the AppState 'active' handler's `if (TOR_DORMANCY) … else` arm, and
+              // TOR_DORMANCY ships ON, so in every shipped build that call is unreachable and the
+              // still-live resume had no content-freshness step at all. Restore parity here.
+              // resyncFeed coalesces onto an in-flight round and is watchdogged, so a burst of focus
+              // returns can neither pile up rounds nor hang.
+              void runtime.refreshFeed();
               // G4/foreground hook: dormancy never actually entered (a quick background→foreground
               // inside the grace window) — the relay stayed live and NOTHING here reconnects, so
               // startRelay()'s post-connect token top-up (maybeDrawTokens/stockAuxiliaryWallets) never
@@ -2961,6 +3144,22 @@ function App(): React.JSX.Element {
 
         // Step 5: when Tor finishes bootstrapping, open the relay WebSocket through it.
         if (state === 'connected' && relay === null) {
+          // Reset the relay backoff FIRST. This was the only one of the four startRelay() callers
+          // that did not (cf. the resets at the mirror-switch, community-switch and unlock sites),
+          // and the omission silently re-staled the app after every Tor recovery: startRelay()'s
+          // own floor check is `if (relayFailureStreak > 0) { …wait nextRelayAttemptAt… }`, so a
+          // fresh Tor connect inherited a backoff earned by relay dials that failed during the
+          // outage which just ended — up to RELAY_BACKOFF_MAX_MS (60s).
+          //
+          // MEASURED on device 2026-07-27: Tor reconnected and reported `connected`, and the relay
+          // was then not dialled for ~90s. Tor is up, the feed is stale, and nothing is retrying —
+          // exactly the "I have to pull to refresh" symptom.
+          //
+          // A successful Tor (re)connect is newer, independent proof the transport is healthy than
+          // anything the last relay failure saw, so the old streak is stale evidence. Zeroing the
+          // streak alone is sufficient — the stale `nextRelayAttemptAt` is unreachable once the
+          // `streak > 0` guard is false. See reconnectBackoff.ts's relayBackoffMs RESET CONTRACT.
+          relayFailureStreak = 0;
           startRelay();
         }
         // Stamp when THIS transport became usable, so the escalation gate can require a real
@@ -2993,9 +3192,10 @@ function App(): React.JSX.Element {
           // avoids a hot loop if a connect fails instantly, and lets the single-flight
           // runCascade collapse duplicate triggers. WebTunnel bridges rotate, so drop the
           // in-memory set first so the next cascade re-fetches fresh ones. Covers 'disconnected'
-          // too: native stopTor() blocks for up to ~10s, so a background-teardown stop can
-          // finally resolve to 'disconnected' well after the fact, and nothing else reschedules
-          // a connect from that state. Safe against a DELIBERATE background teardown because that
+          // too: disconnect() only flips state after backend.stop() resolves (near-instant under
+          // Arti, but not synchronous), so a background-teardown stop can finally resolve to
+          // 'disconnected' slightly after the fact, and nothing else reschedules a connect from
+          // that state. Safe against a DELIBERATE background teardown because that
           // path sets desiredConnected = false before ever calling manager.disconnect().
           // T4: `!dormant` pauses the auto-reconnect while we deliberately idle Tor in the
           // background. Always true (no-op) when TOR_DORMANCY is off — dormant never flips there.
@@ -3006,10 +3206,79 @@ function App(): React.JSX.Element {
         }
       });
 
-      const unsubscribeRuntime = runtime.subscribe(s => {
-        setSnapshot(s);
+      // Deferred reachability verdict (native background probe — the blocking 6-16s pre-connected
+      // probe this replaced). ok=true confirms the connected rung really carries streams: commit
+      // the deferred warm-cache write. ok=false means bootstrap lied off a cached consensus: the
+      // manager is already stopping the daemon and about to flip 'offline' (which schedules the
+      // next walk via the onChange handler above); all this handler owns is the ladder memory —
+      // condemn the rung for the session and drop poisoned warm entries so neither this walk nor
+      // the next LAUNCH re-picks it off storage. A rare wrong condemnation (e.g. a PoW-stalled
+      // probe timing out while the relay WS was actually fine) costs one re-walk; the exhaustion
+      // reset in connectGuided guarantees it can never strand the app with zero rungs.
+      const unsubscribeReach = manager.onReach((ok, transport, message) => {
+        if (ok) {
+          const save = pendingWarmSave;
+          pendingWarmSave = null;
+          if (save) {
+            void save();
+          }
+          return;
+        }
+        pendingWarmSave = null;
+        log.info('perf:tor', `transport-dead ${transport ?? '?'}: ${message ?? ''}`);
+        if (transport) {
+          deadRungs.add(transport);
+          if (transport === 'direct') {
+            // Mirror the relay-condemnation ratchet: direct proved unusable here this session.
+            bridgeStartTier = Math.max(bridgeStartTier, 0);
+          }
+        }
+        if (secureStorage) {
+          const storage = secureStorage;
+          void (async () => {
+            const netClass = await getNetworkClass();
+            await clearCachedBridgesForClass(storage, netClass);
+            const cached = await loadCachedBridges(storage);
+            if (cached && transport && cached.transport === transport) {
+              await clearCachedBridges(storage);
+            }
+          })();
+        }
+      });
+      cleanups.push(unsubscribeReach);
+
+      // Non-urgent (throttled relay-churn) snapshots are coalesced to the LATEST value and applied
+      // via InteractionManager.runAfterInteractions rather than setSnapshot()'d inline: setSnapshot
+      // here forces a full re-render of the entire tree (this is still App's single full-snapshot
+      // subscriber — see useRuntimeSlice.ts's adoption note), and `startTransition` cannot make that
+      // render lower-priority in THIS app: useSyncExternalStore's own change-detection re-render
+      // hardcodes SyncLane regardless of transition context, and separately this app has no
+      // concurrent React root at all (renderApplication.js only turns concurrent rendering on for
+      // Fabric; android/gradle.properties has newArchEnabled=false) — see useRuntimeSlice.ts's module
+      // doc for the full verification. InteractionManager.runAfterInteractions is this codebase's
+      // existing, load-bearing way of moving JS-thread-heavy work off an in-flight gesture/animation
+      // (maybeDrawTokens/startColdCascade above, MainScreen's threadNodes/notifItems passes), reused
+      // here rather than inventing a second mechanism. Urgent snapshots (the user's own post/vote/
+      // lock/nav) bypass all of this and apply synchronously, exactly as before.
+      // The coalescing slot itself lives at component scope (nonUrgentFlush, near the `snapshot`
+      // state) so direct setSnapshot() callers outside this effect can supersede a queued flush —
+      // see deferredSnapshotSlot.ts for the stale-overwrite bug that forced it out of this closure.
+      const unsubscribeRuntime = runtime.subscribe((s, urgent) => {
+        if (urgent) {
+          // A fresher urgent snapshot always supersedes whatever a still-pending background flush
+          // queued — letting the stale one apply afterwards would visibly regress state the user
+          // just saw back to an older snapshot. cancel() retires the handle too (not just the
+          // value), so a burst of urgent emits can't strand a phantom "already queued" flush.
+          cancelPendingSnapshotFlush();
+          setSnapshot(s);
+        } else {
+          nonUrgentFlush.defer(s);
+        }
         // T1: mirror the member's joined-group ids for the (dark) push registration payload. Gated
-        // on the flag so the flag-off callback is byte-identical to passing `setSnapshot` alone.
+        // on the flag so the flag-off callback is byte-identical to passing `setSnapshot` alone. Runs
+        // off every emit regardless of urgency — it only refreshes a plain captured variable (never
+        // triggers a render on its own), so it carries none of the render cost the deferral above
+        // exists to avoid.
         if (PUSH_UNIFIEDPUSH) {
           pushGroupIds = s.groups.map(g => g.id);
         }
@@ -3022,6 +3291,11 @@ function App(): React.JSX.Element {
         relayRef.current = null;
         unsubscribeTor();
         unsubscribeRuntime();
+        // Cancel any queued non-urgent flush rather than relying on `disposed` to make it a no-op —
+        // the slot now outlives this effect (it's a component-scope ref), so leaving a live handle
+        // behind would strand a callback holding a disposed runtime's snapshot. Same unsubscribe-
+        // time guard useRuntimeSlice.ts's subscribe wrapper applies.
+        cancelPendingSnapshotFlush();
         runtime.dispose();
         runtimeRef.current = null;
       });
@@ -3108,18 +3382,28 @@ function App(): React.JSX.Element {
       // acts on it.
       // Start the cold Tor cascade exactly once, and NOT before runtime.init() has hydrated.
       //
-      // THE BUG THIS FIXES (device-proven 2026-07-15, logcat + torrc): Tor reads client auth only at
-      // startup, from the ClientOnionAuthDir named in its torrc. That line is written only when
-      // manager.connect() can resolve a credential — and resolveOnionAuth() reads getActiveOnionAuth(),
-      // an IN-MEMORY value that only exists after init() hydrates the active community
-      // (AppRuntime → setActiveOnionAuth). Starting the cascade before init() therefore wrote a torrc
-      // with NO ClientOnionAuthDir at all, so the daemon had no key for the members-only onion and
-      // every dial failed `0xF4 MISSING client authorization` — a fatal error no retry can fix.
+      // THE BUG THIS FIXES (device-proven 2026-07-15 under the since-deleted C-tor engine, logcat +
+      // torrc): Tor read client auth only at startup, from the ClientOnionAuthDir named in its
+      // torrc. That line was written only when manager.connect() could resolve a credential — and
+      // resolveOnionAuth() reads getActiveOnionAuth(), an IN-MEMORY value that only exists after
+      // init() hydrates the active community (AppRuntime → setActiveOnionAuth). Starting the cascade
+      // before init() therefore wrote a torrc with NO ClientOnionAuthDir at all, so the daemon had no
+      // key for the members-only onion and every dial failed `0xF4 MISSING client authorization` — a
+      // fatal error no retry could fix.
       //
       // The app only ever recovered by ACCIDENT: four failures tripped the transport escalation, which
       // restarts Tor — and by then the credential had hydrated, so the new torrc carried it. The ladder
       // walk to obfs4/snowflake was never about censorship; it was an expensive way to restart the
       // daemon. That is the whole "4m16s to usable when direct Tor was up in 4.3s".
+      //
+      // STILL TRUE UNDER ARTI, different mechanism: onion_auth::install_into_keymgr
+      // (arti-ffi/src/onion_auth.rs) installs the credential into Arti's persistent KeyMgr keystore
+      // fresh on every arti_start() — i.e. every manager.connect() call builds a new TorClient and
+      // re-installs whatever resolveOnionAuth() resolves to AT THAT MOMENT. A connect attempted
+      // before init() hydrates still installs no credential (or a stale one) into the keystore for
+      // that attempt, and the auth-gated descriptor fetch still fails the same way. The sequencing
+      // fix below is therefore still required — only the "torrc line" in the paragraph above is
+      // history; the ordering hazard it describes is not.
       //
       // Waiting costs the init() duration (a keystore read + SQLCipher open, ~sub-second) and buys a
       // first dial that can actually succeed. The timeout path still starts Tor, so a hung init()
@@ -3172,9 +3456,17 @@ function App(): React.JSX.Element {
             // wasn't (bug 2; see deliverDeepLink above).
             initComplete = true;
             // Hydration done ⇒ getActiveOnionAuth() now returns the active community's reach
-            // credential, so the daemon's very first torrc carries its ClientOnionAuthDir. This is
-            // the call that must not happen any earlier (see startColdCascade).
+            // credential, so the daemon's very first arti_start() installs it into Arti's KeyMgr
+            // keystore (onion_auth::install_into_keymgr) before ever dialing. This is the call that
+            // must not happen any earlier (see startColdCascade).
             startColdCascade();
+            // Early-start handoff: when the early kick already connected Tor, the 'connected'
+            // transition happened before hydration and nothing else will call startRelay() now.
+            // Its own guards (initComplete, reach handoff) make this idempotent and ordered.
+            if (manager.isLive() && relay === null) {
+              relayFailureStreak = 0;
+              startRelay();
+            }
             if (pendingDeepLink) {
               const url = pendingDeepLink;
               pendingDeepLink = null;
@@ -3193,6 +3485,37 @@ function App(): React.JSX.Element {
             // instead of only on a later launch.
           });
       };
+      // ── EARLY TOR START ─────────────────────────────────────────────────────────────────────────
+      // MEASURED 2026-07-28 (S23, vc12): "Running stiq" → arti_start was a flat 5.4-5.5s on every
+      // launch — runtime.init() (SQLCipher open, keystore reads, migrations) serialized ahead of a
+      // bootstrap that needs NONE of it. Bootstrap requires no reach credential (Arti consults its
+      // keystore at descriptor-fetch time), so the cascade now starts as soon as the user's
+      // connection prefs are readable; the credential lands on the LIVE daemon via startRelay()'s
+      // reach handoff once init() hydrates. The ordering disaster startColdCascade's comment
+      // documents (the 4m16s "connect before hydration = no credential" bug) was about the
+      // CREDENTIAL, not the bootstrap — and the relay dial still waits for hydration
+      // (startRelay's initComplete guard), so that hazard stays closed.
+      //
+      // The prefs load is the one thing that must precede the walk: getTorConnectionPrefs() is a
+      // sync mirror hydrated during init(), and defaulting it early would dial DIRECT for a user
+      // who explicitly chose bridges — a network-visible choice they made for a reason. One
+      // storage read closes that hole; init()'s own later load of the same key is idempotent.
+      // runAfterInteractions keeps audit finding #4's spirit: clear of the very first frames.
+      InteractionManager.runAfterInteractions(() => {
+        if (disposed) {
+          return;
+        }
+        void (async () => {
+          try {
+            await new TorSettingsStore(secureStorage).load();
+          } catch {
+            // Defaults apply — the auto ladder is the safe fallback.
+          }
+          if (!disposed) {
+            startColdCascade();
+          }
+        })();
+      });
       retryInitRef.current = attemptInit;
       attemptInit();
     };
@@ -3445,6 +3768,43 @@ function App(): React.JSX.Element {
     setHydrated(false);
     retryInitRef.current();
   }, []);
+
+  /**
+   * Establishes/advances the "N new posts" pill's baseline (AppRuntime.markFeedSeen's doc).
+   * markFeedSeen() deliberately does NOT emit on its own — AppRuntime.feedSeen.test.ts pins "flows
+   * through the normal throttled deferred emit... no special-cased bypass" for relay-driven consumers
+   * of newFeedItemCount — so without the getSnapshot()+setSnapshot below, the pill would keep showing
+   * the pre-mark count until the next UNRELATED emit happened to carry the fresh one. Every caller of
+   * this prop (a deliberate pill tap, or MainScreen's edge-triggered "reader settled back at the
+   * top") is infrequent by construction, so reading the runtime directly here is cheap — and, like
+   * any other user-driven change in this app, correct to reflect right away rather than wait.
+   *
+   * TWO deliberate loop guards, both earned the hard way (release APK vc9 shipped with neither and
+   * pegged mqt_js at 100% CPU forever — see MainScreen.newPostsPill.test.tsx's regression describe):
+   *
+   *  1. useCallback([]), NOT the inline arrow every sibling prop on this element uses. This handler
+   *     re-renders App, so an identity that changes on every App render is a self-feeding cycle for
+   *     any consumer that keys off it. MainScreen no longer does (it holds this in a ref, matching
+   *     onOpenGroup/onOpenChannel), but the coupling is sharp enough that both ends should hold.
+   *     Stability is free here anyway: runtimeRef is a ref and setSnapshot is a stable setState.
+   *  2. Re-render only when the mark ACTUALLY moved. markFeedSeen() returns that, and getSnapshot()
+   *     builds a brand-new object every call — so an unconditional setSnapshot can never bail out on
+   *     Object.is and re-renders the whole tree even when nothing changed. Because the common case by
+   *     far is a repeat mark against an unchanged feed, this also removes the wasted full-tree render
+   *     that the pre-existing (correct) callers were paying on every scroll-to-top and tab return.
+   *
+   * The cancelPendingSnapshotFlush() below is separate from both: this setSnapshot bypasses the
+   * subscribe path entirely (it reads the runtime directly), so without it a non-urgent flush queued
+   * a moment earlier would fire afterwards and apply its OLDER, pre-mark snapshot — visibly bringing
+   * back the "N new posts" count the user just cleared by tapping the pill. See nonUrgentFlush's doc.
+   */
+  const handleMarkFeedSeen = useCallback((): void => {
+    const r = runtimeRef.current;
+    if (!r) return;
+    if (!r.markFeedSeen()) return;
+    cancelPendingSnapshotFlush();
+    setSnapshot(r.getSnapshot());
+  }, [cancelPendingSnapshotFlush]);
 
   // Hold the splash until the runtime knows the real enrolled state, so onboarding never flashes
   // for an already-enrolled user on cold start. By the time init() settles it has already emitted
@@ -3813,6 +4173,14 @@ function App(): React.JSX.Element {
       }
       onSetDisplayName={name => { void runtimeRef.current?.setMyDisplayName(name); }}
       onSetGradient={spec => { void runtimeRef.current?.setMyGradient(spec); }}
+      myCraftedGradient={
+        // Authoritative own-gradient for the header/compose avatars: setMyGradient bumps
+        // identityVersion + emits, so this re-reads fresh on the very next snapshot — the
+        // feed-derived fallback inside MainScreen goes stale for zero-post viewers.
+        snapshot.currentUserPubkey
+          ? runtimeRef.current?.gradientFor(snapshot.currentUserPubkey)
+          : undefined
+      }
       tagPolicy={snapshot.tagPolicy}
       labels={snapshot.labels}
       postRules={snapshot.postRules}
@@ -3826,6 +4194,7 @@ function App(): React.JSX.Element {
       bookmarkedPostIds={snapshot.bookmarkedPostIds}
       lockedPostIds={snapshot.lockedPostIds}
       pinnedPostIds={snapshot.pinnedPostIds}
+      newFeedItemCount={snapshot.newFeedItemCount ?? 0}
       onToggleBookmark={(postId: string) => { void runtimeRef.current?.toggleBookmark(postId); }}
       onReportPost={(postId: string, authorPubkey: string) => {
         // Use the organizer's reason buckets (not a hardcoded list) so member reports aggregate
@@ -3833,6 +4202,7 @@ function App(): React.JSX.Element {
         setPendingReport({postId, authorPubkey});
       }}
       onRefreshFeed={() => runtimeRef.current?.refreshFeed() ?? Promise.resolve()}
+      onMarkFeedSeen={handleMarkFeedSeen}
       onLoadOlderFeed={requestOlderFeed}
       onLoadOlderChannelPage={requestOlderChannelPage}
       onLoadOlderGroupPage={requestOlderGroupPage}

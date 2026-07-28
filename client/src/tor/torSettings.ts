@@ -59,8 +59,23 @@ const MAX_CUSTOM_BRIDGES = 12;
 const MIN_TIMEOUT_MS = 15_000;
 const MAX_TIMEOUT_MS = 600_000;
 
-/** Transports a user may pin in custom mode (all of them; 'direct' simply carries no bridges). */
-const ALL_TRANSPORTS: readonly TransportType[] = ['direct', 'webtunnel', 'obfs4', 'snowflake'];
+/**
+ * Transports a user may pin in custom mode (all of them; 'direct' simply carries no bridges) — a
+ * `Record<TransportType, true>`, NOT a plain array, so a future member added to `TransportType`
+ * fails tsc here unless this table is updated too.
+ *
+ * The Record is the point. As a plain `readonly TransportType[]` (what this was) the list compiles
+ * fine forever while silently omitting a new transport, and the failure is invisible at runtime:
+ * `normalizePrefs()` below would drop a persisted preference for that transport as if it were
+ * garbage input — no error, no warning, the user's pinned choice just reverts. Exhaustiveness is
+ * cheap to enforce here, so enforce it.
+ */
+const ALL_TRANSPORTS: Record<TransportType, true> = {
+  direct: true,
+  webtunnel: true,
+  obfs4: true,
+  snowflake: true,
+};
 
 // Live prefs, read synchronously by the connect cascade. Seeded with the default; replaced by the
 // persisted value on load() and by the user via setPrefs().
@@ -89,19 +104,22 @@ const SNOWFLAKE_RE = /^snowflake\s+/i;
 // bare "<ip:port> <40-hex>" with no transport keyword — a vanilla bridge (rejected: PT-only here).
 const VANILLA_RE = /^\S+:\d+\s+[0-9A-Fa-f]{40}/;
 
-// An accepted bridge line is written VERBATIM as a single torrc `Bridge <line>` directive
-// (StiqTorModule.buildTorrc). Bridge lines are untrusted input — users routinely paste them from
-// forums/messaging apps — so a line carrying an embedded control character (a CR/LF smuggled after
-// an otherwise-valid prefix) could split into a SECOND, attacker-chosen torrc directive. Reject any
-// C0 control char or DEL anywhere in the line, and cap the length (a real obfs4/webtunnel line is a
-// few hundred chars). `trim()` only strips leading/trailing whitespace, so an embedded CR survives
-// to be caught here. This is the load-bearing guard; parseBridgeLines' broadened split is defence
-// in depth on top of it.
+// An accepted bridge line is passed VERBATIM into TorStartConfig.bridgeLines, which the native layer
+// (StiqArtiModule.kt) marshals into a JSON array element and arti-ffi/src/pt.rs parses directly with
+// `BridgeConfigBuilder::from_str` — the same torrc-style `Bridge <line>` syntax, just never actually
+// assembled into torrc text along the way. Bridge lines are untrusted input — users routinely paste
+// them from forums/messaging apps — so a line carrying an embedded control character (a CR/LF
+// smuggled after an otherwise-valid prefix) could still split into a second, attacker-chosen
+// directive wherever it is eventually interpreted. Reject any C0 control char or DEL anywhere in the
+// line, and cap the length (a real obfs4/webtunnel line is a few hundred chars). `trim()` only strips
+// leading/trailing whitespace, so an embedded CR survives to be caught here. This is the load-bearing
+// guard; parseBridgeLines' broadened split is defence in depth on top of it.
 const MAX_BRIDGE_LINE_LEN = 600;
 
 /** True if the string carries any C0 control char (U+0000–U+001F) or DEL (U+007F) — either would
- * let a smuggled CR/LF split an accepted bridge line into a second torrc directive. Uses a
- * code-point scan (no control chars in source, no regex lint suppression needed). */
+ * let a smuggled CR/LF split an accepted bridge line into a second, attacker-chosen directive
+ * wherever it is later interpreted. Uses a code-point scan (no control chars in source, no regex
+ * lint suppression needed). */
 function hasControlChar(s: string): boolean {
   for (let i = 0; i < s.length; i++) {
     const c = s.charCodeAt(i);
@@ -247,7 +265,7 @@ export function normalizePrefs(
     : 'auto';
 
   const preferredTransport =
-    next?.preferredTransport && ALL_TRANSPORTS.includes(next.preferredTransport)
+    next?.preferredTransport && ALL_TRANSPORTS[next.preferredTransport]
       ? next.preferredTransport
       : undefined;
 

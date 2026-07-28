@@ -1,3 +1,264 @@
+# SUPERSEDED — 2026-07-27: Arti shipped; the 2026-07-11 NO-GO no longer holds
+
+> **This document's verdict is SUPERSEDED.** Everything from the horizontal rule below onward is
+> the original 2026-07-11 Go/No-Go analysis, preserved unmodified for history — read it for how
+> that decision was reached, not for what is true today. What is true today is this section.
+
+**Superseded by:** the branch that carries the Arti cutover (based on `master @ 0c94b787`).
+**Not yet merged** — that is a decision for a human maintainer, not an agent.
+**Superseded on:** 2026-07-27, revised same day as later device evidence landed on the same branch
+— this section is the up-to-date reversal; it is not a third layer stacked on an earlier same-day
+draft.
+
+## Why the verdict flipped
+
+The 2026-07-11 recommendation was **"GO on the seam, NO-GO on a cutover"** (§7 below), gated on
+three blockers: (1) the pluggable-transport (PT) external-binary / W^X question — called out there
+as *"the single biggest risk"* — (2) unmeasured `.so` size and cold-start, and (3) the WebView
+HTTP-CONNECT gap. Blocker 1 is resolved, and resolved at the packaging level rather than worked
+around. Blocker 2 is now measured on-device rather than estimated — but "measured" is not the same
+as "favorable": size is a clear win, cold-start connect time is not (see §3–4 below). Blocker 3 is
+**unchanged** —
+still open today, and this document says so plainly rather than calling the migration
+unconditional. Cutover has also happened in code: the incumbent Tor engine
+(`info.guardianproject:tor-android` + IPtProxy) is deleted from the tree, not sitting dark behind a
+flag next to Arti — there is no incumbent build left in this tree to A/B against.
+
+### 1. Arti is the only Tor engine now
+
+The spike's `USE_ARTI_BACKEND` flag does not exist anymore, in any form:
+- `client/src/tor/index.ts`'s `createTorBackend()` unconditionally returns `ArtiTorBackend`,
+  falling back only to an offline `UnavailableTorBackend` — never to the old engine, never to
+  clearnet (`ALLOW_CLEARNET_FALLBACK` stays `false`).
+- `StiqTorModule.kt` / `StiqTorPackage.kt` no longer exist under
+  `client/android/app/src/main/java/com/stiq/client/`.
+- `MainApplication.kt` (`getPackages()`) registers `add(StiqArtiPackage())` and contains no
+  reference to the old module at all.
+- `client/android/app/build.gradle`'s `dependencies {}` block no longer pulls
+  `info.guardianproject:tor-android` or `com.netzarchitekten:IPtProxy` — the only remaining
+  references are historical comments explaining what used to be there.
+
+### 2. Blocker 1 (PT external-binary / W^X) is resolved — and the mechanism is the whole answer
+
+The 2026-07-11 verdict flagged, correctly, that Arti's managed-PT path shells out to an external
+lyrebird/obfs4 binary, and that executing a bundled binary from app-private storage collides with
+Android's W^X hardening. That is exactly what would have happened on the naive path — and the fix
+is a packaging decision, not a workaround:
+
+- The PT binaries ship as real files under `client/android/app/src/main/jniLibs/<abi>/`
+  (`libLyrebird.so` for obfs4/meek_lite, `libSnowflake.so`, `libWebtunnel.so`) alongside
+  `libarti_mobile.so` itself. Because they live under `jniLibs`, the **installer** — not the app —
+  extracts them into `nativeLibraryDir` at install time, which is the only exec-capable directory
+  on API 29+ app storage. Nothing at runtime writes an executable to app-private storage; the
+  binary the app later spawns was placed there by the OS's own package installer.
+- That placement requires the libs to be extracted as real files rather than left mmap'd inside the
+  APK's zip, which is exactly what `useLegacyPackaging = true`
+  (`client/android/app/build.gradle`, `packaging { jniLibs { ... } }`, line 187) buys. The
+  build.gradle comment is explicit that this used to be an unstated assumption whose failure mode
+  is silent: *"the app would connect fine on the direct rung and quietly lose bridges"* — i.e. it
+  would break only for users on a censored network, the users a bridge feature exists for.
+- **Device-verified**, with the full managed-PT handshake actually driven by `tor-ptmgr` (not a
+  standalone binary check) — captured on-device via a `tracing`→`log` bridge added specifically
+  because Arti instruments with `tracing` and Android's logger only sees `log`:
+  ```
+  tor_ptmgr::ipc::sealed: Launching pluggable transport at .../lib/arm64/libSnowflake.so
+  tor_ptmgr::ipc::sealed: Transport 'snowflake' uses method PtClientMethod { kind: V5, endpoint: 127.0.0.1:35085 }
+  tor_ptmgr: Successfully launched PT for snowflake at PtClientMethod { ... }
+  tor_chanmgr::factory: Attempting to open a new channel to [... via snowflake $8838...]
+  ```
+  Both `libLyrebird.so` (obfs4) and `libSnowflake.so` were separately confirmed running as real
+  child processes of the app (process listing, parent PID = the app). This closes the "external
+  binary = blocker" question for both transports actually launched; see §"Bridges" below for what
+  is and is not proven beyond the launch itself.
+
+### 3. Blocker 2 (`.so` size and cold-start) — measured, not estimated (size is a win; cold-start timing is not — see §4)
+
+Every number in the 2026-07-11 doc's §6 was tagged `[MEASURE]` — there was no toolchain and no
+device. That gate is closed, but the honest number today is bigger than an earlier same-day pass
+reported, because that earlier pass measured a **direct-connect-only** build before the PT binaries
+above were added back in. Quoting the current, checked numbers rather than that earlier one:
+
+`client/arti-ffi/SIZE_REPORT.md` (generated by the crate's own `build.sh`, cross-checked against
+the live `jniLibs` directory bit-for-bit):
+
+| ABI | `libarti_mobile.so` (stripped) |
+|---|---|
+| arm64-v8a | 5,941,576 B (5.9 MB) |
+| armeabi-v7a | 4,150,976 B (4.2 MB) |
+
+That is the Tor engine alone. The full native footprint the app now ships also includes the three
+PT binaries, measured directly from `client/android/app/src/main/jniLibs/`:
+
+| File | arm64-v8a | armeabi-v7a |
+|---|---|---|
+| `libLyrebird.so` (obfs4/meek_lite) | 17,700,000 B | 16,869,892 B |
+| `libSnowflake.so` | 17,243,360 B | 16,391,436 B |
+| `libWebtunnel.so` | 5,381,408 B | 5,447,396 B |
+| `libarti_mobile.so` | 5,941,576 B | 4,150,976 B |
+| **Total, on disk** | **46,266,344 B (46.3 MB)** | **42,859,700 B (42.9 MB)** |
+
+That total is uncompressed, on-disk bytes — not the number a user downloads. The tree also has a
+built `app-arm64-v8a-release.apk`; checking its zip entries against the numbers above shows the
+arm64 build is current to within 616 bytes on `libarti_mobile.so` (build-nondeterminism scale,
+immaterial) and byte-identical on the three PT binaries, so its compressed sizes are trustworthy:
+
+| File | Compressed in APK (arm64) | Ratio |
+|---|---|---|
+| `libLyrebird.so` | 6,195,312 B | 65% |
+| `libSnowflake.so` | 6,037,972 B | 65% |
+| `libWebtunnel.so` | 2,104,687 B | 61% |
+| `libarti_mobile.so` | 3,168,646 B | 47% |
+| **Total download cost, arm64** | **~17.5 MB** | — |
+
+The **armeabi-v7a** build in the tree is measurably **stale** and is deliberately not quoted here:
+its bundled `libarti_mobile.so` is 3,956,868 B in the built APK versus 4,150,976 B in the current
+`jniLibs` — a 194 KB gap that can only mean the APK predates the armv7 rebuild recorded in this
+branch's own working notes. Rebuild before citing an exact armv7 download number.
+
+There is no incumbent (`tor-android` + IPtProxy) build left in this tree to diff against — it was
+removed as part of the cutover (§1) — so a true side-by-side delta cannot be produced honestly from
+this tree. ~17.5 MB of compressed download for Tor + all three pluggable transports, on a sideload-
+over-Tor app where download bytes are the scarce resource, is the number to weigh, not a delta
+against a build that no longer exists here.
+
+That closes the **size** half of this blocker cleanly. The **cold-start** half does not close the
+same way: see §4 below for the measured ~100 s cold-directory-cache connect time, which is the
+actual "migration cost" the 2026-07-11 doc's §6 asked to have measured, and which is not a win.
+
+### 4. Connect time — measured on device, and it is NOT a clean win
+
+| Path | Result |
+|---|---|
+| Arti, warm connect (bridges known-good, Arti's own directory cache still valid) | **3.5 s** |
+| Arti, direct connect (separate measurement pass) | 2.8 s |
+| Arti, obfs4-bridge connect, network bootstrap only (separate pass) | 2.2 s |
+| **Arti, cold directory cache (fresh install / cleared data)** | **~100 s**, flat 15% the whole time |
+| Old engine (`tor-android`), same class of path | **30–90 s**, documented prior to removal |
+
+The 3.5/2.8/2.2 s figures are all **warm-cache** numbers — "warm" here means the bridge set is
+known-good, not that Arti's own on-disk directory cache is valid. When that cache is cold, Arti
+pays the same cold-consensus fetch as a fresh start, which **measured ~100 s on a real device**
+while Arti's percent stream (`conn*0.15 + dir*0.85`) sat at a **flat 15%** the entire time — no
+intermediate progress to distinguish "working" from "stuck." This is documented in this same-day
+tree at `client/App.tsx:668-676` (the comment justifying `WARM_BOOTSTRAP_TIMEOUT_MS = 120_000`)
+and independently in `HANDOFF_BEAT_BITCHAT_2026-07-27.md:328` ("a cold user sees '15%' for ~100 s").
+
+**A cold directory cache is not an edge case — it is what every first-time install and every
+cleared-data user hits**, which is the exact audience a "beats bitchat" migration is aimed at. Set
+against the incumbent's documented 30–90 s cold range, Arti's ~100 s cold figure is **comparable to
+or worse than** what it replaces; only the warm path is an unambiguous win. Comparing Arti's warm
+3.5 s against C-tor's general 30–90 s range, as an earlier pass of this section did, compares two
+different things. Both figures belong in this table; neither should be quoted alone.
+
+These are three different measurement passes on the same device, not numbers restated. The bridge
+figure (2.2 s) measures Arti successfully bootstrapping its directory and launching the PT over a
+bridge; it does **not** by itself mean a working circuit to any particular destination was built
+through that bridge — see "Bridges" below for the distinction, which mattered enough here to have
+previously produced a false positive.
+
+### 5. Blocker 3 (WebView HTTP-CONNECT) — unchanged, still open, and it never gated cutover
+
+Checked directly against source, not carried forward from an old note: `arti_http_port()`
+(`client/arti-ffi/src/lib.rs:849`) still unconditionally returns `-1` — the daemon handle's
+`http_port` field is hardcoded to `-1` at construction (`lib.rs:770`) and nothing in this branch
+sets it otherwise. The full-page WebView proxy (`StiqWebProxy`,
+`client/src/browser/browserData.ts`) still has no HTTP-CONNECT port to bridge to. This is an
+**accepted, still-open limitation**, not a fixed gap being reported as fixed. It was already scored
+`major`, not `blocker`, in the original matrix (§3 below), and that scoring holds: real, unresolved,
+and never what the 2026-07-11 NO-GO actually turned on.
+
+## Bridges: what is proven, what is not, and what still needs a human decision
+
+This is the part of the migration most at risk of being oversold, so it is stated precisely.
+
+**Proven:** Arti's PT integration launches and drives pluggable transports correctly. Both
+`libLyrebird.so` (obfs4) and `libSnowflake.so` were confirmed running as real child processes,
+`tor-ptmgr` completed its managed-PT handshake with each, and Arti attempted to dial through the
+negotiated SOCKS endpoint (log evidence, §2 above). `libWebtunnel.so` builds and is accepted by the
+bridge-line parser but has not been exercised against `tor-ptmgr` on hardware.
+
+**Not proven:** that any bridge connection actually reached its destination end-to-end, on this
+backend or the one it replaced. On this branch's test network, **24 of 24** sampled published obfs4
+bridge endpoints were unreachable — `EHOSTUNREACH` in roughly 4 ms, which is the signature of active
+filtering rather than of the bridges being merely down — while, on the same device at the same
+moment, clearnet HTTP returned 200 and a direct (non-bridge) Tor connection succeeded in 1.4 s. That
+is a property of the network the test ran on, not of Arti's PT handling. So: **Arti launches and
+drives the PT correctly. Bridges are not proven to carry traffic end-to-end on any backend measured
+here.** Neither claim should be read as covering the other.
+
+A second, now-fixed bug had been compounding this diagnosis: Arti's bootstrap reported `connected
+100%` a few milliseconds after its own circuit manager logged that it had no usable guard at all.
+Reaching 100% only means the directory is usable, which a cached consensus satisfies with zero
+working channels — so the app's connect ladder was treating a dead rung as success and never
+escalating to its own moat-fetched-bridges fallback. The fix adds a post-bootstrap reachability
+probe before emitting `connected`, with error-kind discrimination so a probe failure escalates the
+ladder instead of hanging. See "Costs accepted" below for what that probe costs, because it is not
+free.
+
+**The real product answer for a censored community is a private bridge that has not been
+enumerated by a censor** — published bridge lists are exactly what the 24/24 result shows getting
+blocked. That is an **unmade decision**, not a code task, and it carries a trap worth stating
+explicitly: **do not co-locate a private bridge with the relay.** A bridge necessarily advertises
+its own IP to whoever it's handed to; the relay runs as an onion service specifically so its IP
+stays hidden. Putting both roles on one host hands every user of that bridge an IP address that
+also hosts the hidden service — the exact deanonymization the onion service exists to prevent.
+
+## Costs accepted, and what is still open
+
+Superseding the NO-GO is not the same as declaring the migration finished or free. These are real,
+today:
+
+- **The reachability probe (above) costs 12–18 s on a successful connect.** The user sits at "99%"
+  for that window while the probe runs. This is the price of fixing the false-`connected` bug, not
+  a separate regression, but it is a real, user-visible cost of doing the fix correctly.
+- **A cold directory cache is slow even when nothing is broken: ~100 s, flat at 15%, for a
+  first-time install or cleared-data user** (§4). That is a distinct case from the next bullet — a
+  live rung with a genuinely cold cache eventually completes, it just costs two orders of magnitude
+  more than the warm-cache number this document otherwise leads with.
+- **On a cold directory cache, a dead rung never reaches the probe at all.** Arti's own
+  `bootstrap()` call simply never returns in that case, and there is no Rust-side timeout wrapping
+  it. This is a pre-existing gap, not introduced by the probe fix, and it is still open.
+- **`compression` is still off.** `client/arti-ffi/Cargo.toml` builds `arti-client` with
+  `default-features = false`, dropping `tor-dirclient`'s `xz`/`zstd` support, so Arti negotiates
+  `deflate, identity` only. That is directory bytes paid on every cold bootstrap — still the single
+  biggest lever left on connect time. This is a **host build-toolchain limitation** (the dev host's
+  linker cannot produce the `dlltool.exe`-dependent host build products those features pull in), not
+  an Android limitation, and re-enabling it has not been attempted in passing.
+- **Onion-service client proof-of-work (prop327) is compiled in, but not proven under load.** The
+  relay enables `HiddenServicePoWDefensesEnabled`. `client/arti-ffi/Cargo.toml` enables
+  `arti-client`'s `hs-pow-full` feature specifically to answer that — the capability to solve a
+  served Equi-X puzzle is compiled into the binary, a stronger position than the 2026-07-11 doc's
+  "maturity is unclear." What is **not** established is behavior under an actually-loaded queue:
+  prop327 *deprioritizes* rather than *rejects*, so an idle-relay test connect succeeds whether or
+  not the client can solve the challenge at all. No test or device run exercises a loaded queue.
+  Treat client-side PoW as **present in the binary, not verified in practice.**
+- **`arti-client` is pinned well behind current upstream** (evaluated separately, not re-litigated
+  here): no live CVE against the pinned version, and the newer release's onion-service-client
+  connectivity fixes would apply to effectively all of this app's traffic. Deferred, not urgent.
+- **The bundled default bridge list is stale** independent of the network-filtering finding above —
+  at least some of its hosts refuse connections outright rather than merely being unreachable in
+  this test's network.
+
+## Bottom line
+
+The 2026-07-11 gates are satisfied well enough to ship the engine swap, but not uniformly in Arti's
+favor: the top blocker (PT/W^X) is fixed at the packaging level rather than worked around, `.so`
+size is measured on real hardware and favorable, connect time is measured and **mixed** — warm
+connects (3.5 s / 2.8 s / 2.2 s) beat the incumbent by an order of magnitude, but a cold directory
+cache — what a fresh install or cleared-data user actually gets — measures **~100 s**, comparable
+to or worse than the incumbent's own documented 30–90 s cold range (§4). The one blocker that
+remains open (WebView HTTP-CONNECT) was never what the NO-GO hinged on. What is **not** claimed:
+that connect time is an unambiguous win, that bridges work end-to-end for censored users on this
+build, that the reachability-probe cost is free, or that a cold-cache hang is fixed. Those are
+listed above as open, on purpose, because a supersede that only lists wins is not a decision
+record — it is marketing wearing a decision record's clothes. This document's role changes
+accordingly: it is no longer gating a decision that has not been made yet — it is the record of one
+that has, kept below in full because a decision record that erases its own history is worthless.
+
+---
+
+## Original decision record — 2026-07-11 (superseded by the section above; preserved verbatim for history)
+
 # ARTI MIGRATION — Go / No-Go Decision (T17 spike)
 
 **Date:** 2026-07-11  ·  **Branch:** `claude/stiq-implementation-plan-20acdb` (worktree

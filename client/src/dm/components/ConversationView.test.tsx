@@ -52,6 +52,59 @@ it('renders the transcript as a FlatList with a stable keyExtractor over message
   expect(list.props.data.map((m: DirectMessage) => m.id)).toEqual(['4', '3', '2', '1']);
 });
 
+it('anchors the transcript with maintainVisibleContentPosition so an arriving DM cannot yank a reader scrolled into history', () => {
+  let tree: renderer.ReactTestRenderer | undefined;
+  act(() => {
+    tree = renderer.create(
+      <ConversationView conversation={conversation()} selfPubkey={self} onSend={() => undefined} />,
+    );
+  });
+  const list = tree!.root.findAllByType(FlatList)[0]!;
+  expect(list.props.maintainVisibleContentPosition).toEqual({minIndexForVisible: 0});
+});
+
+it('does NOT pair removeClippedSubviews with the inverted+maintainVisibleContentPosition transcript', () => {
+  // On Android, removeClippedSubviews detaches off-screen child views from the same ScrollView
+  // content ViewGroup that MaintainVisibleScrollPositionHelper walks by index to find/track its
+  // anchor (see ThreadView.test.tsx's identical guard) — a view clipped away mid-update can vanish
+  // out from under the tracked anchor, defeating the position-stability test above. This list has
+  // never carried removeClippedSubviews; this pins that so it can't be added later without also
+  // re-litigating the interaction.
+  let tree: renderer.ReactTestRenderer | undefined;
+  act(() => {
+    tree = renderer.create(
+      <ConversationView conversation={conversation()} selfPubkey={self} onSend={() => undefined} />,
+    );
+  });
+  const list = tree!.root.findAllByType(FlatList)[0]!;
+  expect(list.props.removeClippedSubviews).not.toBe(true);
+});
+
+it('minIndexForVisible: 0 is the config that keeps the anchor stable, not one that pins to the newest', () => {
+  // `inverted` flips VISUAL top/bottom but not the underlying ScrollView's PHYSICAL child order:
+  // index 0 of `data` (the newest message, see invertedData above) is still physical child 0, at
+  // the physical top of the (pre-flip) content — same as a non-inverted list's index 0. A new
+  // incoming message is prepended at that same index 0/physical-top, pushing every older, currently-
+  // visible message down; minIndexForVisible: 0 lets MaintainVisibleScrollPositionHelper anchor on
+  // whichever of those older messages the reader is actually looking at and compensate the scroll
+  // offset by however far the insertion moved it — which is what keeps a reader scrolled UP into
+  // history from being yanked. A larger minIndexForVisible would exclude low-index (newest) items
+  // from ever serving as the anchor, which is backwards here: it's the OLD, already-visible items —
+  // not the newest one — that must stay put.
+  let tree: renderer.ReactTestRenderer | undefined;
+  act(() => {
+    tree = renderer.create(
+      <ConversationView conversation={conversation()} selfPubkey={self} onSend={() => undefined} />,
+    );
+  });
+  const list = tree!.root.findAllByType(FlatList)[0]!;
+  expect(list.props.inverted).toBe(true);
+  expect(list.props.maintainVisibleContentPosition.minIndexForVisible).toBe(0);
+  // The newest message really is data[0] under the inversion — confirms the "physical top = index 0
+  // = insertion point for a new arrival" premise above, not merely asserted but derived from data.
+  expect(list.props.data[0].id).toBe('4');
+});
+
 it('renders every message body through the transcript', () => {
   let tree: renderer.ReactTestRenderer | undefined;
   act(() => {

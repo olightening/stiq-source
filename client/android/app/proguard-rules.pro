@@ -15,15 +15,6 @@
 # reflection/JNI entry points this app relies on. (React Native's bundled proguard-android.txt
 # already keeps the RN framework, @DoNotStrip/JNI classes, Hermes and the JS bridge.)
 
-# Bundled Tor daemon + pluggable transports (loaded via JNI / service reflection).
--keep class org.torproject.** { *; }
--keep class IPtProxy.** { *; }
-
-# StiqTorService (W2): subclass of TorService instantiated by the Android framework from the manifest
-# <service> entry (reflective). AGP normally keeps manifest components, but keep it explicitly since it
-# extends a keep-listed AAR class and is the only foreground-promotion path for the daemon.
--keep class com.stiq.client.StiqTorService { *; }
-
 # This app's native modules — registered from Kotlin and bridged by name from JS, so keep the
 # module + package classes and their members intact.
 -keep class com.stiq.client.**Module { *; }
@@ -43,4 +34,18 @@
 # depend on a third-party dependency continuing to ship it.)
 -keepclassmembers class * extends androidx.work.ListenableWorker {
     public <init>(android.content.Context, androidx.work.WorkerParameters);
+}
+
+# StiqArtiModule (StiqArtiModule.kt) binds to Arti's Rust JNI bridge (arti-ffi/src/jni_bridge.rs)
+# via STATIC JNI symbol names baked into the compiled .so at build time — e.g.
+# `Java_com_stiq_client_StiqArtiModule_artiStart` — not JNI_OnLoad/RegisterNatives. If R8 renames
+# the class or any of its `external fun` methods (artiStart/artiStop/artiNewIdentity/
+# artiSetDormant/artiHttpPort/artiRegisterCallback), the .so's exported symbols no longer match
+# what the JVM looks up and Tor never starts: UnsatisfiedLinkError, release-only, since debug is
+# never minified. proguard-android.txt's bundled `-keepclasseswithmembernames class * { native
+# <methods>; }` already covers any class with a native method regardless of R8 mode — this rule
+# restates it scoped to the one class where it actually matters, so the JNI binding keeps working
+# even if that default-file reference is ever swapped out from under it.
+-keepclasseswithmembernames,includedescriptorclasses class com.stiq.client.StiqArtiModule {
+    native <methods>;
 }

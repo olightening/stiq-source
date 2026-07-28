@@ -68,7 +68,7 @@ rustup target add aarch64-linux-android armv7-linux-androideabi
 cargo install cargo-ndk
 export ANDROID_NDK_HOME=/path/to/Android/Sdk/ndk/<version>   # r26+
 cd client/arti-ffi
-./build.sh            # → android/app/src/main/jniLibs/<abi>/libarti_mobile.so  + SIZE_REPORT.md
+./build.sh            # → android/app/src/arti/jniLibs/<abi>/libarti_mobile.so  + SIZE_REPORT.md
 ```
 
 Then, BEFORE trusting the libs, run the host-target smoke (network-gated, `#[ignore]` by default):

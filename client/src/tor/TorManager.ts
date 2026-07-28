@@ -10,8 +10,9 @@
 import {ALLOW_CLEARNET_FALLBACK} from '../config';
 import type {ConnectionState} from '../connection';
 import type {TorBackend} from './backend';
+import {createBootstrapTimeline, type BootstrapTimeline} from './bootstrapTiming';
 import {buildStartConfig} from './bridges';
-import {TOR_MIN_SUPPORTED_VERSION, torVersionAtLeast} from './torVersion';
+import {getActiveRelayOnion, relayOnionHostOf} from './onionAuth';
 import type {BootstrapProgress, SocksProxy, TorBackendEvent, TorStartConfig, TransportType} from './types';
 
 export interface TorManagerOptions {
@@ -28,6 +29,16 @@ export interface TorManagerOptions {
    *  reaches the ACTIVE community's onion without the caller re-wiring on every switch. Overrides
    *  the static `onionAuth`. */
   resolveOnionAuth?: () => TorStartConfig['onionAuth'] | null;
+  /** Static relay onion (URL, `<host>.onion`, or bare host) for the native reachability probe —
+   *  see TorStartConfig.relayOnion. Normalized through relayOnionHostOf at connect. */
+  relayOnion?: string;
+  /** Resolver pulled at EACH connect for the current community's relay onion. Highest precedence in
+   *  the chain resolver > static `relayOnion` > the module-level `getActiveRelayOnion()` >
+   *  `onionAuth.onionHost`; the FIRST one that yields a v3 onion wins. Unlike `resolveOnionAuth`, a
+   *  null return does NOT clear the value — it just falls through to the next source. "No relay
+   *  onion" is not a meaningful state the way "public onion, no auth key" is: it only costs the
+   *  probe its target, and a missing probe is the bug this field exists to close. */
+  resolveRelayOnion?: () => string | null | undefined;
   /** Static SECONDARY-mirror reach credentials (P2 §1.7 multi-relay client transport). Threaded
    *  straight through to the native start config alongside `onionAuth`; absent/empty → no
    *  secondary mirrors carry their own auth-gated onion. See ./onionAuth deriveOnionAuthSet. */
@@ -37,22 +48,32 @@ export interface TorManagerOptions {
    *  without the caller re-wiring on every community switch. Overrides the static
    *  `onionAuthExtra`. Inert (never called) until a caller supplies it. */
   resolveOnionAuthExtra?: () => TorStartConfig['onionAuthExtra'] | null;
-  /** When true the native torrc uses the battery-friendly mobile dormancy padding block +
-   *  DormantClientTimeout (so a backgrounded daemon can idle dormant instead of being killed).
-   *  Pure transport config, not manager state: threaded straight into `buildStartConfig(merged)`
-   *  via the `{...this.options}` spread in connect(). Absent/false → the active-session liveness
-   *  block, byte-identical. See TorStartConfig.dormancy. */
+  /** When true, Arti applies `DormantMode::Soft` to the TorClient at construction (so a backgrounded
+   *  daemon can idle instead of being killed) rather than C-tor's torrc padding/DormantClientTimeout
+   *  directives, which Arti has no equivalent of. Pure transport config, not manager state: threaded
+   *  straight into `buildStartConfig(merged)` via the `{...this.options}` spread in connect().
+   *  Absent/false → built non-dormant, byte-identical. See TorStartConfig.dormancy. */
   dormancy?: boolean;
+  /** Injectable clock for the connect-timing instrumentation ONLY (see ./bootstrapTiming). Defaults
+   *  to Date.now. Tests pass a deterministic counter so a recorded breakdown is assertable without
+   *  fake timers. Nothing in the state machine reads this — it never affects connect behaviour. */
+  now?: () => number;
+  /** Called once per finished connect attempt with its per-phase wall-clock attribution. Purely an
+   *  observer seam for diagnostics/telemetry; throwing from it cannot break a connect. */
+  onTiming?: (timeline: BootstrapTimeline, outcome: 'connected' | 'offline') => void;
 }
 
 const DEFAULT_BOOTSTRAP_TIMEOUT_MS = 60_000;
-// The native start() can spend up to ~12s in a teardown barrier (waiting for a prior Tor daemon
-// to fully die) before it emits a single bootstrap percent. That dead time must not be counted
-// against the no-progress deadline, or a short reprobe deadline (e.g. the 20s direct-Tor retry)
-// gets mostly consumed before real bootstrapping even starts. So the FIRST arm of the bootstrap
-// timeout (before any percent > 0 has been seen) gets this much extra budget; see armTimeout() in
-// connect(). Exported so tests can assert against it precisely instead of duplicating the literal.
-export const FIRST_PROGRESS_GRACE_MS = 15_000;
+// Under C-tor, native start() could spend up to ~12s in a teardown barrier (waiting for a prior
+// Tor daemon to fully die) plus a further ~3s forced-kill extension before it emitted a single
+// bootstrap percent — dead time that must not be counted against the no-progress deadline, or a
+// short reprobe deadline (e.g. the 20s direct-Tor retry) got mostly consumed before real
+// bootstrapping even started. Arti's StiqArtiModule.startTor has no such wait: there is no prior
+// daemon to tear down, and it emits its first bootstrap event in well under a second. So this
+// grace is now just small headroom for that first event to cross the JNI + RN bridge — not zero,
+// but nowhere near the old C-tor barrier. See armTimeout() in connect(). Exported so tests can
+// assert against it precisely instead of duplicating the literal.
+export const FIRST_PROGRESS_GRACE_MS = 3_000;
 
 function sameOnionAuth(
   a: TorStartConfig['onionAuth'] | null | undefined,
@@ -74,6 +95,13 @@ function eventToState(event: TorBackendEvent): ConnectionState {
       return 'connecting-bridge';
     case 'connected':
       return 'connected';
+    // Deferred reachability verdicts (types.ts): 'verified' confirms the state we are already in;
+    // 'transport-dead' means the daemon bootstrapped off a cached consensus but cannot carry a
+    // stream — for every consumer of coarse state that is an offline transport.
+    case 'verified':
+      return 'connected';
+    case 'transport-dead':
+      return 'offline';
     case 'error':
       return 'offline';
   }
@@ -82,15 +110,28 @@ function eventToState(event: TorBackendEvent): ConnectionState {
 export class TorManager {
   private state: ConnectionState = 'disconnected';
   private socks: SocksProxy | null = null;
-  // Version string the embedded tor daemon reported on the connected event (GETINFO version), or
-  // null when the backend didn't report one. Surfaced via getTorVersion() for a WARN-ONLY >=0.4.8
-  // guard (onion-service PoW is solved transparently by tor >=0.4.8); it NEVER gates connect.
+  // Version string the embedded tor daemon reported on the connected event, or null when the
+  // backend didn't report one (always null under Arti today — see the connected-event handler in
+  // connect() below). Surfaced via getTorVersion(); purely informational, never gates connect.
   private torVersion: string | null = null;
   private readonly listeners = new Set<(state: ConnectionState) => void>();
+  // Reach-verdict listeners (see onReach). Long-lived like `listeners`; the per-attempt backend
+  // subscription is what feeds them, so verdicts only ever arrive while a daemon we started lives.
+  private readonly reachListeners = new Set<
+    (ok: boolean, transport: TransportType | null, message?: string) => void
+  >();
+  // Transport of the most recent connect attempt — what a reach verdict is ABOUT. The verdict
+  // arrives after connect() has resolved and the cascade's rung-local variables are gone, so the
+  // manager carries this for the listener instead.
+  private lastTransport: TransportType | null = null;
   // Latest bootstrap progress (percent + Tor's own summary) for the current attempt, or null when
   // not bootstrapping. Surfaced so the onboarding connect screen reflects the REAL Tor progress.
   private bootstrap: BootstrapProgress | null = null;
   private readonly progressListeners = new Set<(p: BootstrapProgress) => void>();
+  // Per-phase wall-clock attribution for the LAST FINISHED connect attempt (see ./bootstrapTiming).
+  // Retained after the attempt settles so a diagnostics surface — or a field log — can read the
+  // breakdown that explains a slow connect instead of guessing. Null until one attempt finishes.
+  private lastTiming: BootstrapTimeline | null = null;
   private unsubscribeBackend?: () => void;
   private timeoutHandle?: ReturnType<typeof setTimeout>;
   // Monotonic attempt id, bumped whenever an attempt is superseded (a new connect, or a
@@ -111,9 +152,11 @@ export class TorManager {
   // so single-mirror behaviour (the only path exercised today) is unchanged byte-for-byte.
   private configuredOnionAuthSet: NonNullable<TorStartConfig['onionAuth']>[] = [];
   // Whether a daemon this manager started may still be running, i.e. whether stop() has anything
-  // to do. Every backend.stop() costs real time — the native module serializes lifecycle work on a
-  // single executor and a stop can block ~10s — so stopping an already-stopped daemon is not a
-  // free no-op, it delays the next start by that much.
+  // to do. Every backend.stop() still costs a JS↔native bridge round-trip through the single
+  // lifecycle executor (StiqArtiModule.kt) even though Arti's own artiStop() is now a near-instant
+  // in-memory drop — no longer the bounded ~10s poll C-tor's stop used to cost — so stopping an
+  // already-stopped daemon is not exactly free, it just delays the next start by a small,
+  // no-longer-worth-measuring-in-seconds amount rather than a real one.
   //
   // Initialised TRUE deliberately: at construction we do not know whether a daemon from a previous
   // process (a dormant one we may later reattach to, or one orphaned by a crash) is still alive, so
@@ -159,9 +202,9 @@ export class TorManager {
   }
 
   /**
-   * Version string the connected tor daemon reported (e.g. "0.4.8.22"), or null when the backend
-   * didn't report one / no connection has been made. Informational only — used for the warn-only
-   * PoW-readiness guard, never to gate transport.
+   * Version string the connected tor daemon reported, or null when the backend didn't report one
+   * (always null under Arti today) / no connection has been made. Informational only; never used
+   * to gate transport.
    */
   getTorVersion(): string | null {
     return this.torVersion;
@@ -172,12 +215,16 @@ export class TorManager {
    *
    * Why this exists instead of `getState() === 'connected'`: `disconnect()` (below) nulls
    * `this.socks` synchronously but only flips state to 'disconnected' AFTER `backend.stop()`
-   * resolves, and the native stop can now block for up to ~10s (native lifecycle serialization).
-   * For that whole window `getState()` still reports 'connected' even though the circuit is
-   * already torn down. Callers that gate reconnect decisions on `getState()` (e.g. "skip
-   * reconnecting, we're already connected") would wrongly stay silent for up to 10s and strand
-   * the app offline. `isLive()` is immune to that lag: `this.socks` is cleared in the very same
-   * synchronous tick disconnect() starts in, so this predicate flips to false immediately.
+   * resolves. Under the since-deleted C-tor backend that resolution could block for up to ~10s
+   * (a bounded poll on the native control channel), so `getState()` could stale-report 'connected'
+   * for that whole window even though the circuit was already torn down. Arti's stop
+   * (StiqArtiModule.stopTor → artiStop(), a near-instant in-memory drop) closes that window to a
+   * single JS↔native bridge round-trip — real, but no longer seconds-scale. Callers that gate
+   * reconnect decisions on `getState()` (e.g. "skip reconnecting, we're already connected") would
+   * still, in principle, be fooled for that brief remaining window and stay silent when the circuit
+   * is actually gone. `isLive()` is immune to it regardless of its size: `this.socks` is cleared in
+   * the very same synchronous tick disconnect() starts in, so this predicate flips to false
+   * immediately, with no dependency on how long the backend takes to confirm the stop.
    */
   isLive(): boolean {
     return this.state === 'connected' && this.socks !== null;
@@ -186,6 +233,40 @@ export class TorManager {
   onChange(listener: (state: ConnectionState) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /**
+   * Subscribe to the DEFERRED reachability verdict (native background probe — types.ts 'verified'
+   * / 'transport-dead'). `ok=true`: the connected transport demonstrably carries a stream to the
+   * relay onion — safe to record the rung warm. `ok=false`: bootstrap lied off a cached consensus;
+   * the manager has already begun stopping the daemon and is about to flip state to 'offline'
+   * (listeners here fire FIRST, so a ladder can mark the rung dead before the offline retry path
+   * schedules the next walk). `transport` names the rung the verdict is about.
+   */
+  onReach(
+    listener: (ok: boolean, transport: TransportType | null, message?: string) => void,
+  ): () => void {
+    this.reachListeners.add(listener);
+    return () => this.reachListeners.delete(listener);
+  }
+
+  private notifyReach(ok: boolean, message?: string): void {
+    for (const listener of this.reachListeners) {
+      try {
+        listener(ok, this.lastTransport, message);
+      } catch {
+        // A verdict observer must never be able to break the state machine.
+      }
+    }
+  }
+
+  /**
+   * Per-phase wall-clock attribution for the last FINISHED connect attempt, or null before one has
+   * finished. Read-only diagnostics: `getLastTiming()?.format()` yields the one-line breakdown, and
+   * `.slowest()` names the phase that actually cost the connect its time.
+   */
+  getLastTiming(): BootstrapTimeline | null {
+    return this.lastTiming;
   }
 
   /** Latest live bootstrap progress, or null when Tor isn't actively bootstrapping. */
@@ -230,7 +311,7 @@ export class TorManager {
     // (timeout/subscription/promise); without this, a connect() that interrupts another
     // in-flight connect() could ask the native module to start a fresh Tor daemon while the
     // previous attempt's startTor() is still mid-flight, which is exactly the concurrent-start
-    // race the native lifecycle serialization (StiqTorModule's single lifecycle executor) exists
+    // race the native lifecycle serialization (StiqArtiModule's single lifecycle executor) exists
     // to guard against — but stopping proactively here means we don't rely on that alone.
     const hadInFlightAttempt = this.releaseInFlight !== undefined;
     // Supersede any in-flight attempt: tear down its subscription/timeout and release its
@@ -239,6 +320,11 @@ export class TorManager {
     // removing the previous listener — leaked subscriptions from dead attempts kept mutating
     // state, which both corrupted the reconnect logic and showed a false "connected".)
     const gen = this.supersede('disconnected');
+    // Start the connect clock HERE — before the teardown barrier and before the native start — so
+    // the `launch` phase honestly carries that dead time (FIRST_PROGRESS_GRACE_MS documents it as
+    // up to ~12s) instead of it vanishing into an unmeasured gap ahead of the first percent line.
+    const now = this.options.now ?? Date.now;
+    const timeline = createBootstrapTimeline(now());
     if (hadInFlightAttempt) {
       await this.stopBackendIfRunning();
     }
@@ -259,7 +345,24 @@ export class TorManager {
     if (this.options.resolveOnionAuthExtra) {
       merged.onionAuthExtra = this.options.resolveOnionAuthExtra() ?? undefined;
     }
+    // Resolve the native reachability probe's target for THIS attempt. This must NOT be keyed off
+    // onionAuth: `onionAuth == null` means "a PUBLIC relay onion", not "no relay", and a public
+    // community's user hits the exact same "bootstrap 100% with no usable guards" lie the probe
+    // exists to catch (arti-ffi/src/lib.rs). Precedence — first source that yields a v3 onion wins:
+    //   1. resolveRelayOnion()  — the ACTIVE community, re-read per attempt (community switches).
+    //   2. options.relayOnion   — a statically configured relay.
+    //   3. getActiveRelayOnion() — the module-level publisher, so a caller that never wires a
+    //      resolver still gets probe coverage from whoever activates the community.
+    //   4. merged.onionAuth.onionHost — the auth credential's own host, which also covers a
+    //      per-connect onboarding OVERRIDE that (3) cannot see. Same target the native side would
+    //      have fallen back to on its own, so this can never narrow existing coverage.
+    merged.relayOnion =
+      relayOnionHostOf(this.options.resolveRelayOnion?.()) ??
+      relayOnionHostOf(this.options.relayOnion) ??
+      getActiveRelayOnion() ??
+      merged.onionAuth?.onionHost;
     const config = buildStartConfig(merged);
+    this.lastTransport = merged.transport ?? null;
     this.configuredOnionAuth = merged.onionAuth ?? null;
     this.configuredOnionAuthSet = [
       ...(merged.onionAuth ? [merged.onionAuth] : []),
@@ -275,6 +378,17 @@ export class TorManager {
         }
         this.clearTimeout();
         this.releaseInFlight = undefined;
+        // Freeze and publish the connect-clock attribution before resolving, so a caller awaiting
+        // connect() can read getLastTiming() the moment it returns.
+        timeline.finish(now());
+        this.lastTiming = timeline;
+        const outcome = final === 'connected' ? 'connected' : 'offline';
+        console.info(`[tor] connect ${outcome}: ${timeline.format()}`);
+        try {
+          this.options.onTiming?.(timeline, outcome);
+        } catch {
+          // A diagnostics observer must never be able to break a connect.
+        }
         resolve(final);
         // The subscription is intentionally kept alive after a successful connect so the
         // manager keeps hearing about a later drop; it is removed by the next supersede().
@@ -314,6 +428,27 @@ export class TorManager {
         if (!isCurrent()) {
           return; // event from a superseded attempt — ignore
         }
+        if (event.kind === 'verified') {
+          // Deferred reachability verdict: the transport carries real streams. No state change —
+          // we are already 'connected' — just let the ladder record the rung warm.
+          this.notifyReach(true);
+          return;
+        }
+        if (event.kind === 'transport-dead') {
+          // Bootstrap lied off a cached consensus; no circuit exists. Notify BEFORE the state
+          // flip so the ladder marks the rung dead before the offline retry machinery (App.tsx
+          // onChange('offline') → scheduleRetry) starts the next walk. Unlike 'error' — whose
+          // native failure paths tear the daemon down themselves — the daemon here is RUNNING
+          // (bootstrapped, SOCKS bound), so stop it, or the next rung's client races its
+          // state-directory lock. No settle(): this verdict only ever arrives after 'connected'
+          // has settled the attempt; were the contract ever violated, the no-progress deadline
+          // still ends the attempt.
+          this.notifyReach(false, event.message);
+          this.socks = null;
+          void this.stopBackendIfRunning();
+          this.setState('offline');
+          return;
+        }
         // Once connected, ignore stray 'bootstrapping' events. They arrive from a late
         // TorService STATUS broadcast (the native fast-path receiver maps STATUS_ON→95%,
         // STATUS_STARTING→50%) or a post-100% control line, and do NOT mean the circuit
@@ -323,6 +458,15 @@ export class TorManager {
           return;
         }
         if (event.kind === 'bootstrapping') {
+          // Attribute the gap since the previous line to the phase we were IN (see
+          // ./bootstrapTiming). Purely observational — it reads no state and changes none.
+          // One clock read shared by both calls: two reads would double-consume an injected clock
+          // and desynchronise the recorded instants from the recorded phase durations.
+          const at = now();
+          // First write wins inside mark(), so this records only the FIRST percent line — the
+          // boundary that separates "we were waiting on the daemon" from "tor is working".
+          timeline.mark('first-progress', at);
+          timeline.sample(event.percent, at, event.summary);
           this.setBootstrap({percent: event.percent, summary: event.summary});
           if (event.percent > lastPercent) {
             lastPercent = event.percent;
@@ -331,16 +475,12 @@ export class TorManager {
         }
         if (event.kind === 'connected') {
           this.socks = event.socks;
-          // Capture the daemon's reported version for getTorVersion(). Warn — but do NOT block — if
-          // it's below the minimum that solves onion-service PoW transparently (T5). The shipped
-          // 0.4.8.22 daemon clears this, so the guard is inherently dark; it exists as a
-          // regression/defense-in-depth assertion, never a connect gate.
+          // Capture the daemon's reported version, if any, for getTorVersion(). StiqArtiModule
+          // never populates torVersion on its 'connected' event (that was a C-tor/tor-android
+          // concept — see the removed torVersion.ts's >=0.4.8 onion-service PoW guard), so this is
+          // always null under Arti; kept only so getTorVersion() stays meaningful if a future
+          // backend ever does report one.
           this.torVersion = event.torVersion ?? null;
-          if (this.torVersion && !torVersionAtLeast(this.torVersion, TOR_MIN_SUPPORTED_VERSION)) {
-            console.warn(
-              `[tor] embedded daemon ${this.torVersion} < ${TOR_MIN_SUPPORTED_VERSION}; onion-service PoW may not be solved`,
-            );
-          }
           // A live circuit is 100% by definition — pin the bar there before flipping state so the
           // connecting screen lands on a full bar, not whatever partial percent arrived last.
           this.setBootstrap({percent: 100, summary: this.bootstrap?.summary});
@@ -361,7 +501,21 @@ export class TorManager {
       // start call: if start() throws we still want the teardown to run, since a partially started
       // daemon is exactly the case that needs stopping.
       this.backendMaybeRunning = true;
-      this.backend.start(config).catch(() => {
+      // Split the otherwise-opaque `launch` phase. `native-start` is the JS→native handoff;
+      // `native-ready` is when startTor() resolves, i.e. AFTER the native teardown barrier (up to
+      // 12s), the always-on PT warm-up (~1.5s settle, run even in 'direct' mode) and the
+      // TorService bind. Without these two instants a slow launch is unattributable — you cannot
+      // tell a wedged prior daemon from a slow PT from tor simply being quiet.
+      timeline.mark('native-start', now());
+      // ONE start call, two observers attached to the same promise. Calling start() twice would
+      // launch two daemons.
+      const started = this.backend.start(config);
+      // Mark on either outcome, so a FAILED launch is as attributable as a successful one. Passing
+      // the handler as both arguments keeps this branch from surfacing an unhandled rejection; the
+      // real failure handling stays in the .catch() below.
+      const markNativeReady = (): void => timeline.mark('native-ready', now());
+      started.then(markNativeReady, markNativeReady);
+      started.catch(() => {
         if (!isCurrent()) {
           return;
         }
@@ -370,6 +524,47 @@ export class TorManager {
         settle('offline');
       });
     });
+  }
+
+  /**
+   * Install the CURRENT reach credentials — resolved exactly the way connect() resolves them —
+   * into the LIVE daemon, without a restart, and kick the deferred reachability verification.
+   *
+   * This is the second half of an EARLY start: connect() may now run before the app runtime has
+   * hydrated the active community (its resolvers yield nothing, so the daemon bootstraps
+   * credential-less — bootstrap never needs one). When hydration lands, this installs the real
+   * credential into Arti's keystore, which Arti consults at DESCRIPTOR-FETCH time — the
+   * "must restart Tor to load a key" rule was C-tor's ClientOnionAuthDir semantics and is dead.
+   *
+   * Returns true when the resolved credentials are now active on the live daemon (so
+   * isOnionAuthActive() answers for them); false when there is no live daemon, the backend
+   * predates installReach, or the native install failed — callers fall back to the restart path
+   * they always used.
+   */
+  async installReach(): Promise<boolean> {
+    if (this.state !== 'connected' || !this.backend.installReach) {
+      return false;
+    }
+    const auth = this.options.resolveOnionAuth
+      ? this.options.resolveOnionAuth() ?? undefined
+      : this.options.onionAuth;
+    const extra = this.options.resolveOnionAuthExtra
+      ? this.options.resolveOnionAuthExtra() ?? undefined
+      : this.options.onionAuthExtra;
+    // Same precedence chain as connect() — see the block comment there.
+    const relayOnion =
+      relayOnionHostOf(this.options.resolveRelayOnion?.()) ??
+      relayOnionHostOf(this.options.relayOnion) ??
+      getActiveRelayOnion() ??
+      auth?.onionHost;
+    try {
+      await this.backend.installReach({onionAuth: auth, onionAuthExtra: extra, relayOnion});
+    } catch {
+      return false;
+    }
+    this.configuredOnionAuth = auth ?? null;
+    this.configuredOnionAuthSet = [...(auth ? [auth] : []), ...(extra ?? [])];
+    return true;
   }
 
   /**

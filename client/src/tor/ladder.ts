@@ -1,8 +1,9 @@
 /**
  * Guided auto-fallback transport ladder (T2 — auto-escalating transport ladder).
  *
- * A PURE, LEAF model module (like bridges.ts): it owns the ordered 3-rung auto ladder
- * direct → bundled-obfs4 → moat-fetched-bridges, the per-rung no-progress / hard-ceiling
+ * A PURE, LEAF model module (like bridges.ts): it owns the ordered 4-rung auto ladder
+ * direct → bundled-obfs4 → moat-fetched-webtunnel → bundled-snowflake, the per-rung no-progress /
+ * hard-ceiling
  * timeouts, and a small plain-language ConnectionPhase model with a pure describePhase()
  * reducer. It performs NO side effects and makes NO native/App/bridgeCache calls, so it is
  * jest-testable with zero native code.
@@ -18,7 +19,11 @@
 import type {TransportType} from './types';
 
 /** Stable identifier for each guided rung, in ladder order. */
-export type AutoRungId = 'direct' | 'obfs4-bundled' | 'fetched-bridges';
+export type AutoRungId =
+  | 'direct'
+  | 'obfs4-bundled'
+  | 'fetched-bridges'
+  | 'snowflake-bundled';
 
 /**
  * One rung of the guided auto ladder.
@@ -42,38 +47,73 @@ export interface AutoRung {
 }
 
 /**
- * APPEND SEAM for T14 — add Snowflake/WebTunnel AutoRung entries here; the walker in
- * App.tsx connectGuided() and describePhase() are index/data-driven and need no change.
+ * The walker in App.tsx connectGuided() and describePhase() are index/data-driven, so adding a
+ * rung here is the whole change — a bundled rung's lines resolve through defaultBridgeLines() with
+ * no App.tsx edit.
  *
- * Order is fastest/least-conspicuous first: direct Tor, then the bundled obfs4 pool (no
- * network round-trip to start), then freshly moat-fetched WebTunnel bridges. Per-rung
- * noProgressMs < hardCeilingMs is an invariant (inner no-progress guard fires before the
- * outer hard ceiling) — the walker relies on it so a slow-but-advancing rung is not cut off.
+ * Order is fastest/least-conspicuous first: direct Tor, then the bundled obfs4 pool (no network
+ * round-trip to start), then freshly moat-fetched WebTunnel bridges, and finally bundled Snowflake
+ * as the reaches-where-others-are-blocked last resort — the WebRTC transport that survives when
+ * every IP-addressed bridge is blocked, which is exactly the network the auto ladder must not give
+ * up on. Per-rung noProgressMs < hardCeilingMs is an invariant (inner no-progress guard fires
+ * before the outer hard ceiling) — the walker relies on it so a slow-but-advancing rung is not
+ * cut off.
  */
 export const AUTO_LADDER: readonly AutoRung[] = [
   {
     id: 'direct',
     transport: 'direct',
     useFetchedBridges: false,
-    noProgressMs: 20_000,
-    hardCeilingMs: 60_000,
+    // MEASURED (real device, cold start): the consensus download alone took ~100s, with Arti
+    // sitting at a FLAT 15% the entire time — it reports no intermediate progress while the
+    // consensus downloads, so a "no progress" timer must tolerate that whole plateau or it kills
+    // a rung that was only seconds from succeeding. 20s/60s (the old C-tor-derived values) gave up
+    // long before a cold consensus fetch could finish; these clear the measured ~100s with margin.
+    noProgressMs: 120_000,
+    hardCeilingMs: 180_000,
     label: 'Connecting directly through Tor',
   },
   {
     id: 'obfs4-bundled',
     transport: 'obfs4',
     useFetchedBridges: false,
-    noProgressMs: 45_000,
-    hardCeilingMs: 90_000,
+    // If direct failed, the consensus almost certainly did NOT arrive, so this rung faces the same
+    // cold fetch — over a bridge, which is slower. Hence the same 120s no-progress floor.
+    //
+    // The CEILING is deliberately not scaled in proportion. These two numbers answer different
+    // questions: `noProgressMs` must clear the 15% plateau or it kills a healthy rung, whereas
+    // `hardCeilingMs` only bounds how long a user stares at "connecting" before the ladder moves
+    // on. Scaling both together would have put the last rung at a 12-minute ceiling and the whole
+    // walk past 20 minutes — worse for the user than failing over sooner and retrying.
+    noProgressMs: 120_000,
+    hardCeilingMs: 240_000,
     label: 'Trying obfs4 bridges',
   },
   {
     id: 'fetched-bridges',
     transport: 'webtunnel',
     useFetchedBridges: true,
-    noProgressMs: 60_000,
-    hardCeilingMs: 120_000,
+    // Same floor and ceiling as obfs4: it is the same work over a different transport.
+    noProgressMs: 120_000,
+    hardCeilingMs: 240_000,
     label: 'Fetching fresh bridges and connecting',
+  },
+  {
+    id: 'snowflake-bundled',
+    transport: 'snowflake',
+    // Bundled: Snowflake needs no fetched bridge address at all — DEFAULT_SNOWFLAKE_BRIDGES carries
+    // the broker/front/ICE config, so this rung dials with zero network round-trip to start.
+    useFetchedBridges: false,
+    // Snowflake reaches the network by WebRTC rendezvous through a volunteer proxy, not a direct
+    // bridge dial, so it sits at a flat "conn_done" plateau (no percent gain) while the broker finds
+    // a proxy — longer than obfs4/webtunnel's consensus plateau. The no-progress floor must clear
+    // that rendezvous or it kills a rung that was only waiting on a proxy match, so it is raised to
+    // 180s (matching the reach preset's long snowflake timeout). As the LAST rung there is nothing
+    // to escalate to; the ceiling only bounds how long the user stares before the ladder restarts
+    // from the top, so it is the widest of the four.
+    noProgressMs: 180_000,
+    hardCeilingMs: 300_000,
+    label: 'Reaching through Snowflake',
   },
 ];
 

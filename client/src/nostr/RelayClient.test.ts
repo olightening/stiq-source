@@ -1491,6 +1491,42 @@ describe('RelayClient NIP-77 reconciliation', () => {
     expect(synced).toBe(true);
   });
 
+  it('falls back immediately (not just eventually via timeout) on a malformed/hostile NEG-MSG payload', () => {
+    // A hostile or buggy relay could send garbage instead of a valid negentropy hex frame. This
+    // must recover the SAME tick — via handleNegMsg's own try/catch around Negentropy.reconcile —
+    // not merely survive by falling through to the timeout watchdog. Proof: no fake timers are
+    // advanced here at all, yet the fallback REQ is already on the wire immediately after emit().
+    // If handleNegMsg's try/catch were ever removed, handleMessage's outer per-frame catch would
+    // still stop a crash, but negFallback() would then only fire negTimeoutMs later — this test
+    // would fail because the fallback REQ would not exist yet at the assertion point.
+    const store = new InMemoryEventStore();
+    store.save(makePost('a', 5000));
+
+    const socket = new FakeRelaySocket();
+    const client = new RelayClient(socket, store, {
+      plan: () => [],
+      negentropy: negOptions(store, () => ({kinds: FEED_KINDS, since: 4700})),
+    });
+    let synced = false;
+    client.onSynced(() => (synced = true));
+
+    socket.simulateOpen();
+    expect(JSON.parse(socket.sent[0]!)[0]).toBe('NEG-OPEN');
+
+    // Non-hex garbage: the engine's HexReader throws decoding the very first byte. (After this,
+    // negActive flips false, so a SECOND hostile frame on this subId would be silently ignored by
+    // the dispatch guard rather than re-entering handleNegMsg — one hostile frame is what a real
+    // relay bug or attacker gets exactly one free shot at, so that is what this test drives.)
+    expect(() => socket.emit(JSON.stringify(['NEG-MSG', 'feed', 'not-valid-hex-!!']))).not.toThrow();
+
+    const frames = socket.sent.map(s => JSON.parse(s));
+    expect(frames).toContainEqual(['REQ', 'feed', {kinds: FEED_KINDS, since: 4700}]);
+    expect(synced).toBe(false); // waits for the fallback sub's EOSE, same contract as NEG-ERROR
+
+    socket.emitEose('feed');
+    expect(synced).toBe(true);
+  });
+
   it('settles a manual resync when its negentropy fallback reaches EOSE', async () => {
     const store = new InMemoryEventStore();
     const local = makePost('already cached', 5_000);

@@ -1,34 +1,38 @@
 /**
- * onionAuthArti — the Arti-specific restricted-discovery client-auth mapper (T17-S4, spike).
+ * onionAuthArti — the Arti-specific restricted-discovery client-auth mapper (T17).
  *
  * WHY THIS EXISTS SEPARATELY FROM onionAuth.ts:
- * The C-tor backend consumes onionAuth.ts:authPrivateFileContent(), which emits Tor's
- * `<host>:descriptor:x25519:<b32>` ClientOnionAuthDir file line. Arti does NOT read that file
- * format at all — it wants the raw x25519 SECRET installed into its KeyMgr / onion-service-client
- * authorization store, keyed by the .onion address (see client/arti-ffi/src/onion_auth.rs). So the
- * Arti path needs a DIFFERENT shape from the same 52-char base32 key STIQ already ships.
+ * The now-removed C-tor backend read Tor's `<host>:descriptor:x25519:<b32>` ClientOnionAuthDir
+ * file line (built directly in Kotlin, not via TS). Arti does NOT read that file format at all —
+ * it wants the raw x25519 SECRET installed into its KeyMgr / onion-service-client authorization
+ * store, keyed by the .onion address (see client/arti-ffi/src/onion_auth.rs). So the Arti path
+ * needs a DIFFERENT shape from the same 52-char base32 key STIQ already ships.
  *
- * onionAuth.ts is left UNTOUCHED so the default (shipping) C-tor backend keeps working byte-for-byte;
- * this pure mapper lives beside it and is only used when marshaling the StiqArti startTor config.
- * For the spike, StiqArtiModule passes the raw privKeyBase32 through and lets Rust decode it, so
- * this mapper is VALIDATION-ONLY: it reuses the exact same validators as the C-tor path
- * (isValidAuthKeyBase32 + onionHostOf) and returns the {onionHost, secretKeyBase32} shape the Arti
- * FFI expects, or null for anything malformed (so a bad credential never reaches the daemon).
+ * This pure mapper normalizes a credential for the StiqArti startTor config; StiqArtiModule passes
+ * the raw base32 through and lets Rust decode it, so this mapper is VALIDATION-ONLY: it reuses the
+ * exact same validators onionAuth.ts always has (isValidAuthKeyBase32 + onionHostOf) and returns
+ * null for anything malformed, so a bad credential never reaches the daemon.
  *
  * Pure: no native, no fs, no crypto.
  */
 import {isValidAuthKeyBase32, onionHostOf} from './onionAuth';
 
 /**
- * The shape the Arti FFI expects for one restricted-discovery credential. Note `secretKeyBase32`
- * (not `privKeyBase32`): Arti installs the raw x25519 SECRET into its KeyMgr, whereas the C-tor
- * field name mirrors the descriptor-file wording. Same 52-char base32 value, different consumer.
+ * One restricted-discovery credential, in the shape the Arti FFI actually reads.
+ *
+ * The field is `privKeyBase32` because that is what `OnionAuthJson` in
+ * `client/arti-ffi/src/ffi.rs` deserializes and what `StiqArtiModule.authToJson` writes. It was
+ * previously declared here as `secretKeyBase32`, on the theory that Arti's KeyMgr wording differed
+ * from C-tor's descriptor-file wording. It does not, and the mismatch would have been silent in
+ * both directions: nothing in production called this mapper, and anything that started to would have
+ * produced JSON whose key Rust does not recognize — surfacing much later as a members-only community
+ * that simply cannot be reached.
  */
 export interface ArtiClientAuthEntry {
-  /** Bare v3 onion host (56 base32 chars, no `.onion`) — the KeyMgr lookup key. */
+  /** Bare v3 onion host (56 base32 chars, no `.onion`) — the keystore lookup key. */
   onionHost: string;
   /** Community shared x25519 client-auth SECRET, unpadded uppercase base32 (52 chars). */
-  secretKeyBase32: string;
+  privKeyBase32: string;
 }
 
 /**
@@ -48,5 +52,5 @@ export function artiClientAuthEntry(
   // Accept a bare 56-char host as-is; otherwise treat the input as a URL and extract the host.
   const host = /^[a-z2-7]{56}$/.test(onionHost) ? onionHost : onionHostOf(onionHost);
   if (!host) return null;
-  return {onionHost: host, secretKeyBase32: privKeyBase32};
+  return {onionHost: host, privKeyBase32};
 }

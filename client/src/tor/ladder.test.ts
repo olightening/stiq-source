@@ -7,15 +7,17 @@ import {
 } from './ladder';
 
 describe('AUTO_LADDER shape', () => {
-  it('is exactly direct → obfs4-bundled → fetched-bridges and has no snowflake rung', () => {
+  it('is exactly direct → obfs4-bundled → fetched-bridges → snowflake-bundled', () => {
     expect(AUTO_LADDER.map(r => r.id)).toEqual([
       'direct',
       'obfs4-bundled',
       'fetched-bridges',
+      'snowflake-bundled',
     ]);
-    // Snowflake is deferred to T14; it must not be a guided rung here (id OR transport).
-    expect(AUTO_LADDER.map(r => r.id)).not.toContain('snowflake');
-    expect(AUTO_LADDER.map(r => r.transport)).not.toContain('snowflake');
+    // Snowflake is the last rung — the reaches-where-others-are-blocked resort — so the guided auto
+    // cascade the DEFAULT preset walks does not exhaust without ever trying the one transport built
+    // to survive a network where every IP-addressed bridge is blocked.
+    expect(AUTO_LADDER[AUTO_LADDER.length - 1]!.transport).toBe('snowflake');
   });
 
   it('maps each rung to the expected transport + fetched-bridge flag', () => {
@@ -23,6 +25,10 @@ describe('AUTO_LADDER shape', () => {
       ['direct', false],
       ['obfs4', false],
       ['webtunnel', true],
+      // Snowflake is bundled (useFetchedBridges=false): DEFAULT_SNOWFLAKE_BRIDGES already carries the
+      // broker/front/ICE config, so the rung dials with no moat round-trip — resolved through
+      // defaultBridgeLines('snowflake') by connectGuided()'s cold walk exactly like the obfs4 rung.
+      ['snowflake', false],
     ]);
   });
 
@@ -128,13 +134,19 @@ describe('nextRungIndex', () => {
 
   // Regression lock for the exact order App.tsx connectGuided()'s cold walk depends on: it steps
   // `for (let i = 0; i !== -1; i = nextRungIndex(i))` over AUTO_LADDER, so walking from 0 must yield
-  // direct → obfs4-bundled → fetched-bridges and then terminate on -1 (never wrap around).
+  // direct → obfs4-bundled → fetched-bridges → snowflake-bundled and then terminate on -1 (never
+  // wrap around).
   it('walks the full guided sequence from 0 then exhausts to -1', () => {
     const walked: string[] = [];
     for (let i = 0; i !== -1; i = nextRungIndex(i)) {
       walked.push(AUTO_LADDER[i]!.id);
     }
-    expect(walked).toEqual(['direct', 'obfs4-bundled', 'fetched-bridges']);
+    expect(walked).toEqual([
+      'direct',
+      'obfs4-bundled',
+      'fetched-bridges',
+      'snowflake-bundled',
+    ]);
     expect(nextRungIndex(AUTO_LADDER.length - 1)).toBe(-1);
   });
 });

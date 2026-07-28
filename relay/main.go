@@ -219,6 +219,14 @@ func stiqNIP11Handler(relay http.Handler, reloader *relayapp.Reloader) http.Hand
 
 		var doc map[string]json.RawMessage
 		if err := json.Unmarshal(body, &doc); err == nil {
+			// Drop the two created_at bounds go-nostr emits as an unconditional 0. This relay
+			// enforces no created_at window, and `"created_at_upper_limit":0` read literally says it
+			// rejects every event newer than the epoch — see relayapp.PruneNIP11Limitation.
+			if lim, ok := doc["limitation"]; ok {
+				if pruned, changed := relayapp.PruneNIP11Limitation(lim); changed {
+					doc["limitation"] = pruned
+				}
+			}
 			if caps, err := json.Marshal(relayapp.StiqCapabilities(reloader.Config())); err == nil {
 				doc["stiq-capabilities"] = caps
 				if out, err := json.Marshal(doc); err == nil {

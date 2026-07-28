@@ -6,12 +6,16 @@ import (
 	"crypto/rsa"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/fiatjaf/eventstore"
 	"github.com/fiatjaf/eventstore/badger"
 	"github.com/fiatjaf/khatru"
 	"github.com/nbd-wtf/go-nostr"
@@ -29,6 +33,51 @@ import (
 // memory. It is generous enough for real feed sync yet caps a malicious unscoped NEG-OPEN so it
 // cannot pull the entire store (finding #74). ~64K ids+timestamps ≈ a few MB per session.
 const maxNegentropyEvents = 65536
+
+// Event-store query ceilings. These are NOT settings — they are the numbers the eventstore backends
+// apply to us underneath khatru, restated here so the NIP-11 document can advertise the truth and
+// so the clamp in New() can make that advertisement exact. TestBackendQueryCeilingsUnchanged pins
+// them against the real backends, so an eventstore upgrade that moves them fails a test instead of
+// silently turning the NIP-11 document into a lie.
+//
+// The badger pair is one number, not two: eventstore/badger leaves BadgerBackend.MaxLimit at 0 by
+// default, resolves it to 1000 in Init, and uses MaxLimit/4 for a filter that carries no limit of
+// its own. We deliberately do NOT set BadgerBackend.MaxLimit to pin it, because Init reads that
+// field as an opt-in that ALSO overwrites MaxLimitNegentropy with the same value — setting it to
+// 1000 would silently collapse our 65536-event negentropy budget (maxNegentropyEvents) to 1000.
+const (
+	badgerBackendMaxLimit     = 1000
+	badgerBackendDefaultLimit = badgerBackendMaxLimit / 4
+	// The in-memory slicestore (dev/test only, when data_dir is unset) uses a single number for both.
+	sliceStoreMaxLimit     = 500
+	sliceStoreDefaultLimit = sliceStoreMaxLimit
+)
+
+// effectiveQueryLimits resolves the REQ `limit` ceiling and the no-limit default that this relay
+// will actually apply, given its config and which event store it is about to open.
+//
+// A configured max_limit/default_limit may only TIGHTEN the backend's own ceiling. Letting an
+// operator advertise a looser one would recreate exactly the dishonesty this is here to remove:
+// with max_limit=5000 in config.json the relay used to advertise 5000 while badger capped the
+// result set at 1000 — and, because badger falls back to MaxLimit/4 for any request above its
+// ceiling, actually returned 250.
+func effectiveQueryLimits(cfg config.Config) (maxLimit, defaultLimit int) {
+	if cfg.DataDir != "" {
+		maxLimit, defaultLimit = badgerBackendMaxLimit, badgerBackendDefaultLimit
+	} else {
+		maxLimit, defaultLimit = sliceStoreMaxLimit, sliceStoreDefaultLimit
+	}
+	if cfg.MaxLimit > 0 && cfg.MaxLimit < maxLimit {
+		maxLimit = cfg.MaxLimit
+	}
+	if cfg.DefaultLimit > 0 && cfg.DefaultLimit < defaultLimit {
+		defaultLimit = cfg.DefaultLimit
+	}
+	if defaultLimit > maxLimit {
+		defaultLimit = maxLimit
+	}
+	return maxLimit, defaultLimit
+}
 
 // Reloader holds the live policy objects that can be updated on SIGHUP without restarting
 // the relay. Call Apply with a freshly-loaded config to atomically update the mutable fields
@@ -151,6 +200,14 @@ func New(cfg config.Config) (*khatru.Relay, func(), *Reloader, error) {
 	relay := khatru.NewRelay()
 	relay.Info.Name = "stiq-relay"
 	relay.Info.Description = "Membership-gated Nostr relay (PLAN.md §3.3)"
+	// khatru seeds these with its OWN identity ("https://github.com/fiatjaf/khatru" / "n/a"), which
+	// misattributes every admission decision on this relay — none of the membership gate, the blind
+	// token path or the weight gate is khatru's. Name the software honestly, and answer `version`
+	// with the stiq wire-schema version rather than a build identifier: it is the version a client can
+	// actually act on, it already ships in stiq-capabilities.schema_version so it leaks no new
+	// fingerprint, and a precise build string would hand a scanner a CVE-matching handle for free.
+	relay.Info.Software = "stiq-relay"
+	relay.Info.Version = "schema-" + strconv.Itoa(config.SchemaVersion)
 	relay.Log = log.New(io.Discard, "", 0)
 
 	// NIP-77 (Negentropy set reconciliation): lets clients sync deltas instead of refetching
@@ -179,47 +236,88 @@ func New(cfg config.Config) (*khatru.Relay, func(), *Reloader, error) {
 	// unsynchronized int64 on khatru.Relay — not something Reloader.Apply can safely swap under
 	// live connections. max_event_bytes stays restart-only here, exactly like the WeightGate it must
 	// stay in lockstep with (see policy.NewWeightGate below).
-	effectiveMaxEventBytes := cfg.MaxEventBytes
-	if effectiveMaxEventBytes <= 0 {
-		effectiveMaxEventBytes = config.DefaultMaxEventBytes
-	}
+	effectiveMaxEventBytes := cfg.EffectiveMaxEventBytes()
 	relay.MaxMessageSize = int64(effectiveMaxEventBytes) + 64*1024
 
-	// Advertise and enforce query limits (NIP-11 Limitation). MaxLimit caps the `limit`
-	// field on incoming REQ filters so one subscription can't replay unbounded history.
-	// DefaultLimit applies when the client sends no limit at all. Both are silently clamped
-	// (OverwriteFilter), not rejected, so well-behaved clients aren't broken.
-	// Advertise the content-neutral weight caps (NIP-11) so clients know the size/tag limits
-	// before posting. These are always set (config defaults them), independent of the query
-	// limits below.
-	lim := &nip11.RelayLimitationDocument{}
-	if cfg.MaxEventBytes > 0 {
-		lim.MaxContentLength = cfg.MaxEventBytes
+	// permessage-deflate (RFC 7692). Opt-in from the client side, so a client that does not offer the
+	// extension — which is every client in the deployed fleet — gets a byte-identical handshake and
+	// byte-identical frames. See wscompress.go for which library khatru actually uses, what it can and
+	// cannot be configured to do, the measured per-message ratios, and the CRIME analysis.
+	//
+	// The two halves are wired together HERE, on purpose, and must stay together: turning
+	// EnableCompression on without normalizeWebsocketExtensions re-opens the upgrader's
+	// parameter-blind acceptance (it would compress with a 32 KiB window for a client that asked for
+	// 1 KiB, and that client's inflate then fails mid-stream). The normaliser rides khatru's
+	// RejectConnection hook because that is the only callback khatru runs with the raw *http.Request
+	// BEFORE Upgrade reads its headers; the hook never rejects anything (always returns false) — it
+	// is used purely for the pre-upgrade header rewrite, and TestWebsocketCompressionRejectsUnhonourableWindow
+	// is what catches a khatru release that moves the hook after the upgrade.
+	if cfg.WebsocketCompressionEnabled() {
+		if enableWebsocketCompression(relay) {
+			relay.RejectConnection = append(relay.RejectConnection, func(r *http.Request) bool {
+				normalizeWebsocketExtensions(r.Header)
+				return false
+			})
+		}
 	}
-	if cfg.MaxTagsPerEvent > 0 {
-		lim.MaxEventTags = cfg.MaxTagsPerEvent
+
+	// NIP-11 `limitation` — the numbers a client needs BEFORE it sends anything. Over Tor a client
+	// that cannot read the real limits discovers them by sending a request that fails, and a failed
+	// REQ or a truncated response costs a full circuit round-trip; a frame over max_message_length
+	// costs the whole connection (khatru closes with 1009 and sends NO OK frame). So every value here
+	// is derived from the SAME source the enforcement below reads, never restated by hand.
+	//
+	// restricted_writes is TRUE and has always been true: this relay admits an event only from a
+	// bound npub or against a valid blind token (policy.Membership). Advertising the go-nostr
+	// zero-value false told every generic client the opposite.
+	//
+	// min_pow_difficulty stays 0 DELIBERATELY, and that is not an omission. NIP-11's field is a
+	// GLOBAL floor — "the relay requires all events to have at least this difficulty" — while ours is
+	// per-kind: pow_difficulty on kind-1059 gift wraps and enroll_pow on the 9020/9023 mailbox kinds,
+	// and nothing at all on ordinary posts. Publishing 20 here would make a well-behaved client mine
+	// 20 bits of PoW on a phone for every reaction it sends. The real per-kind bars are advertised in
+	// stiq-capabilities.pow (capabilities.go), which is where a client can act on them correctly.
+	//
+	// auth_required likewise stays false: private_group_read_auth scopes NIP-42 to private NIP-29
+	// group READS, whereas this field means the relay requires AUTH for everything.
+	lim := &nip11.RelayLimitationDocument{
+		MaxContentLength: effectiveMaxEventBytes,
+		MaxEventTags:     cfg.EffectiveMaxTagsPerEvent(),
+		// The transport frame ceiling set above. Its absence was the single most expensive omission
+		// in this document: it is the only limit whose breach kills the connection instead of
+		// returning an error, and a client had no way to learn it short of tripping it.
+		MaxMessageLength: int(relay.MaxMessageSize),
+		RestrictedWrites: true,
 	}
 	relay.Info.Limitation = lim
 
-	if cfg.MaxLimit > 0 || cfg.DefaultLimit > 0 {
-		if cfg.MaxLimit > 0 {
-			lim.MaxLimit = cfg.MaxLimit
+	// Query limits. These are NOT free parameters — the event store enforces its own ceiling
+	// underneath us, and until now the relay advertised nothing at all in the default deployment
+	// (max_limit/default_limit are unset in config.json, so the whole block below was skipped) while
+	// badger silently applied 1000/250. Worse, badger's behaviour above its own ceiling is a trap: a
+	// REQ asking for MORE than max_limit does not get max_limit, it falls back to max_limit/4 — so a
+	// client asking for 5000 received 250, fewer than if it had asked for 1000, with no error to
+	// explain it. Clamping here makes the advertised numbers literally true in every case.
+	maxLimit, defaultLimit := effectiveQueryLimits(cfg)
+	lim.MaxLimit = maxLimit
+	lim.DefaultLimit = defaultLimit
+	relay.OverwriteFilter = append(relay.OverwriteFilter, func(ctx context.Context, filter *nostr.Filter) {
+		// NIP-77 reconciliation must not be clamped to a REQ's page size. khatru runs this same
+		// OverwriteFilter chain over a NEG-OPEN filter (khatru/negentropy.go), and the store reads a
+		// negentropy session's budget from MaxLimitNegentropy (maxNegentropyEvents, 65536) — but ONLY
+		// while the filter carries no limit of its own. Setting filter.Limit here would silently cap
+		// every sync at the feed page size and quietly break the delta-sync bandwidth win. khatru
+		// marks the context before calling us, so this guard is reliable.
+		if eventstore.IsNegentropySession(ctx) {
+			return
 		}
-		if cfg.DefaultLimit > 0 {
-			lim.DefaultLimit = cfg.DefaultLimit
+		if filter.Limit == 0 && !filter.LimitZero {
+			filter.Limit = defaultLimit
 		}
-
-		maxLimit := cfg.MaxLimit
-		defaultLimit := cfg.DefaultLimit
-		relay.OverwriteFilter = append(relay.OverwriteFilter, func(_ context.Context, filter *nostr.Filter) {
-			if defaultLimit > 0 && filter.Limit == 0 && !filter.LimitZero {
-				filter.Limit = defaultLimit
-			}
-			if maxLimit > 0 && filter.Limit > maxLimit {
-				filter.Limit = maxLimit
-			}
-		})
-	}
+		if filter.Limit > maxLimit {
+			filter.Limit = maxLimit
+		}
+	})
 
 	var closeFn func()
 	var queryFn func(context.Context, nostr.Filter) (chan *nostr.Event, error)
@@ -533,6 +631,19 @@ func New(cfg config.Config) (*khatru.Relay, func(), *Reloader, error) {
 	// Advertise NIP-29 (relay-managed groups) and NIP-53 (live activities / channels) in NIP-11.
 	relay.Info.AddSupportedNIP(29)
 	relay.Info.AddSupportedNIP(53)
+
+	// ...and stop advertising NIP-86. khatru seeds SupportedNIPs with {1, 11, 40, 42, 70, 86} in
+	// NewRelay regardless of what the embedder wires up, and we register NO RelayManagementAPI
+	// handlers at all — so every NIP-86 management call this relay invites costs a client a full Tor
+	// round-trip to be told the method is unsupported. The rest of khatru's seeded set is honest
+	// (khatru implements the AUTH exchange, the NIP-40 expiration sweep and the NIP-70 protected-event
+	// check itself), and 9/45/77 are added per-request by khatru's own handler from the hooks we do
+	// register, so they stay correct without help. Nothing in the client or the organizer speaks
+	// NIP-86, so dropping it removes an invitation, not a capability.
+	relay.Info.SupportedNIPs = slices.DeleteFunc(relay.Info.SupportedNIPs, func(n any) bool {
+		v, ok := n.(int)
+		return ok && v == 86
+	})
 
 	reloader := &Reloader{holder: holder, m: m, gg: groupGuard}
 	// Retain the boot config so the NIP-11 capabilities builder (main.go) can read it via Config();

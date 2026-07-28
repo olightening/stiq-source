@@ -6,6 +6,7 @@
   "_comment_allowed_kinds": "Omit allowed_kinds to accept every kind the app uses (config.DefaultAllowedKinds). Set an explicit list ONLY to restrict a deployment.",
   "data_dir": "/var/lib/stiq-relay/data",
   "membership_file": "/var/lib/stiq-relay/membership.json",
+  "_comment_websocket_compression": "RFC 7692 permessage-deflate. Omit to take the default (true). Only ever engages for a client that OFFERS the extension, so a client that does not is byte-identical either way. Set false if the host is memory-tight: compression costs ~0.8MB of transient heap per concurrently-writing connection. Restart-only (not SIGHUP-reloadable).",
   "pow_difficulty": 20,
   "_comment_enroll_pow": "The shipped client mines enroll responses at difficulty 12 (ENROLL_POW_DIFFICULTY). enroll_pow falls back to pow_difficulty (20) when omitted, which the client never satisfies -- copying this file as-is breaks every enrollment. Set enroll_pow to match whatever the organizer/client actually mine (12 for the shipped app).",
   "enroll_pow": 12

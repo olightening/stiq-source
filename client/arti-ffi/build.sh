@@ -1,18 +1,35 @@
 #!/usr/bin/env bash
 # =====================================================================================
-# T17-S1 — cross-compile arti-mobile to arm64-v8a + armeabi-v7a .so via cargo-ndk.
+# Cross-compile arti-mobile to arm64-v8a + armeabi-v7a .so for the Android app.
 # =====================================================================================
-# ⚠ THIS HAS NOT BEEN RUN. The spike host has NO Rust toolchain and NO Android NDK, so this script
-# is the DOCUMENTED recipe, not a verified build. Run it on a machine with the toolchain below; it
-# is written to fail loudly (set -euo pipefail) rather than half-produce a .so.
+# ── STATUS 2026-07-27 (Windows host) ────────────────────────────────────────────────────────────
+# WORKS. `cargo check`/`cargo build --target aarch64-linux-android` complete with 0 errors for the
+# whole 519-crate arti graph. Cargo.lock is committed and pins that graph.
 #
-# Prerequisites (record exact versions in README.md after a real run):
-#   * rustup + a stable Rust (>= the arti MSRV; check arti-client's Cargo.toml `rust-version`).
+# TWO HOST QUIRKS THIS SCRIPT WORKS AROUND — both cost hours to rediscover:
+#
+#   1. cargo-ndk will NOT install here: building its `windows-sys` dependency dies with
+#      "error calling dlltool 'dlltool.exe': program not found". So this script does what cargo-ndk
+#      would have done — set the per-target linker/CC/AR/RANLIB env vars directly. That is the whole
+#      of cargo-ndk's job for our purposes.
+#
+#   2. There is NO host C compiler, so a HOST build (`cargo check` with no --target, and therefore
+#      `cargo test`) CANNOT work: `ring`'s build script compiles C. The MinGW gcc bundled with the
+#      rust-mingw component is link-only and says so in its own GCC-WARNING.txt — it fails with
+#      "cannot execute 'cc1'". Cross-compiling is fine because only build scripts run on the host,
+#      and those are pure Rust.
+#      ⇒ To RUN the unit tests, cross-compile them and execute on a device:
+#           cargo test --target aarch64-linux-android --no-run
+#           adb push <test-binary> /data/local/tmp/ && adb shell /data/local/tmp/<name>
+#        (/data/local/tmp is exec-able for the shell user; app-data dirs are not.)
+# ────────────────────────────────────────────────────────────────────────────────────────────────
+#
+# Prerequisites:
+#   * rustup + stable Rust. On this host: stable-x86_64-pc-windows-gnu (the MSVC toolchain has no
+#     linker here, and under Git Bash rustc picks up MSYS's /usr/bin/link coreutil instead).
 #   * rustup targets: aarch64-linux-android, armv7-linux-androideabi
 #       rustup target add aarch64-linux-android armv7-linux-androideabi
 #   * Android NDK (r26+); export ANDROID_NDK_HOME=/path/to/ndk/<version>
-#   * cargo-ndk:  cargo install cargo-ndk
-#   * llvm-strip from the NDK (cargo-ndk finds it; we also strip via the release profile).
 # =====================================================================================
 set -euo pipefail
 
@@ -21,18 +38,30 @@ cd "$HERE"
 
 : "${ANDROID_NDK_HOME:?set ANDROID_NDK_HOME to your Android NDK (r26+) before building}"
 
-# Output straight into the app's jniLibs so gradle packages libarti_mobile.so per ABI.
-# NOTE (T17-S2): this is the SPIKE drop site; a shipping cutover would gate it behind the flag build.
-JNILIBS="$HERE/../android/app/src/main/jniLibs"
-mkdir -p "$JNILIBS"
+NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/windows-x86_64/bin"
+[[ -d "$NDK_BIN" ]] || NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+CLANG_EXT=""
+[[ -f "$NDK_BIN/aarch64-linux-android21-clang.cmd" ]] && CLANG_EXT=".cmd"
 
-echo ">> cargo-ndk build (release, arm64-v8a + armeabi-v7a)…"
-# cargo-ndk maps Android ABI names to the rustc targets and sets the NDK linker/sysroot.
-cargo ndk \
-  -t arm64-v8a \
-  -t armeabi-v7a \
-  -o "$JNILIBS" \
-  build --release
+# Output straight into the app's jniLibs so gradle packages libarti_mobile.so per ABI.
+JNILIBS="$HERE/../android/app/src/arti/jniLibs"
+mkdir -p "$JNILIBS/arm64-v8a" "$JNILIBS/armeabi-v7a"
+
+# minSdk is 24 (android/build.gradle), so the API-21 clang wrappers are fine.
+build_abi() {
+  local abi="$1" target="$2" clang="$3" envkey="$4"
+  echo ">> $abi ($target)…"
+  env \
+    "CARGO_TARGET_${envkey^^}_LINKER=$NDK_BIN/$clang$CLANG_EXT" \
+    "CC_$envkey=$NDK_BIN/$clang$CLANG_EXT" \
+    "AR_$envkey=$NDK_BIN/llvm-ar" \
+    "RANLIB_$envkey=$NDK_BIN/llvm-ranlib" \
+    cargo build --release --target "$target"
+  cp "target/$target/release/libarti_mobile.so" "$JNILIBS/$abi/libarti_mobile.so"
+}
+
+build_abi arm64-v8a   aarch64-linux-android  aarch64-linux-android21-clang  aarch64_linux_android
+build_abi armeabi-v7a armv7-linux-androideabi armv7a-linux-androideabi21-clang armv7_linux_androideabi
 
 echo ">> stripping + sizing…"
 # The release profile already sets strip=true; run llvm-strip as a backstop and record sizes.
@@ -61,6 +90,24 @@ for abi in arm64-v8a armeabi-v7a; do
 done
 
 cat >> "$SIZE_REPORT" <<'EOF'
+
+## Historical: the arti-client 0.28.0 → 0.44.0 bump (Arti 1.4.1 → 2.5.0), 2026-07-27
+
+Measured bytes, same host, same profile, same NDK — each figure read with `wc -c` off the stripped
+`.so` that landed in `jniLibs/`, never off a timestamp (`libarti_mobile.so` is gitignored for BOTH
+ABIs, so a stale build is invisible in a `git diff` and byte comparison is the only honest check):
+
+| ABI | 0.28.0 | 0.44.0, features unchanged | 0.44.0 + flowctl-cc + CGO (shipped) | net delta |
+|---|---|---|---|---|
+| arm64-v8a   | 5,941,576 | 6,154,616 | 6,181,216 | +239,640 (+4.03%) |
+| armeabi-v7a | 4,150,976 | 4,539,436 | 4,559,476 | +408,500 (+9.84%) |
+
+The middle column isolates the two effects: ~15 months of upstream growth accounts for almost all
+of it, while enabling congestion control and Counter Galois Onion costs only 26,600 B (arm64) /
+20,040 B (armv7) — about 0.4% — because both are pure Rust (`aes`/`ctr`/`polyval`) and reuse
+crypto primitives already in the graph. That is the whole performance rationale for the bump for
+under half a percent of size. Do not "save" it by dropping those two features; see Cargo.toml for
+why they are NOT on by default in a `default-features = false` build.
 
 ## Incumbent baseline to compare against (measure on the SAME device build)
 

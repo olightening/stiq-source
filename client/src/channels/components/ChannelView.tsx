@@ -27,6 +27,7 @@ import type {Channel} from '../channels';
 import type {SendStatus} from '../../nostr/outbox';
 import type {CommentNode} from '../../feed/thread';
 import {JumpButton} from '../../ui/JumpButton';
+import {useNewWhileAway} from '../../ui/useNewWhileAway';
 import {VoiceComposer} from '../../feed/components/VoiceComposer';
 import {encodeInlineVoice} from '../../feed/voice';
 import {PictureComposer} from '../../feed/components/PictureComposer';
@@ -218,6 +219,8 @@ export function ChannelView({
   const [editingId, setEditingId] = useState<string | null>(null);
   const listRef = useRef<FlatList<Event>>(null);
   const [showJump, setShowJump] = useState(false);
+  // "N new" on the FAB while the reader is away in history — the per-space sibling of the feed pill.
+  const newWhileAway = useNewWhileAway(messages, m => m.created_at, showJump);
   // Stands this page's own swipe-back down for touches beginning on the message composer below —
   // spread onto its wrapper View; see the opt-out there for what it protects.
   const optOut = useSwipeOptOut();
@@ -662,6 +665,23 @@ export function ChannelView({
             data={ordered}
             keyExtractor={m => (listKeyFor ? listKeyFor(m.id) : m.id)}
             contentContainerStyle={s.list}
+            // `ordered` is newest-first (reversed, see above) with new broadcasts PREPENDED at
+            // index 0 — without this, a reader scrolled down into older history sees their view
+            // silently shift the instant a new broadcast lands, because the native list keeps the
+            // same pixel offset while content grew above it. minIndexForVisible: 0 anchors on
+            // whichever item the reader is actually looking at instead (RN's own documented
+            // caveat: this is only safe because `ordered` is stable/append-only in the "prepend
+            // one end, never reorder existing items" sense — a continuously RE-SCORED list, like
+            // the main feed's Hot/Rising sort, would defeat it — see FeedList.tsx, deliberately
+            // NOT given this prop for that reason).
+            maintainVisibleContentPosition={{minIndexForVisible: 0}}
+            // Android's FlatList defaults removeClippedSubviews to true whenever the prop is
+            // omitted (RN's removeClippedSubviewsOrDefault()) — silently pairing native view
+            // clipping with maintainVisibleContentPosition on this exact ScrollView. Clipping
+            // detaches an off-screen child ViewGroup out from under MaintainVisibleScrollPosition-
+            // Helper's index-based anchor tracking mid-update, defeating the position stability
+            // above is here for (see GroupView.tsx / ThreadView.tsx's identical note). Force it off.
+            removeClippedSubviews={false}
             onScroll={handleScroll}
             // Re-evaluate on settle too — a throttled onScroll can drop the final resting frame,
             // leaving the jump button stuck visible after a fling back to the top (newest).
@@ -676,7 +696,7 @@ export function ChannelView({
             onEndReachedThreshold={0.3}
             renderItem={renderCard}
           />
-          <JumpButton visible={showJump} direction="up" onPress={scrollToLatest} />
+          <JumpButton visible={showJump} direction="up" onPress={scrollToLatest} count={newWhileAway} />
         </View>
       )}
 

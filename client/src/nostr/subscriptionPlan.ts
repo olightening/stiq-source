@@ -53,9 +53,10 @@ import {
   KIND_VOICE_MESSAGE,
   KIND_VOICE_COMMENT,
   KIND_MEDIA_BLOB,
+  SPACE_KEY_REQUEST_D_PREFIX,
 } from '../contracts';
 import {KIND_TAG_POLICY} from '../feed/tagPolicy';
-import {D_IDENTITY_PROFILE} from '../profile/identityDoc';
+import {D_IDENTITY_BEACON, D_IDENTITY_PROFILE} from '../profile/identityDoc';
 import {COLD_FEED_LIMIT, SCOPED_CHANNEL_SYNC} from '../config';
 
 /**
@@ -367,6 +368,84 @@ export function channelChatSince(
     }
   }
   return latest === undefined ? undefined : Math.max(0, latest - overlapSeconds);
+}
+
+/**
+ * The filter set for an OPEN space view's scoped chat sub (`channel:<coord>` / `group:<id>`):
+ * the incremental since tail PLUS a newest-first bounded backfill page, in one REQ.
+ *
+ * WHY TWO FILTERS (2026-07-28 field bug — "posts inside channels are not loading for some channels
+ * while loading for others"): {@link channelChatSince}/{@link groupChatSince} derive `since` from
+ * the newest CACHED message, but a newest message does not imply contiguous history below it. Three
+ * producers cache newest-only strays with a hole underneath:
+ *   • the standing `channels` sub's SHARED limit page — newest-N across the whole cover set, so
+ *     after any offline window (the arti CBT outage made it a two-day one) each busy channel gets a
+ *     thin newest slice and nothing else;
+ *   • the retention prune — 1311 and 9/11/12 are count-capped GLOBALLY keeping the newest, so a
+ *     busy space evicts a quiet space's older rows locally;
+ *   • the member's own echoed posts during a degraded window.
+ * A since-only resub then never asks below the stray, and these kinds are OUTSIDE the NIP-77
+ * reconcile universe (FIREHOSE_FEED_KINDS drops 1311 under SCOPED_CHANNEL_SYNC; group kinds were
+ * never in it), so the hole NEVER heals — that space reads "not loading" forever, while a space
+ * whose watermark predates the hole (or a true-cold one) loads fine. That asymmetry is exactly the
+ * field report.
+ *
+ * The backfill page bounds the heal at `limit` (the same bound the feed's cold page accepts); the
+ * since tail keeps completeness ABOVE the watermark (a backlog deeper than `limit` since last sync
+ * still arrives in full). Both filters stay on the open REQ, and a live event matches both — khatru
+ * forwards it once per sub. Re-delivered events dedupe on store.has(id) BEFORE the schnorr verify
+ * (RelayClient.ingest, audit #17), so the overlap costs bandwidth only, never CPU. Cold
+ * (`since === undefined`) emits the single limit-only filter — byte-identical to the previous
+ * behaviour.
+ */
+export function buildOpenChatFilters(
+  kinds: number[],
+  tagKey: '#a' | '#h',
+  id: string,
+  since: number | undefined,
+  limit = DEFAULT_FEED_LIMIT,
+): ReqFilter[] {
+  const backfill: ReqFilter = {kinds, limit};
+  backfill[tagKey] = [id];
+  if (since === undefined) return [backfill];
+  const tail: ReqFilter = {kinds, since};
+  tail[tagKey] = [id];
+  return [tail, backfill];
+}
+
+/**
+ * Ceiling on the space-scoped kind-30079 backfill below. Deliveries are addressable per
+ * (author, `<spaceId>:<epoch>:<member>`), so what the relay holds for one space is bounded by
+ * members × epochs × keying admins — 100 comfortably covers the current epoch of any
+ * realistically-sized private space while keeping a worst-case REQ small over Tor.
+ */
+const SPACE_KEY_FETCH_LIMIT = 100;
+
+/**
+ * The two space-key RECOVERY filters that ride a group's on-open scoped subscription, healing the
+ * two ways a private space goes permanently dark (2026-07-28, OPEN_ITEMS §3.1):
+ *
+ *  1. `{kinds:[30079], '#h': [spaceId]}` — re-fetch the space's key deliveries ON OPEN. The
+ *     standing `space-keys` sub is since-bounded by the newest cached 30079 ACROSS ALL SPACES
+ *     (highWaterSince has no per-space memory), so one newer delivery anywhere pins `since` above
+ *     an older delivery this member never received — the exact since-poisoning shape
+ *     {@link buildOpenChatFilters} fixed for messages, healed the same way: ask again, scoped and
+ *     bounded, and let ingest's id-dedupe make the overlap bandwidth-only. Space-scoped via `#h`
+ *     (never `#p:[me]` — an unmixed `#p` REQ would deanonymize the member; deliveries addressed
+ *     to others are NIP-44-sealed to THEIR keys and simply fail to unwrap here, like DM decoys).
+ *
+ *  2. `{kinds:[30078], '#d': ["space-key-request:<spaceId>"]}` — the redelivery REQUESTS from
+ *     stranded members (see channels/membership buildSpaceKeyRequest). Exact-`d` match: every
+ *     requester uses the same `d` value for a given space (addressable per author), so this needs
+ *     no limit — the relay holds at most one live doc per member. Reaching a keyed ADMIN when they
+ *     open the space is the entire delivery path for requests, mirroring the liveness of the
+ *     39002-driven key backfill.
+ */
+export function buildSpaceKeyRecoveryFilters(spaceId: string): ReqFilter[] {
+  return [
+    {kinds: [Kind.SpaceKeyDelivery], '#h': [spaceId], limit: SPACE_KEY_FETCH_LIMIT},
+    {kinds: [Kind.AppData], '#d': [`${SPACE_KEY_REQUEST_D_PREFIX}${spaceId}`]},
+  ];
 }
 
 /**
@@ -883,6 +962,29 @@ export function createFeedAndDmPlan(opts: FeedAndDmPlanOptions): SubscriptionPla
       subs.push({
         subId: 'self-profile',
         filter: profileFilter,
+        pagination: {pageSize: selfProfileLimit, delayMs: selfProfilePageDelayMs},
+      });
+
+      // 3c-bis. Identity BEACONS (kind-30078, `d="identity"`) — every member's PUBLIC relay-blind
+      //     identity carrier (SOH-header content; profile/identityDoc). announceIdentity has
+      //     published one on every name/gradient edit since the carriers shipped, and ingest has
+      //     always known how to learn from them (handleIncomingEvent → learnNameFromContent) — but
+      //     NO sub ever requested the d-tag, so a peer only learned an updated identity when its
+      //     author next authored a post (the SOH header riding it). That was the "I changed my
+      //     gradient and nobody ever sees it" field bug. Addressable → one doc per author (latest
+      //     replaces), so the full pull is bounded by community size, each doc ~a hundred bytes.
+      //     Deliberately NO `since` and NO `authors`:
+      //       • no since: a `since` derived from the newest cached beacon is the same
+      //         since-poisoning trap buildOpenChatFilters heals for chat — a member whose beacon
+      //         predates our newest sighting would stay unreachable forever (30078 is outside the
+      //         NIP-77 reconcile). Re-pulling the tiny addressable set per plan rebuild is
+      //         bandwidth-only: dedupe-pre-verify drops the re-streams.
+      //       • no authors: we WANT every member's beacon, and an author-unscoped REQ leaks
+      //         nothing about `me` (same property as the cold identity-enc firehose above).
+      //     PAGED like self-profile so a large community's cold pull never lands as one burst.
+      subs.push({
+        subId: 'identity-beacons',
+        filter: {kinds: [Kind.AppData], '#d': [D_IDENTITY_BEACON], limit: selfProfileLimit},
         pagination: {pageSize: selfProfileLimit, delayMs: selfProfilePageDelayMs},
       });
 

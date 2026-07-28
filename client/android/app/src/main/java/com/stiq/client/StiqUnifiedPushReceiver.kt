@@ -39,7 +39,16 @@ class StiqUnifiedPushReceiver : MessagingReceiver() {
         // WorkManager uses; StiqSyncService owns its own lifecycle and derives notifications locally.
         val intent = Intent(context, StiqSyncService::class.java)
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            // startForegroundService() arms a ~5s deadline for the service to call
+            // startForeground(). Once the Android 15 dataSync budget is exhausted (StiqFgsBudget)
+            // that promotion is guaranteed to be REFUSED by the OS, so arming the deadline would
+            // convert a skippable wake into a fatal ForegroundServiceDidNotStartInTimeException.
+            // Fall back to a plain startService(): handling a broadcast temporarily allowlists us
+            // from background-start restrictions, so the sync still runs — just unpromoted.
+            val canPromote =
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                    !StiqFgsBudget.isDataSyncExhausted(context)
+            if (canPromote) {
                 context.startForegroundService(intent)
             } else {
                 context.startService(intent)

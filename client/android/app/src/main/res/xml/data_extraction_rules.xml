@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ (API 31+) backup/transfer rules. Referenced from AndroidManifest as
+  android:dataExtractionRules.
+
+  WHY THIS FILE EXISTS EVEN THOUGH allowBackup="false":
+
+  android:allowBackup="false" disables CLOUD backup (Auto Backup / Google Drive, and adb backup).
+  It does NOT disable device-to-device transfer on Android 12+. D2D transfer is governed solely by
+  the <device-transfer> section below; an app with allowBackup="false" and no dataExtractionRules
+  still has its private data copied wholesale onto a new handset during "copy apps & data".
+
+  For STIQ that is not a cosmetic gap, it is two concrete failures:
+
+    1. PRIVACY. app_ArtiState/ holds Tor guard state — the small, stable set of entry relays this
+       install has committed to. Guard identities are a long-lived pseudonymous fingerprint of the
+       user. Off-device, they are a linkable identifier; restored onto a second device, they link
+       the two installs together. The SQLCipher event cache (stiq-cache-<cid>__<slot>.db) holds
+       decrypted-at-rest community content, DMs and the phonebook. Neither belongs in any transfer.
+
+    2. CORRECTNESS. Guard state is meaningful only for the device and network that built it.
+       Restoring it onto different hardware on a different network is precisely the situation
+       Tor's guard algorithm is designed to avoid: it either forces reconnection to guards chosen
+       under someone else's network conditions, or trips arti's state-directory locking. The
+       Keystore-wrapped keys that the cache and the key vault are encrypted under are hardware-bound
+       and CANNOT be transferred, so a restored database is unreadable ciphertext anyway — a
+       "successful" transfer would hand the user a broken install.
+
+  So both channels deny everything. All NINE domains the platform accepts are listed explicitly
+  rather than relying on a bare <exclude domain="root" /> to sweep up its subdirectories, because
+  "root" vs "file"/"database"/"sharedpref" containment is not worth being subtle about in a rule
+  whose failure mode is silent data exfiltration.
+
+  DO NOT "TIDY UP" THE device_* ENTRIES — THEY ARE NOT DUPLICATES OF THE UNPREFIXED ONES.
+  The two groups name two physically disjoint directory trees, so neither group covers the other
+  and deleting either one opens a real hole:
+
+    root / file / database / sharedpref  -> CREDENTIAL-protected storage, /data/user/<u>/<pkg>/
+                                            (Context.createCredentialProtectedStorageContext())
+    device_root / device_file /          -> DEVICE-protected storage, /data/user_de/<u>/<pkg>/
+    device_database / device_sharedpref     (Context.createDeviceProtectedStorageContext())
+
+  Both sets are part of the documented schema and are parsed, not ignored: see AOSP
+  frameworks/base/core/java/android/app/backup/FullBackup.java, BackupScheme#getTokenForXmlDomain
+  and #getDirectoryForCriteriaDomain, which accept exactly these nine strings and map the device_*
+  four onto the DE-storage dirs assigned from createDeviceProtectedStorageContext(). Any OTHER
+  string is what gets silently dropped ("domain=... invalid; skipping", verbose log only), so do
+  not invent domain names here either.
+
+  ("external" is the ninth; it resolves to getExternalFilesDir(), which is null when no external
+  volume is mounted, so it is listed for completeness and costs nothing when absent.)
+
+  Note the deliberate absence of any <include>: in these rules an <exclude> is meaningless without
+  the surrounding section, and a section containing only excludes means "back up nothing else that
+  would otherwise be eligible" — which, combined with allowBackup="false", is total denial.
+-->
+<data-extraction-rules>
+    <!-- Cloud backup. Already dead via allowBackup="false"; stated here so flipping that attribute
+         back on can never silently start uploading the cache or the Tor state directory. -->
+    <cloud-backup>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+        <exclude domain="device_root" />
+        <exclude domain="device_file" />
+        <exclude domain="device_database" />
+        <exclude domain="device_sharedpref" />
+    </cloud-backup>
+
+    <!-- Device-to-device transfer. THIS is the channel allowBackup="false" does not close.
+         Excluded in full: app_ArtiState/ (Tor guard state), databases/ + files/ (the SQLCipher
+         event cache), and shared_prefs/ (stiq_push endpoint, stiq_fgs state). -->
+    <device-transfer>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+        <exclude domain="device_root" />
+        <exclude domain="device_file" />
+        <exclude domain="device_database" />
+        <exclude domain="device_sharedpref" />
+    </device-transfer>
+</data-extraction-rules>

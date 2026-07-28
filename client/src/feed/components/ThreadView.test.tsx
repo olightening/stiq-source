@@ -1,5 +1,6 @@
 import 'react-native';
 import React from 'react';
+import {FlatList} from 'react-native';
 import renderer, {act} from 'react-test-renderer';
 import {generateSecretKey, getPublicKey} from 'nostr-tools/pure';
 import {ThreadView} from './ThreadView';
@@ -56,6 +57,37 @@ it('renders a nested thread', () => {
   expect(text).toContain('body-c2');
   // Root comments with replies start collapsed → the toggle reads "N replies hidden".
   expect(text).toContain('reply hidden');
+});
+
+it('anchors the thread with maintainVisibleContentPosition so a new reply cannot yank a reader further down the thread', () => {
+  const store = new InMemoryEventStore();
+  store.save(comment('c1', 'p1', 1));
+  store.save(comment('c2', 'c1', 2));
+  const nodes = buildThread(store, 'p1');
+
+  let tree: renderer.ReactTestRenderer | undefined;
+  act(() => {
+    tree = renderer.create(<ThreadView nodes={nodes} />);
+  });
+  expect(tree!.root.findByType(FlatList).props.maintainVisibleContentPosition).toEqual({minIndexForVisible: 0});
+});
+
+it('does NOT pair removeClippedSubviews with maintainVisibleContentPosition (they fight over the same native child list)', () => {
+  // On Android, removeClippedSubviews detaches off-screen child views from the very ScrollView
+  // content ViewGroup that MaintainVisibleScrollPositionHelper walks by index to find/track its
+  // anchor — a view clipped away mid-update can vanish out from under the anchor the helper is
+  // tracking, which is exactly the "new reply yanks a scrolled-down reader" bug mVCP exists to
+  // prevent. This is a regression test for that pairing, not a behavioral simulation (jest has no
+  // native ScrollView layout to actually clip against).
+  const store = new InMemoryEventStore();
+  store.save(comment('c1', 'p1', 1));
+  const nodes = buildThread(store, 'p1');
+
+  let tree: renderer.ReactTestRenderer | undefined;
+  act(() => {
+    tree = renderer.create(<ThreadView nodes={nodes} />);
+  });
+  expect(tree!.root.findByType(FlatList).props.removeClippedSubviews).not.toBe(true);
 });
 
 describe('ThreadView isOp (bug #7 — resolved author, not the throwaway signer)', () => {

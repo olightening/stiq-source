@@ -18,7 +18,12 @@ class MainApplication : Application(), ReactApplication {
       object : DefaultReactNativeHost(this) {
         override fun getPackages(): List<ReactPackage> =
             PackageList(this).packages.apply {
-              add(StiqTorPackage())
+              // The Tor engine is the ONE thing the two product flavors (arti / ctor) disagree
+              // on: each flavor source set supplies its own TorEnginePackages returning the
+              // engine it links (StiqArtiPackage or StiqTorPackage). Registered unconditionally
+              // because an absent engine module is how a build missing its native library
+              // silently degrades to permanently offline (never clearnet).
+              addAll(TorEnginePackages.packages())
               add(StiqSocketPackage())
               add(StiqHttpPackage())
               add(StiqWebProxyPackage())
@@ -35,6 +40,7 @@ class MainApplication : Application(), ReactApplication {
               add(StiqBiometricPackage())
               add(StiqPowerPackage())
               add(StiqFilesPackage())
+              add(StiqScreenGuardPackage())
               add(NoCabPackage())
             }
 

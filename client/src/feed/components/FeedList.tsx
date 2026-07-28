@@ -88,12 +88,17 @@ export interface FeedListProps {
    *  copy once connected. Omitted → treated as connected (the plain empty copy). */
   connection?: ConnectionState;
   /**
-   * Tab-switch scroll restore: the offset (px) to jump back to, ONCE, the first time this list's
-   * content is measured after mount. The feed tab body unmounts on tab switch (MainScreen renders
-   * it as `{tab === 'feed' && …}`), so a fresh FeedList always mounts at offset 0 — this restores
-   * the reader's actual position instead of stranding them at the top. Applied via the same
-   * one-shot `onContentSizeChange` idiom as GroupView.tsx/ChannelView.tsx's own initial-scroll
-   * handling: fires at most once per mount, so a later loadMore/refresh/prepend never re-scrolls.
+   * Scroll restore: the offset (px) to jump back to, ONCE, the first time this list's content is
+   * measured after mount.
+   *
+   * This used to be the tab-switch path, when MainScreen rendered the feed body as
+   * `{tab === 'feed' && …}` and every dock press remounted a fresh FeedList at offset 0. Since the
+   * Phase 4.1 TabLayer redesign the tab bodies stay MOUNTED (MainScreen's own note by feedScrollYRef
+   * spells this out), so the native scroll position survives a tab switch on its own and this prop is
+   * ordinarily a mount-time no-op. It remains the safety net for the rare REAL remount — e.g. an
+   * ErrorBoundary reset re-mounting the feed mid-session. Applied via the same one-shot
+   * `onContentSizeChange` idiom as GroupView.tsx/ChannelView.tsx's own initial-scroll handling: fires
+   * at most once per mount, so a later loadMore/refresh/prepend never re-scrolls.
    */
   restoreOffset?: number;
 }

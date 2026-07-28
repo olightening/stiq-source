@@ -161,6 +161,19 @@ export const KIND_MEDIA_BLOB = 30351;
 export const KIND_SPEND_WITNESS = 1986;
 
 /**
+ * Addressable `d`-tag prefix of a member's space-key REDELIVERY REQUEST (kind 30078,
+ * `d = "space-key-request:<spaceId>"`, `['h', spaceId]`, empty content): a member stranded in a
+ * private space without its E2E key asks the space's admins to re-run the kind-30079
+ * current-epoch delivery for them. Deliberately NOT `stiq:`-prefixed — that `d` namespace on
+ * kind 30078 is organizer-reserved relay-side (policy/organizer.go), while this doc is published
+ * by ordinary members with zero relay changes. Canonical here (a wire constant) because both the
+ * subscription plan (the exact-`d` recovery filter) and the membership module (build/parse) need
+ * it, and the plan must stay import-clean of AsyncStorage-bearing modules.
+ * See channels/membership.ts `buildSpaceKeyRequest` / AppRuntime `maybeRedeliverSpaceKey`.
+ */
+export const SPACE_KEY_REQUEST_D_PREFIX = 'space-key-request:';
+
+/**
  * NIP-29 group kinds (mirrors relay/internal/groups and channels/groups.ts `GroupKind`). Chat
  * (9/11/12) + member actions (9000–9022) + relay-emitted state (39000–39004). Canonical here so the
  * ingest allow-list and group code share one definition.

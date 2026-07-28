@@ -59,11 +59,21 @@ sdk.dir=/path/to/Android/sdk
 
 ```sh
 cd client/android
-./gradlew assembleRelease      # what you distribute
-./gradlew assembleDebug        # Metro-less dev/test build ONLY
+./gradlew assembleArtiRelease  # Arti-engine APK — what you normally distribute
+./gradlew assembleCtorRelease  # C-tor-engine APK — the same app on the classic engine
+./gradlew assembleRelease      # both of the above in one invocation
+./gradlew assembleArtiDebug    # Metro-less dev/test build ONLY (per-flavor, like release)
 ```
 
-**Always distribute `assembleRelease`.** A debug-variant APK carries
+**Two Tor engines, one app.** The `tor` flavor dimension (`app/build.gradle`) builds every
+variant twice: the `arti` flavor embeds the Rust arti-client engine (the default choice — far
+faster bootstrap), the `ctor` flavor embeds classic C-tor (`info.guardianproject:tor-android` +
+IPtProxy). Feature set and JS bundle are identical; the flavors differ only in native Tor code.
+Both use the same `applicationId` and signing, so a device can switch engines by sideloading the
+other APK without losing its enrollment. `versionName` carries an `-arti`/`-ctor` suffix so
+Settings → Apps always tells you which engine a device runs.
+
+**Always distribute release variants.** A debug-variant APK carries
 `android:debuggable=true`, which forces ART into debug mode and slows the *entire* native layer —
 SQLCipher, the Tor service, the RN bridge, rendering — on every device that installs it. On
 non-flagship phones the difference is the app feeling broken. Release is also R8-minified with
@@ -120,22 +130,23 @@ current value. `versionCode` gates upgrades and the in-app update repo; `version
 version a user can read back to you. Builds that all claim the same version are how a fleet
 silently drifts onto stale code.
 
-Outputs — per-ABI splits are enabled, so each device gets only its own `.so`:
+Outputs — per-ABI splits are enabled, so each device gets only its own `.so` (one directory per
+flavor; `ctor/release/` has the same three names with `ctor-` in place of `arti-`):
 
 ```
-client/android/app/build/outputs/apk/release/
-    app-arm64-v8a-release.apk      ← distribute this to any modern phone
-    app-armeabi-v7a-release.apk    ← only for old 32-bit ARM devices
-    app-universal-release.apk      ← all ABIs; for CI or unknown targets
+client/android/app/build/outputs/apk/arti/release/
+    app-arti-arm64-v8a-release.apk      ← distribute this to any modern phone
+    app-arti-armeabi-v7a-release.apk    ← only for old 32-bit ARM devices
+    app-arti-universal-release.apk      ← all ABIs; for CI or unknown targets
 ```
 
 ```sh
-adb install -r app/build/outputs/apk/release/app-arm64-v8a-release.apk
+adb install -r app/build/outputs/apk/arti/release/app-arti-arm64-v8a-release.apk
 ```
 
 ABIs are `armeabi-v7a,arm64-v8a` only — the emulator-only x86 slices were dropped because they
 roughly doubled APK size for code no real phone runs. For an x86_64 emulator, override per-build:
-`./gradlew assembleDebug -PreactNativeArchitectures=x86_64`.
+`./gradlew assembleArtiDebug -PreactNativeArchitectures=x86_64`.
 
 Key flags in `gradle.properties`: `bundleInDebug=true`, `hermesEnabled=true`,
 `newArchEnabled=false` (old architecture).

@@ -63,6 +63,12 @@ export interface DockItem {
 export interface DockJump {
   visible: boolean;
   onPress: () => void;
+  /**
+   * "N new posts" badge (instant-refresh overhaul): when set and > 0, overlays a small count on
+   * the bubble instead of the plain chevron-only jump. Omitted/0/undefined renders the bubble
+   * exactly as before this field existed — every pre-existing caller is unaffected.
+   */
+  count?: number;
 }
 
 /** The shared identity-aurora wash (Log-hearth blue/violet/pink), clipped to its container. The id
@@ -160,6 +166,13 @@ export function BottomDock({items, jump}: {items: readonly DockItem[]; jump?: Do
             accessibilityLabel="scroll to top"
             style={s.jumpBubble}>
             <Text style={s.jumpChevron} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>⌄</Text>
+            {!!jump.count && jump.count > 0 && (
+              <View style={s.jumpBadge}>
+                <Text style={s.jumpBadgeText} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                  {jump.count > 99 ? '99+' : jump.count}
+                </Text>
+              </View>
+            )}
           </Press>
         </Animated.View>
       )}
@@ -243,6 +256,20 @@ const s = StyleSheet.create({
     transform: [{rotate: '180deg'}],
     marginTop: -1,
   },
+  // "N new posts" count badge, overlaid on the ↑ bubble's corner (design language borrowed from
+  // MainScreen's bell-badge .nbadge: small pill, 2px ring cut into the parent). Unlike the bell
+  // badge (accent-on-neutral), the bubble it sits on IS the accent colour, so this inverts the
+  // treatment — white fill + accent text + an accent-coloured ring — rather than reusing accent-on-
+  // dark, which would disappear against the bubble's own fill.
+  jumpBadge: {
+    position: 'absolute', top: -3, right: -3,
+    minWidth: 17, height: 17, borderRadius: 8.5,
+    paddingHorizontal: 3,
+    backgroundColor: colors.onAccent,
+    borderWidth: 2, borderColor: colors.accent,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  jumpBadgeText: {fontSize: 9, fontWeight: '700', color: colors.accent, lineHeight: 11},
   // The aurora layer: absolutely fills its container and clips itself to the rounded shape. A large
   // radius clips correctly for both the pill and the circle (the circle's own radius is smaller).
   auroraFill: {...StyleSheet.absoluteFillObject, borderRadius: radius.pill, overflow: 'hidden'},

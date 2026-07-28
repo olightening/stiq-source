@@ -12,18 +12,18 @@ describe('artiClientAuthEntry', () => {
   it('maps a valid bare host + key to the Arti KeyMgr entry shape', () => {
     expect(artiClientAuthEntry(HOST, KEY)).toEqual({
       onionHost: HOST,
-      secretKeyBase32: KEY,
+      privKeyBase32: KEY,
     });
   });
 
   it('accepts a full relay URL for the host and normalizes it via onionHostOf', () => {
     expect(artiClientAuthEntry(`ws://${HOST}.onion/`, KEY)).toEqual({
       onionHost: HOST,
-      secretKeyBase32: KEY,
+      privKeyBase32: KEY,
     });
     expect(artiClientAuthEntry(`ws://${HOST}.onion:80/path`, KEY)).toEqual({
       onionHost: HOST,
-      secretKeyBase32: KEY,
+      privKeyBase32: KEY,
     });
   });
 

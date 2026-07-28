@@ -140,12 +140,16 @@ export function ConnectionSheet({
           : c.success;
 
   // Build the prefs to persist from the current Advanced fields (used by both apply paths).
-  const buildPrefs = (nextMode: ConnectionMode): TorConnectionPrefs => ({
-    mode: nextMode,
-    preferredTransport: transport,
-    customBridges: parseBridgeLines(bridges),
-    bootstrapTimeoutMs: timeoutMsFrom(timeoutSec),
-  });
+  // connectByMode() only reads preferredTransport/customBridges/bootstrapTimeoutMs for 'custom' — keep non-custom presets clean.
+  const buildPrefs = (nextMode: ConnectionMode): TorConnectionPrefs =>
+    nextMode === 'custom'
+      ? {
+          mode: nextMode,
+          preferredTransport: transport,
+          customBridges: parseBridgeLines(bridges),
+          bootstrapTimeoutMs: timeoutMsFrom(timeoutSec),
+        }
+      : {mode: nextMode, customBridges: []};
 
   const selectPreset = (m: ConnectionMode): void => {
     setMode(m);

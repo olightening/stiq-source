@@ -1,15 +1,22 @@
 # =====================================================================================
-# T17 Arti-migration SPIKE — arti-ffi crate (client/arti-ffi/)   ⚠ SCAFFOLD, NOT BUILT
+# arti-ffi — a cdylib wrapping arti-client with the FFI StiqArtiModule.kt drives.
 # =====================================================================================
-# This crate is the T17-S1 deliverable: a cdylib wrapping arti-client (+ tor-hsclient) with a
-# stable start/stop/bootstrap FFI that StiqArtiModule.kt drives, emitting the SAME TorBackendEvent
-# kinds (client/src/tor/types.ts) the shipping C-tor path emits.
+# It emits the SAME TorBackendEvent kinds (client/src/tor/types.ts) the shipping C-tor path emits,
+# so the TS layer above it does not know which engine it is talking to.
 #
-# IT HAS NOT BEEN COMPILED. The build host for this spike has NO Rust cross-compile toolchain and
-# NO Android NDK, so `cargo ndk` (see build.sh) could not be run. The versions below are the
-# INTENDED pins; they must be re-resolved and Cargo.lock committed on a machine that has the
-# toolchain (see README.md → "Reproducing the build"). Treat every arti-* API name referenced in
-# src/*.rs as PROVISIONAL until it compiles against the resolved lockfile.
+# STATUS 2026-07-27: BUILDS for aarch64-linux-android AND armv7-linux-androideabi (0 errors).
+# Cargo.lock is committed and pins the 519-crate graph the Android build reproduces. The versions
+# below are no longer speculative.
+#
+# Pinned to arti-client 0.44.0 = Arti 2.5.0 (2026-06-30), bumped from 0.28.0 = Arti 1.4.1
+# (2025-03-03) on 2026-07-27. All five arti workspace crates move in LOCKSTEP — arti-client,
+# tor-hsclient, tor-rtcompat, tor-hscrypto, tor-llcrypto — and `safelog` moves with them (0.4 → 0.9;
+# leaving it at 0.4 silently resolves TWO safelog crates into one binary). Only four call sites in
+# this crate broke across those 16 minor versions; see src/lib.rs and src/socks.rs for each.
+#
+# ⚠ The feature list is load-bearing. Every entry below was added because something concrete breaks
+# without it, and the comments say what. Dropping one does not fail the build — it silently removes
+# a capability (members-only reach, bridges, onion connect) that only fails in the field.
 # =====================================================================================
 
 [package]
@@ -27,18 +34,172 @@ crate-type = ["cdylib"]
 # --- Arti (pure-Rust Tor). Pin arti-client and tor-hsclient to ONE workspace version. -----------
 # The onion-service-client feature pulls tor-hsclient (client-side rendezvous) and the onion-address
 # resolver; without it arti-client cannot open a .onion stream at all (blocker for STIQ's relay).
-# NOTE: version pins are PROVISIONAL (see header). Re-resolve on the toolchain host and commit the
-# lockfile; record the resolved versions + exact type paths in README.md / RESTRICTED_DISCOVERY.md.
-arti-client = { version = "0.28", default-features = false, features = [
+#
+# ⚠ `default-features = false` drops `compression`, which is `tor-dirclient/{xz,zstd}`. Arti then
+# negotiates `deflate, identity` only. That still compresses (it is not the uncompressed case), but
+# it costs directory bytes on every cold bootstrap — the single biggest chunk of connect time on a
+# phone.
+#
+# ── ATTEMPTED AND BLOCKED, 2026-07-27 — do not retry without reading this ───────────────────────
+# Enabling it is desirable and is NOT blocked by Android: Guardian Project's arti-android build
+# (vendored into bitchat-android) ships `compression` for the same ABIs, so it demonstrably
+# cross-compiles. It is blocked by THIS WINDOWS HOST. Adding the feature grows the HOST-side
+# build-dependency graph (zstd-sys / lzma-sys build scripts) until it reaches a crate that needs
+# MinGW's `dlltool`, and the build dies before any Android code is touched:
+#
+#     error: error calling dlltool 'dlltool.exe': program not found
+#     error: could not compile `getrandom` (lib)
+#
+# Same missing tool that stops cargo-ndk from installing here (see build.sh's header). The fix is a
+# host-toolchain one — install MinGW binutils so `dlltool.exe` is on PATH, or build on a Linux host
+# — NOT a change to this manifest. Left off so the tree keeps building; re-enable the moment the
+# host has dlltool, and expect a measurable cold-bootstrap win.
+arti-client = { version = "0.44", default-features = false, features = [
     "tokio",
     "rustls",              # rustls avoids bundling a second OpenSSL next to op-sqlite's (size + pickFirst)
     "onion-service-client", # client-side onion connect (tor-hsclient) — REQUIRED for the relay onion
+    # --- Restricted discovery (v3 onion CLIENT AUTH) — REQUIRED for STIQ's members-only relay. ---
+    # Without these two the crate can open a PUBLIC .onion and nothing else: `HsClientDescEncKey`
+    # and the keystore that holds it are gated behind `keymgr` + `experimental-api`, so an
+    # auth-gated descriptor stays undecryptable and every members-only community fails to connect.
+    # The original scaffold omitted both, which means it could not have satisfied Gate 1 even if it
+    # had compiled. Restricted discovery stabilised in Arti 1.7.0; Arti 1.8.0 added
+    # `arti hsc ctor-migrate`, which converts exactly the C-tor credential shape onionAuth.ts
+    # already writes (`<host>:descriptor:x25519:<BASE32>`) into Arti's keystore.
+    "keymgr",
+    "experimental-api",
+    # --- Bridges + pluggable transports — REQUIRED to keep STIQ's censorship circumvention. ---
+    # `bridge-client` enables the bridge config at all; `pt-client` pulls tor-ptmgr, which is what
+    # spawns an EXTERNAL transport binary (lyrebird/obfs4) and speaks the PT stdio protocol to it.
+    # Without both, Arti is direct-rung only and obfs4/snowflake/webtunnel simply cannot be dialled
+    # — the exact capability STIQ has over bitchat, whose ArtiProxy exposes no PT surface whatsoever.
+    "bridge-client",
+    "pt-client",
+    # --- Onion-service PoW (prop327) — REQUIRED because our own relay demands it. ---------------
+    # The relay's torrc carries `HiddenServicePoWDefensesEnabled 1` (plus PoWQueueRate 250 /
+    # PoWQueueBurst 2500). A service with that set advertises `pow-params` in its descriptor and
+    # keeps TWO intro queues: clients that present a solved Equi-X puzzle, and everyone else.
+    #
+    # WHY THIS LOOKED FINE WITHOUT THE FEATURE: prop327 deprioritises rather than rejects. With the
+    # service idle, a client that ignores `pow-params` is still served, so every test connect
+    # succeeded and the gap stayed invisible. It only bites under exactly the load the defense
+    # exists for — which is when STIQ's users most need to reach the relay, and when the failure
+    # would look like a generic "can't connect" with no hint that PoW was the reason.
+    #
+    # Pure Rust (tor-hscrypto/tor-netdoc/tor-cell), so it adds no C to the cross-build. It DOES pull
+    # in a runtime JIT (equix -> hashx -> dynasm: mmap + PROT_EXEC), which only ever executes when a
+    # service actually demands a solution — i.e. under exactly the load this feature exists to
+    # survive — so a JIT problem here would surface in production long after every test passed.
+    #
+    # INVESTIGATED 2026-07-27: this is safe on Android. hashx does NOT use dynasmrt's own default
+    # assembler; hashx-0.3.4/src/compiler/util.rs says why in so many words: "[dynasmrt's stock
+    # assembler] will panic if it can't make its memory region executable. This is a no-go for us,
+    # since there is a fallback available." hashx's own hand-written Assembler instead surfaces a
+    # failed mmap/mprotect as `Err(CompilerError::Runtime(io::Error))`. `equix`'s `EquiXBuilder`
+    # defaults to `RuntimeOption::TryCompile`, and `tor-hscrypto`'s PoW solver/verifier (the only
+    # caller in this dependency tree) uses that default unmodified (pow/v1/solve.rs, verify.rs:
+    # "By default, uses `RuntimeOption::TryCompile`") — which reacts to that `Err` by silently
+    # falling back to hashx's pure-Rust INTERPRETER instead of failing
+    # (hashx-0.3.4/src/lib.rs: `TryCompile => match compile() { Ok(e) => Compiled, Err(_) =>
+    # Interpret(program) }`). So if a vendor's SELinux/W^X policy ever blocks the executable-memory
+    # allocation, PoW-solving gets SLOWER, not broken: no panic, no crash, no dropped connection.
+    # Nothing in this dependency tree ever asks for `RuntimeOption::CompileOnly` (the one mode that
+    # WOULD hard-fail instead of falling back), and this crate must not either.
+    "hs-pow-full",
+    # --- Congestion control + CGO — the entire performance rationale for the 0.28 → 0.44 bump. ---
+    # ⚠ THESE ARE NOT FREE, AND THE RELEASE NOTES WILL TELL YOU THEY ARE. Read this before deleting
+    # either of them as "already on by default".
+    #
+    # Arti 2.5.0's announcement says "Congestion Control is now enabled in default builds of Arti"
+    # and that CGO is "included in full feature builds". Both statements are true and both are
+    # irrelevant to this crate, because "default build" means arti-client's `default` feature — and
+    # this manifest sets `default-features = false`. Read from arti-client-0.44.0/Cargo.toml:
+    #
+    #     default              = ["tokio", "native-tls", "compression", "flowctl-cc"]
+    #     flowctl-cc           = ["tor-circmgr/flowctl-cc"]        # → tor-proto/flowctl-cc
+    #     counter-galois-onion = ["tor-proto/counter-galois-onion", "flowctl-cc"]
+    #     full                 = [… "flowctl-cc", "counter-galois-onion" …]
+    #
+    # So with an explicit feature list and no `default`, a naive version bump lands congestion
+    # control OFF and CGO OFF — i.e. it buys the bugfixes and none of the speed the bump was
+    # justified by. Neither feature existed at all at 0.28 (grep 0.28's Cargo.toml: no `flowctl`,
+    # no `counter-galois`), so there was nothing to carry forward; they have to be added by name.
+    #
+    # Neither is gated behind `__is_experimental` at 0.44 — upstream considers both stable, and
+    # `flowctl-cc` is in `default`, i.e. what upstream ships to ordinary users. Both are pure Rust:
+    # `counter-galois-onion` pulls RustCrypto's `aes`/`ctr`/`polyval`, no C, so neither costs
+    # anything on the cross-build (this host has no C compiler — see the `compression` note above).
+    #
+    # Both negotiate per-circuit and degrade to the legacy behaviour against a relay that does not
+    # support them, so enabling them cannot strand a client on an older network.
+    "flowctl-cc",           # RTT-based congestion control instead of fixed 1000/100-cell windows
+    "counter-galois-onion", # CGO wide-block relay-cell AEAD, successor to the tor1 cell cipher
+    # --- sqlite must be BUNDLED, not linked against the system one. -----------------------------
+    # tor-dirmgr stores the consensus in sqlite via rusqlite. Without this, the link line ends in
+    # `-lsqlite3` and ld.lld fails with "unable to find library -lsqlite3": Android *has* a
+    # libsqlite3.so on device, but it is not part of the public NDK API and there is no stub to link
+    # against. `static-sqlite` → `tor-dirmgr/static` → `rusqlite/bundled`, compiling sqlite from
+    # source with the NDK clang instead.
+    #
+    # This did not surface earlier because the cdylib exports only `arti_init_logging`; with no
+    # reference to any of arti, --gc-sections dropped the entire graph (hence the implausible 0.26 MB
+    # "release build"). The first link that actually reaches arti code — the test binary — hit it
+    # immediately.
+    #
+    # ⚠ FOLLOW-UP, before this ships: the app already loads op-sqlite's SQLCipher, which exports the
+    # same `sqlite3_*` symbol names. Two sqlite implementations in one process can cross-bind
+    # through the dynamic linker. The fix is a linker version script on this .so that exports only
+    # `arti_*` and hides everything else — which also shrinks it. Do that when the C ABI is exported.
+    "static-sqlite",
 ] }
-tor-hsclient = "0.28"      # explicit, so restricted-discovery client-auth types are addressable (S4)
-tor-rtcompat = { version = "0.28", features = ["tokio", "rustls"] }
+tor-hsclient = "0.44"      # explicit, so restricted-discovery client-auth types are addressable (S4)
+tor-rtcompat = { version = "0.44", features = ["tokio", "rustls"] }
+# ⚠ LOAD-BEARING, and its absence is a PROCESS ABORT rather than a build error or a failed connect.
+# rustls 0.23 selects a default CryptoProvider only when exactly one of its own `ring` /
+# `aws-lc-rs` features is on. arti depends on rustls with default-features = false so that the final
+# binary decides — so this is where the decision has to live. Without it, arti 0.44 dies with
+# SIGABRT ("Could not automatically determine the process-level CryptoProvider") the instant it
+# configures a client; device-reproduced 2026-07-28 on vc10.
+# `ring` and not `aws-lc-rs`: aws-lc-rs builds C and needs a working host cross-toolchain per
+# Android ABI, which this project deliberately does not rely on (the same reason arti's
+# `compression` feature stays off — no host dlltool). `ring` is pure Rust + asm and already in the
+# graph via rustls-webpki, so this enables a feature rather than adding a crate.
+# See ensure_crypto_provider() in src/lib.rs, which installs it explicitly as well; keep BOTH.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# arti-client re-exports HsId and KeystoreSelector, but NOT HsClientDescEncSecretKey — which is the
+# one type `insert_service_discovery_key` actually takes. These two deps exist solely to construct
+# it from the 32 raw bytes STIQ's join code carries. Both are already in the resolved graph, so they
+# add no crates; they only make the types nameable.
+tor-hscrypto = "0.44"      # HsClientDescEncSecretKey
+tor-llcrypto = "0.44"      # curve25519::StaticSecret, the value inside it
 
 # Single shared async runtime for the whole daemon lifecycle (arti is tokio-native).
-tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+# `io-util` is what socks.rs needs: AsyncReadExt/AsyncWriteExt for the SOCKS handshake and
+# copy_bidirectional for the proxied stream. Note that because arti-client's `tokio` feature turns on
+# `tor-proto/tokio`, arti's DataStream implements TOKIO's AsyncRead/AsyncWrite (not just futures'),
+# so the two halves splice together with no compat shim.
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "net",
+    "sync",
+    "time",
+    "macros",
+    "io-util",
+] }
+
+# BootstrapEvents is a futures Stream; StreamExt::next() is how the progress pump reads it.
+futures = "0.3"
+
+# Arti instruments itself with `tracing`, NOT `log` — and android_logger only ever sees `log`
+# records. Without this, the entire 519-crate diagnostic surface is invisible on device: a logcat
+# capture during a failing bridge connect returned 120 lines, ALL of them our own `log::info!`
+# calls, and not one word from tor-ptmgr/tor-guardmgr/tor-chanmgr about why no circuit was built.
+#
+# `tracing`'s `log` feature makes every tracing event ALSO emit a log record, so arti's own warnings
+# ("unable to connect to bridge…") reach logcat through the logger already installed. Feature
+# unification applies it to the whole graph from this one line — no subscriber, no extra runtime
+# machinery. When nothing is listening at that level the events are dropped as before.
+tracing = { version = "0.1", features = ["log"] }
 
 # Config marshaling: StiqArtiModule passes ONE JSON string mirroring TorStartConfig (see ffi.rs).
 serde = { version = "1", features = ["derive"] }
@@ -47,9 +208,20 @@ serde_json = "1"
 # base32 decode for the x25519 restricted-discovery client-auth secret (onion_auth.rs, S4).
 data-encoding = "2"        # RFC4648 base32 (unpadded, uppercase) — matches onionAuth.ts key shape
 
+# Already resolved transitively (tor-hsclient/tor-guardmgr both depend on it), so this adds no new
+# crate to the graph — it only makes the type nameable from our own code. `describe_arti_error`
+# (lib.rs) routes every arti error we log or surface to the UI through `safelog::sensitive()`
+# rather than interpolating it raw, because some of arti's own error variants embed the specific
+# relay identities (HsDir, rendezvous point) a client picked while reaching a hidden service —
+# tor-hsclient-0.44.0/src/err.rs. Which relays a client selected is exactly the metadata that
+# makes its circuits correlatable, so this crate's own log lines must not depend on every current
+# and future arti sub-crate keeping that discipline internally.
+safelog = "0.9"
+
 # Android logcat bridge so arti_* errors are visible under `adb logcat` during the on-device eval.
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.14"
+jni = "0.21"
 log = "0.4"
 
 # Optional: uniffi for the callback-trait ergonomics (ArtiBootstrap.on_event). If uniffi is used,

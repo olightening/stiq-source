@@ -14,10 +14,17 @@ anywhere in this codebase — see the native-seam note below.
   BUGROUND_COORDINATION.md and config.ts's `IDLE_LOCK_ENABLED` / `LOCK_ON_BACKGROUND`). The
   class's timer/arm/disarm mechanics are unchanged and fully restorable — every test in
   `autolock.test.ts` still constructs `AutoLock` with a real finite timeout.
-- `pin.ts` — `PinVault` registers two PIN slots (standard + duress) sealed with a slow, memory-hard
-  **scrypt** KDF over a per-PIN salt in the hardware-backed `SecureStorage`. `verify(pin)` returns
-  `'standard' | 'duress' | 'invalid'`. Blobs are scheme-tagged (`scrypt1:…`); a legacy single-SHA-256
-  blob is still accepted and re-sealed to the KDF on the next successful entry.
+- `pin.ts` — `PinVault` registers two PIN slots (standard + duress) sealed with a salted,
+  high-iteration KDF over a per-PIN salt in the hardware-backed `SecureStorage`. `verify(pin)` returns
+  `'standard' | 'duress' | 'invalid'`. Blobs are scheme-tagged, and the CURRENT scheme is `pbk1:…` —
+  **native PBKDF2-HMAC-SHA256** (`nativeKdf.ts` → `StiqKdfModule`, 100k iterations). It replaced the
+  pure-JS `scrypt1` KDF, which measured ~11 seconds per unlock on-device under Hermes. Older blobs
+  (`scrypt1:…`, and the oldest untagged single-SHA-256 `salt:hash`) are still verified with their
+  original KDF and transparently re-sealed to `pbk1` on the next successful entry, so no existing user
+  is ever locked out.
+- `nativeKdf.ts` — the `pbk1` bridge. Native when `StiqKdf` is registered (it is, via
+  `MainApplication.kt`); a byte-identical pure-JS `pbkdf2Async` fallback keeps a mis-built app usable
+  rather than locking the user out.
 - `attemptLimiter.ts` — `PinAttemptLimiter` persists a consecutive-failure counter in secure storage
   and, past a small free allowance, imposes an escalating lockout (verify rejects without checking the
   PIN). Wired into every PIN surface via `PinVault.verify`.
@@ -32,10 +39,16 @@ anywhere in this codebase — see the native-seam note below.
 
 ## Notes
 
-- PINs are low-entropy, so the default `HashFn` is a slow, memory-hard scrypt KDF (finding #20) and
-  `PinAttemptLimiter` rate-limits attempts (finding #21). The `HashFn` seam stays injectable so tests
-  substitute a fast hash. scrypt params live in `pin.ts` and are self-described by the scheme tag, so
-  they can be raised behind a new tag with verify re-sealing old blobs automatically.
+- PINs are low-entropy, so the default `HashFn` is `nativePinHash` — an iterated, salted KDF
+  (finding #20) — and `PinAttemptLimiter` rate-limits attempts (finding #21). The `HashFn` seam stays
+  injectable so tests substitute a fast hash. KDF params live in `nativeKdf.ts` (and, for the legacy
+  scheme, `pin.ts`) and are self-described by the scheme tag, so they can be raised behind a new tag
+  with verify re-sealing old blobs automatically.
+- The duress slot has no setter in the product today: the only caller of `PinVault.setPins` is
+  `AppRuntime.completeEnrollment`, and the only caller of THAT (`OnboardingScreen`) passes `''` for the
+  duress PIN, which clears the slot. `LockController`'s duress branch and `performDuressWipe` are
+  complete and tested, but nothing can populate the PIN that triggers them — restoring the coercion
+  defence needs a duress-PIN entry surface, not just `PIN_LOCK_UI`.
 - Native seam: WebCrypto `subtle.digest` needs a polyfill on RN. There is no biometric unlock
   gate anywhere in this codebase (an older version of this note implied one) — the only unlock
   path is PIN entry via `LockController.submitPin`.

@@ -10,6 +10,7 @@ require (
 	github.com/fiatjaf/eventstore v0.17.5
 	github.com/fiatjaf/khatru v0.19.1
 	github.com/gorilla/websocket v1.5.3
+	github.com/klauspost/compress v1.18.1
 	github.com/nbd-wtf/go-nostr v0.52.3
 )
 
@@ -34,7 +35,6 @@ require (
 	github.com/google/flatbuffers v25.9.23+incompatible // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
-	github.com/klauspost/compress v1.18.1 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/mailru/easyjson v0.9.1 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect

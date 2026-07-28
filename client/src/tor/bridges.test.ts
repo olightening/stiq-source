@@ -1,10 +1,19 @@
 import {
   BRIDGE_LADDER,
+  DEFAULT_OBFS4_BRIDGES,
+  DEFAULT_SNOWFLAKE_BRIDGES,
   DEFAULT_TRANSPORT,
   buildStartConfig,
   buildTorrcBridgeLines,
   defaultBridgeLines,
 } from './bridges';
+// The real parser these bridge lines have to survive (StiqArtiModule.kt ->
+// arti-ffi/src/pt.rs's BridgeConfigBuilder::from_str never sees TS at all, but
+// torSettings.ts's validateBridgeLine is the one place this repo already encodes that
+// shape in TS, and is what the custom-bridge paste box in Settings runs pasted lines
+// through) — importing it here means a future bad line fails `npm test`, not a user's
+// bootstrap attempt. See torSettings.ts's OBFS4_RE/WEBTUNNEL_RE/SNOWFLAKE_RE.
+import {validateBridgeLine} from './torSettings';
 
 describe('bridge config', () => {
   it('defaults to obfs4', () => {
@@ -54,9 +63,10 @@ describe('bridge config', () => {
   });
 });
 
-// T4-S2: the dormancy field is threaded so the native torrc can pick the battery-friendly padding
-// block. Ship-dark parity requires the key to be OMITTED from the config unless explicitly true, so
-// a flag-off config is structurally identical to before the field existed.
+// T4-S2: the dormancy field is threaded so the native layer can apply Arti's battery-friendly
+// DormantMode::Soft at TorClient construction (see TorStartConfig.dormancy). Ship-dark parity
+// requires the key to be OMITTED from the config unless explicitly true, so a flag-off config is
+// structurally identical to before the field existed.
 describe('dormancy config field', () => {
   it('carries dormancy:true when requested', () => {
     const cfg = buildStartConfig({dormancy: true});
@@ -117,5 +127,94 @@ describe('transport portfolio', () => {
       'UseBridges 1',
       'Bridge snowflake 192.0.2.3:80 FP url=https://example/',
     ]);
+  });
+});
+
+// T-refresh (2026-07-27): the bundled obfs4 set was replaced wholesale (30 dead
+// scriptzteam-scraped lines -> 11 lines sourced from Tor Project's own moat "builtin"
+// endpoint — see the DEFAULT_OBFS4_BRIDGES doc comment for provenance) and the Snowflake
+// broker's fronts=/ice= were updated for the same reason. These tests are the "sanity-check
+// every line against the parser" pass called for alongside that refresh: a malformed bundled
+// line is worse than a dead one, so every line here now runs through the SAME
+// validateBridgeLine() the custom-bridge paste box in Settings uses, on every `npm test`.
+describe('DEFAULT_OBFS4_BRIDGES sanity (post 2026-07-27 refresh)', () => {
+  it('every bundled obfs4 line parses as a valid obfs4 bridge per torSettings.validateBridgeLine', () => {
+    for (const line of DEFAULT_OBFS4_BRIDGES) {
+      expect(validateBridgeLine(line)).toBe('obfs4');
+    }
+  });
+
+  it('has at least 8 entries so a full non-repeating pickRandom(8) draw is possible', () => {
+    // Not "greater than 0" (already covered elsewhere) — this pins the specific number
+    // pickRandom() is documented to draw, so a future trim that drops below it is a
+    // deliberate, reviewed choice rather than an accident.
+    expect(DEFAULT_OBFS4_BRIDGES.length).toBeGreaterThanOrEqual(8);
+  });
+
+  it('has no duplicate lines', () => {
+    expect(new Set(DEFAULT_OBFS4_BRIDGES).size).toBe(DEFAULT_OBFS4_BRIDGES.length);
+  });
+});
+
+describe('DEFAULT_SNOWFLAKE_BRIDGES sanity (post 2026-07-27 refresh)', () => {
+  it('every bundled snowflake line parses as a valid snowflake bridge per torSettings.validateBridgeLine', () => {
+    for (const line of DEFAULT_SNOWFLAKE_BRIDGES) {
+      expect(validateBridgeLine(line)).toBe('snowflake');
+    }
+  });
+
+  it('both bridges share the current CDN77 broker url= and fronts=', () => {
+    for (const line of DEFAULT_SNOWFLAKE_BRIDGES) {
+      expect(line).toContain('url=https://1098762253.rsc.cdn77.org/');
+      expect(line).toContain('fronts=app.datapacket.com,www.datapacket.com');
+    }
+  });
+
+  it('carries more than one ice= STUN server on every line (single-STUN stalls the rendezvous)', () => {
+    for (const line of DEFAULT_SNOWFLAKE_BRIDGES) {
+      const match = line.match(/ice=(\S+)/);
+      expect(match).not.toBeNull();
+      const stunServers = match![1]!.split(',');
+      expect(stunServers.length).toBeGreaterThan(1);
+    }
+  });
+});
+
+/**
+ * relayOnion — the native reachability probe's target (TorStartConfig.relayOnion).
+ *
+ * The probe (arti-ffi/src/lib.rs) exists because Arti reports "connected, bootstrap 100%" off a
+ * CACHED consensus milliseconds after logging "No usable guards": a usable directory is not a
+ * working channel. It only runs when the start config names a relay onion. Keying that off
+ * `onionAuth` — as the first cut did — silently excluded every PUBLIC community, because
+ * `onionAuth == null` means "a public onion", NOT "no relay". These tests pin the public case
+ * specifically, since it is the one that regressed.
+ */
+describe('relayOnion probe target', () => {
+  const HOST = 'a'.repeat(56);
+
+  it('carries relayOnion for a PUBLIC community — no onionAuth anywhere in the config', () => {
+    const cfg = buildStartConfig({relayOnion: HOST});
+    expect(cfg.relayOnion).toBe(HOST);
+    expect('onionAuth' in cfg).toBe(false);
+  });
+
+  it('carries relayOnion alongside onionAuth for a members-only community', () => {
+    const auth = {onionHost: HOST, privKeyBase32: 'A'.repeat(52)};
+    const cfg = buildStartConfig({relayOnion: HOST, onionAuth: auth});
+    expect(cfg.relayOnion).toBe(HOST);
+    expect(cfg.onionAuth).toEqual(auth);
+  });
+
+  it('OMITS the key entirely when no relay onion is known (pre-field byte-parity)', () => {
+    expect('relayOnion' in buildStartConfig()).toBe(false);
+    expect('relayOnion' in buildStartConfig({relayOnion: ''})).toBe(false);
+    expect('relayOnion' in buildStartConfig({transport: 'direct'})).toBe(false);
+  });
+
+  it('is independent of the transport — every rung gets probe coverage', () => {
+    for (const t of ['direct', 'webtunnel', 'obfs4', 'snowflake'] as const) {
+      expect(buildStartConfig({transport: t, relayOnion: HOST}).relayOnion).toBe(HOST);
+    }
   });
 });

@@ -165,7 +165,21 @@ export function ThreadView({
       data={visible}
       keyExtractor={node => (listKeyFor ? listKeyFor(node.event.id) : node.event.id)}
       ListHeaderComponent={listHeader}
-      removeClippedSubviews
+      // A new reply can insert anywhere in the flattened tree (buildThread sorts children by
+      // created_at — a live reply to an early comment lands among ITS siblings, not necessarily at
+      // the end of `visible`), so a reader lower in the thread must not be shifted by an insertion
+      // above them. Safe here (unlike FeedList's feed, deliberately NOT given this prop): comments
+      // are chronologically stable — a new arrival is inserted, never a reorder of existing ones.
+      maintainVisibleContentPosition={{minIndexForVisible: 0}}
+      // NOT removeClippedSubviews, deliberately, despite the windowing props below: on Android
+      // (RN's ReactClippingViewGroup) it detaches the ScrollView's off-screen CHILD VIEWS from the
+      // same content ViewGroup that MaintainVisibleScrollPositionHelper walks by index to find and
+      // track its anchor (contentView.getChildAt(i) in MaintainVisibleScrollPositionHelper.java).
+      // A view clipped away mid-update can vanish out from under the anchor reference the helper is
+      // tracking, which either no-ops the position fix or computes a bogus delta — the two features
+      // fight over the same native child list. windowSize/maxToRenderPerBatch already cap how much
+      // is ever mounted; that's the safe lever here, not clipping.
+      removeClippedSubviews={false}
       maxToRenderPerBatch={8}
       windowSize={5}
       onScrollToIndexFailed={info => {

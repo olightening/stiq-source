@@ -35,6 +35,7 @@ import {GradientAvatar, type AvatarShape} from '../../ui/GradientAvatar';
 import {JumpButton} from '../../ui/JumpButton';
 import {BACK_PRIORITY, useBackAction} from '../../ui/back';
 import {useReturnToLatest} from '../../ui/useReturnToLatest';
+import {useNewWhileAway} from '../../ui/useNewWhileAway';
 import {useSwipeOptOut} from '../../ui/swipeOptOut';
 import {isSourceMuted, toggleMute} from '../../notifications/notifications';
 import {SpaceHeader, SpaceBackButton, StatusPill, ChatBubble, ChannelComposer, QuotedReply, SwipeToReply, npubFor, shortNpub} from './primitives';
@@ -955,6 +956,8 @@ export function GroupView(props: GroupViewProps): React.JSX.Element {
   // Return-to-latest: a channelFeed puts newest at the TOP (offset 0); a chat puts it at the
   // BOTTOM (scrollToEnd). The button anchors + points accordingly.
   const jump = useReturnToLatest(channelFeed ? 'top' : 'bottom');
+  // "N new" on the FAB while the reader is away in history — the per-space sibling of the feed pill.
+  const newWhileAway = useNewWhileAway(messages, m => m.created_at, jump.showJump);
   const scrollToLatest = (): void => {
     if (channelFeed) listRef.current?.scrollToOffset({offset: 0, animated: true});
     else listRef.current?.scrollToEnd({animated: true});
@@ -1670,17 +1673,41 @@ export function GroupView(props: GroupViewProps): React.JSX.Element {
         style={s.chat}
         data={orderedMessages}
         keyExtractor={m => (listKeyFor ? listKeyFor(m.id) : m.id)}
+        // orderedMessages PREPENDS at index 0 for a channelFeed (newest-first, see above) and
+        // APPENDS at the end for a plain chat (oldest-first) — either way, existing items never
+        // reorder relative to each other, only RN's own documented precondition for this prop (see
+        // ChannelView's identical comment). Covers both a channelFeed reader scrolled into older
+        // broadcasts (a prepend above them would otherwise shift their view) and a plain-chat reader
+        // scrolled up into history when a paginated older page lands.
+        maintainVisibleContentPosition={{minIndexForVisible: 0}}
         onScroll={jump.onScroll}
         onMomentumScrollEnd={jump.onScroll}
         onScrollEndDrag={jump.onScroll}
         scrollEventThrottle={16}
         // Windowing parity with ChannelView's broadcast feed — this chat can grow just as long, and
         // had no windowing props at all before (every message stayed mounted forever).
-        removeClippedSubviews
+        //
+        // removeClippedSubviews is deliberately OFF (unlike ChannelView, which has no
+        // maintainVisibleContentPosition to fight with): on Android it detaches off-screen CHILD
+        // VIEWS from the same ScrollView content ViewGroup that MaintainVisibleScrollPositionHelper
+        // walks by index to find/track its anchor (see ThreadView.tsx's identical note). A view
+        // clipped away mid-update can vanish out from under the anchor the helper is tracking,
+        // defeating the very position-stability this list pairs mVCP in for. windowSize/
+        // maxToRenderPerBatch/initialNumToRender already bound what's mounted.
+        removeClippedSubviews={false}
         maxToRenderPerBatch={6}
         windowSize={11}
         initialNumToRender={10}
-        onContentSizeChange={() => { if (!channelFeed) listRef.current?.scrollToEnd({animated: false}); }}
+        // Auto-follow to the newest message ONLY while the reader hasn't scrolled away to read
+        // history. onContentSizeChange fires on EVERY content-size change — not just a new message,
+        // also a row's height settling (an image/gradient finishing layout) — so an unconditional
+        // scrollToEnd here was yanking a reader back to the bottom mid-history read on any of those,
+        // not only on a genuine new arrival. jump.showJump is already exactly "has the reader
+        // scrolled far enough from the newest edge to care" (the SAME 'bottom'-anchored signal the
+        // return-to-latest button below reads), so reusing it needs no new state. Combined with
+        // maintainVisibleContentPosition above: that prop keeps a scrolled-away reader's view stable
+        // when new content lands; this condition stops the imperative scrollToEnd from overriding it.
+        onContentSizeChange={() => { if (!channelFeed && !jump.showJump) listRef.current?.scrollToEnd({animated: false}); }}
         onEndReached={handleEndReached}
         onEndReachedThreshold={0.3}
         // A tap on a link chip / REFERENCED card must register even while the composer keyboard is
@@ -1691,7 +1718,7 @@ export function GroupView(props: GroupViewProps): React.JSX.Element {
         ListEmptyComponent={historyPending ? null : <Text style={s.empty} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>No messages yet.</Text>}
         renderItem={renderRow}
       />
-        <JumpButton visible={jump.showJump} direction={channelFeed ? 'up' : 'down'} onPress={scrollToLatest} />
+        <JumpButton visible={jump.showJump} direction={channelFeed ? 'up' : 'down'} onPress={scrollToLatest} count={newWhileAway} />
       </View>
 
       {/* Composer — only members may post (relay enforces this too). In a broadcast channel,

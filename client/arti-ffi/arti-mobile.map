@@ -1,0 +1,26 @@
+/* Linker version script for libarti_mobile.so.
+ *
+ * WHY THIS IS NOT OPTIONAL:
+ *   The `static-sqlite` feature compiles a full sqlite3 into this library, and the app ALREADY
+ *   loads op-sqlite's SQLCipher, which exports the same `sqlite3_*` names. With default visibility
+ *   both sets are global, and the dynamic linker is free to bind one library's calls to the other's
+ *   implementation. Arti's consensus cache talking to SQLCipher (or vice versa) is the kind of fault
+ *   that shows up as intermittent corruption, not as a clean error.
+ *
+ *   The same applies to rustls/ring, curve25519, and every other C or asm symbol the Arti graph
+ *   drags in.
+ *
+ * It also shrinks the library: everything not listed here becomes a candidate for the linker to
+ * drop, and internal symbols stop paying for dynamic relocation entries.
+ *
+ * ⚠ The only exports are the JNI entry points. If a new `external fun` is added to
+ * StiqArtiModule.kt, its symbol must be added here too, or it links fine and then throws
+ * UnsatisfiedLinkError on first call. The wildcard covers the whole class, so this only matters if
+ * the class or package is renamed.
+ */
+{
+  global:
+    Java_com_stiq_client_StiqArtiModule_*;
+  local:
+    *;
+};

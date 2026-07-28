@@ -103,8 +103,11 @@ import {
   CAPS_REJECT_CODES_MACHINE_MIN,
   defaultRelayCapabilities,
   parseRelayCapabilities,
+  explicitEnforcedFlags,
   type RelayCapabilities,
+  type EnforcedFlags,
 } from '../nostr/capabilities';
+import {loadStickyEnforcement, saveStickyEnforcement} from './stickyEnforcement';
 import {
   TIMING_JITTER,
   TRUST_RELAY_REJECT_CODES,
@@ -114,6 +117,7 @@ import {
 } from '../config';
 import {sendJitterMs} from '../timing/sendJitter';
 import {parseRejection, isRetryable} from '../nostr/rejection';
+import {isTokenFamilyRejection, DRAW_TIMEOUT_TOKEN_REASON} from '../feed/rejectionMessages';
 import {clearFeedSnapshot} from '../nostr/feedSnapshot';
 import {log, getRecentLogs} from '../util/log';
 import {KeyStore, type SecureStorage, type UnsignedEvent} from '../keys/keystore';
@@ -242,6 +246,8 @@ import {
   channelCoord,
   channelMessages,
   channelMessageEpoch,
+  editTargetId,
+  foldChannelEdit,
   messageChannelId,
   parseChannel,
   getChannel,
@@ -278,6 +284,7 @@ import {
   groupPending as groupPendingOf,
   groupState as groupStateOf,
   groupChatMessages as groupChatMessagesOf,
+  foldGroupChatEdit,
   groupRepliesByParent,
   isGroupMember as isGroupMemberOf,
   messageEpoch,
@@ -326,6 +333,9 @@ import {
   saveDeliveredSpaceKeys,
   KIND_SPACE_INVITES,
   SPACE_INVITES_D_PREFIX,
+  SPACE_KEY_REQUEST_D_PREFIX,
+  buildSpaceKeyRequest,
+  parseSpaceKeyRequest,
   type InvitePayload,
   type JoinNotePayload,
   type SpaceInvite,
@@ -911,11 +921,24 @@ export interface AppSnapshot {
   /** Count of unread derived notifications — the number on the bell's badge (0 = no badge). */
   notifUnreadCount: number;
   /**
-   * True while a relay sync round is in progress (see setRelaySyncing/relaySyncing — the same signal
-   * that widens the deferred-emit throttle). Cheap primitive read, not store-derived: never gates or
-   * forces a feed rebuild. Drives a quiet "Syncing…" indicator (M7) so the widened 1 Hz cadence during
-   * a backlog reads as intentional rather than laggy. Always false on the idle/locked snapshot — no
-   * sync UI is on screen behind the lock gate.
+   * Count of visible feed items with a wire `createdAt` newer than the last {@link
+   * AppRuntime.markFeedSeen} mark — powers a Twitter-style "N new posts" pill so live arrivals can be
+   * announced without yanking the list out from under a reading user (an in-place prepend reflows
+   * whatever they're looking at; an explicit "N new, tap to view" doesn't). 0 before the first
+   * markFeedSeen call (no baseline yet) and 0 again right after a community/account switch (the mark
+   * is one community's timeline — see clearSwitchCaches). Optional so a static pre-init snapshot
+   * (App.tsx's INITIAL) doesn't need to carry it; the runtime always populates it once real, exactly
+   * like {@link mutedAuthorPubkeys}.
+   */
+  newFeedItemCount?: number;
+  /**
+   * True while a relay sync round is in progress (see setRelaySyncing/relaySyncing). Cheap primitive
+   * read, not store-derived: never gates or forces a feed rebuild. Drives a quiet "Syncing…"
+   * indicator (M7) so a backlog that's still filling in reads as intentional rather than broken — the
+   * emit cadence itself is no longer widened during sync (see AppRuntime.emitDeferred's doc: a fresh
+   * backlog is exactly when the user most wants to see content land, so it now gets the SAME tight
+   * cadence as everything else). Always false on the idle/locked snapshot — no sync UI is on screen
+   * behind the lock gate.
    */
   syncing: boolean;
   /**
@@ -1256,9 +1279,21 @@ export class AppRuntime {
    * (DrawErrorCode — the stale-key family drives the self-heal). Read by {@link exhaustionReason} so
    * a write that fails on an EMPTY wallet can say WHY the wallet is empty ("keys re-syncing", not
    * "check your connection") — the 2026-07-21 incident's misleading-message fix. Never rendered raw.
+   *
+   * `quotaSpent` marks the OPPOSITE mislead (2026-07-28 arti-outage follow-up): a draw that
+   * SUCCEEDED but returned zero tokens — the organizer's epoch allowance is genuinely spent. The
+   * wallet then empties with no `ok:false` recorded, and the eventual BlindTokensExhausted showed
+   * its default "check your connection" copy for a quota that no amount of reconnecting refills.
+   * `timedOut` carries DrawResult's structured timeout flag so the classifier never string-matches.
    */
-  private _lastDrawFailure: {purpose: DrawPurpose; error: string; code?: string; at: number} | null =
-    null;
+  private _lastDrawFailure: {
+    purpose: DrawPurpose;
+    error: string;
+    code?: string;
+    timedOut?: boolean;
+    quotaSpent?: boolean;
+    at: number;
+  } | null = null;
   /** In-flight one-shot `stiq:token-keys` fetch (deduped — concurrent stale-key draws share it). */
   private _tokenKeysSync: Promise<boolean> | null = null;
   /** Last time a background key re-sync was scheduled off a C5 advisory, for throttling. */
@@ -1665,6 +1700,15 @@ export class AppRuntime {
    */
   private openChannels = new Set<string>();
   /**
+   * The GROUP mirror of {@link openChannels}: group views currently on screen, session-only. A group
+   * you have JOINED survives reconnects via `joinedGroups` — but an OPEN UNJOINED group (a locked
+   * preview you're reading, a space you're deciding whether to request) is in neither set, so its
+   * scoped sub died permanently on the first reconnect (sendSubscribe()'s knownSubIds reset), and
+   * if `relay` was null at open time the sub never existed at all. resubscribeGroups() unions this
+   * set in, exactly as resubscribeChannels() consults openChannels.
+   */
+  private openGroups = new Set<string>();
+  /**
    * In-memory private-space E2E key cache for SYNCHRONOUS decrypt-on-read (the SecureStorage is
    * async, but getGroupMessages/getChannelMessages must return decrypted Events synchronously
    * during render). Keyed `<spaceId>:<epoch>` → 32-byte key; the highest epoch per space is tracked
@@ -1727,6 +1771,17 @@ export class AppRuntime {
    * delivery for the same epoch since `has(cacheKey)` short-circuits before unwrap.
    */
   private readonly _spaceKeyDeliveryMeta = new Map<string, {fromOwner: boolean; createdAt: number}>();
+  /** Spaces this session already published a key-redelivery request for — one 30078 per space per
+   *  app run, ever ({@link maybeRequestSpaceKeyRedelivery}). Session-only ON PURPOSE: while the
+   *  member stays keyless, each app run re-publishes ONE fresh request (addressable — it replaces
+   *  the previous doc server-side), which is exactly the retry cadence the responder's
+   *  created_at watermark expects; once a key lands the trigger condition itself goes false. */
+  private readonly _keyRedeliveryRequested = new Set<string>();
+  /** Responder-side dedupe for incoming key-redelivery requests, `<spaceId>:<requester>` → the
+   *  latest request created_at already answered ({@link maybeRedeliverSpaceKey}). Session-only:
+   *  re-answering the same addressable request after a restart just re-publishes the idempotent
+   *  addressable 30079 — wasted bytes at worst, never a correctness or confidentiality issue. */
+  private readonly _keyRequestAnswered = new Map<string, number>();
   /** Media uploaded this session, keyed by URL, so post() can re-attach its NIP-94 imeta. */
   private readonly uploadedMedia = new Map<string, ImageMeta>();
   /**
@@ -1978,6 +2033,24 @@ export class AppRuntime {
   /** mutedAuthorPubkeys() snapshot array — keyed on _mutedVersion for stable identity between emits. */
   private _mutedListCache: {ver: number; ids: readonly string[]} | undefined;
 
+  // ── "New content since mark" — Twitter-style feed pill (see markFeedSeen/newFeedItemCountSince,
+  // near visibleFeed() below, and AppSnapshot.newFeedItemCount's doc for the consumer contract). ────
+  /**
+   * Read-position watermark: the newest feed item's wire `createdAt` as of the last
+   * {@link markFeedSeen} call. `undefined` = no baseline yet, so `newFeedItemCountSince` always reads
+   * 0 — the UI opts IN by calling markFeedSeen() once it has something meaningful to measure "new"
+   * against, rather than this guessing at a default (e.g. treating a fresh, never-marked feed as
+   * "all new" would paint a bogus pill on first load). Reset to `undefined` on community/account
+   * switch (clearSwitchCaches): a mark captured in one community's createdAt timeline is meaningless
+   * compared against another's, so a switch starts the pill fresh rather than reporting nonsense
+   * (e.g. every post in the freshly-entered community reading as "new").
+   */
+  private _feedSeenMark: number | undefined;
+  /** Version-cache for {@link newFeedItemCountSince} — keyed on the exact `feed` reference (stable
+   *  unless the feed's actual content changed, see _feedCache/_visibleFeedCache) crossed with the
+   *  mark, so a getSnapshot() between real feed changes is an O(1) hit, never a rescan. */
+  private _newFeedCountCache: {feed: Feed; mark: number; count: number} | undefined;
+
   /**
    * Read the store's per-kind version sum, or `undefined` when the store has no version counters
    * (dev/legacy stores) — in which case every version-keyed cache falls back to recomputing each
@@ -1996,6 +2069,13 @@ export class AppRuntime {
    * never clobber a fresher local change. Persisted so the guard survives a restart.
    */
   private _myIdentityAt = 0;
+
+  /**
+   * True when an identity edit could not be announced (announceIdentity gated pre-enrollment, or
+   * signing failed with the key locked). Settled on the next successful unlock (submitPin) —
+   * without it, a swallowed announce leaves the edit local-only until the NEXT edit.
+   */
+  private _identityAnnouncePending = false;
 
   // ── Per-identity-slot secure-storage keys (namespaced by the active slot; legacy global before
   //    a slot is known / on a pre-silo install). These carry SECRETS or per-identity state, so they
@@ -2154,6 +2234,36 @@ export class AppRuntime {
    * relay (re)connect from onRelayConnected; a failed fetch keeps the last-known/fallback value.
    */
   private _relayCaps: RelayCapabilities = defaultRelayCapabilities();
+
+  /**
+   * STICKY enforcement flags for the ACTIVE community — the union of every enforcement field the
+   * relay has EXPLICITLY advertised, this session or any earlier one (persisted per cid, reloaded
+   * by loadWorkspaceState). Overlaid on top of whatever `_relayCaps` currently holds by
+   * {@link applyStickyEnforcement}, so the windows where `_relayCaps` is only the constant
+   * fallback — a cold start before the first NIP-11 fetch lands, a community switch's reset, or a
+   * connect whose capability fetch failed — can no longer downgrade a known-enforcing community to
+   * "tokens not required" and manufacture token-less space writes (the 2026-07-28 "out of tokens"
+   * field bug's confirmed enabler). Only an explicit fresh advertisement (explicitEnforcedFlags)
+   * ever CHANGES a field here, in either direction; absence never does. Reset alongside
+   * `_relayCaps` on a community switch — each community's own persisted flags reload after the
+   * swap, so nothing bleeds across communities.
+   */
+  private _stickyEnforced: Partial<EnforcedFlags> = {};
+
+  /**
+   * Re-assert the sticky enforcement flags over the current `_relayCaps` (and re-derive the
+   * weight-pricing rate from the merged view). Called wherever `_relayCaps` is (re)assigned from a
+   * source that may know LESS than the community's persisted record: the per-workspace sticky
+   * reload, and every caps re-negotiation. Safe to call with an empty sticky set — a pure no-op
+   * overlay, byte-identical behaviour.
+   */
+  private applyStickyEnforcement(): void {
+    this._relayCaps = {
+      ...this._relayCaps,
+      enforcedFlags: {...this._relayCaps.enforcedFlags, ...this._stickyEnforced},
+    };
+    setBytesPerToken(this._relayCaps.enforcedFlags.bytesPerToken);
+  }
 
   /** User-facing message when the active community's keys don't match the relay's advertised
    *  fingerprints (C5). Kept as one constant so the pre-check (feedSigner) and any future surface
@@ -2325,11 +2435,20 @@ export class AppRuntime {
       // class). Never rejects — the tail's `finally` always runs scheduleDeferredHeavy (when not
       // superseded) so a failure here can't strand the app on the idle snapshot.
       const phase2Gen = this._initPhase2Gen;
+      // App.tsx's cold cascade starts from init().finally() and reads getTorConnectionPrefs()
+      // SYNCHRONOUSLY the instant this promise resolves — it does not wait for phase 2 below. So
+      // torSettings.load() (the call that populates that accessor) is hoisted out of the Promise.all
+      // and awaited HERE, before the un-enrolled return, guaranteeing a preset picked mid-onboarding
+      // is live before the first cold cascade ever reads it. It's one cheap single-key read (see
+      // TorSettingsStore.load) — worth promoting on its own; the rest of phase 2 stays backgrounded.
+      // The same promise is reused in the Promise.all below so it is never loaded twice.
+      const torSettingsReady = this.torSettings.load();
+      await torSettingsReady;
       this._initPhase2Ready = (async (): Promise<void> => {
         try {
           await Promise.all([
             this.mediaSettings.load(),
-            this.torSettings.load(),
+            torSettingsReady,
             this.browserSettings.load(),
             ensurePrefsLoaded(),
           ]);
@@ -2715,6 +2834,15 @@ export class AppRuntime {
       // Which (space, member) pairs this admin device has already keyed (30079) — the dedupe
       // behind the member-arrival key backfill, persisted so cold starts don't re-deliver.
       loadDeliveredSpaceKeys(slotId).then(m => { this._deliveredKeyTo = new Map(Object.entries(m)); }),
+      // Sticky enforcement flags for THIS community (per cid): what its relay has ever explicitly
+      // advertised as enforced. Merged UNDER any explicit flags a fetch already negotiated this
+      // session (current values win — an explicit fresh doc is always newer than the disk record),
+      // then overlaid onto _relayCaps so the pre-first-fetch window already attaches space tokens
+      // for a community known to require them (the 2026-07-28 caps-fallback split-brain fix).
+      loadStickyEnforcement(cid ?? undefined).then(s => {
+        this._stickyEnforced = {...s, ...this._stickyEnforced};
+        this.applyStickyEnforcement();
+      }),
       // Draft-access requests I've silently denied (Phase 5§D) — same per-slot siloing; see
       // denyDraftAccess/getDraftAccessQueue.
       loadDeniedDraftAccess(slotId).then(m => { this._draftAccessDenied = m; }),
@@ -3060,12 +3188,20 @@ export class AppRuntime {
     if (!res.ok) {
       // Remember WHY (with the organizer's machine code when present) so a write failing on the
       // empty wallet can surface the true cause via exhaustionReason — never a raw error string.
-      this._lastDrawFailure = {purpose: Purpose.Post, error: res.error, code: res.code, at: Date.now()};
+      this._lastDrawFailure = {purpose: Purpose.Post, error: res.error, code: res.code, timedOut: res.timedOut, at: Date.now()};
       // Terminal (organizer/relay rejected, or exhausted every attempt without a definitive answer is
       // NOT terminal — see below): only clear the marker when there is nothing left to recover.
       if (!res.timedOut) await this.clearStagedDraw(Purpose.Post);
       return {ok: false, drawn: 0, error: res.error};
     }
+    // ok-but-EMPTY = the organizer's epoch allowance is spent (drawExchange's cap family resolves to
+    // an empty draw on purpose). Record it so exhaustionReason can say "allowance used" instead of
+    // the default "check your connection" — reconnecting can never refill a spent quota. A non-empty
+    // draw clears any stale marker: the wallet demonstrably refills again.
+    this._lastDrawFailure =
+      res.tokens.length === 0
+        ? {purpose: Purpose.Post, error: 'epoch allowance spent', quotaSpent: true, at: Date.now()}
+        : null;
     await wallet.add(epoch, res.tokens);
     // Reconciled into the wallet — safe to drop the marker now (F10 step 3: persist-then-clear).
     await this.clearStagedDraw(Purpose.Post);
@@ -3364,10 +3500,15 @@ export class AppRuntime {
       },
     );
     if (!res.ok) {
-      this._lastDrawFailure = {purpose, error: res.error, code: res.code, at: Date.now()};
+      this._lastDrawFailure = {purpose, error: res.error, code: res.code, timedOut: res.timedOut, at: Date.now()};
       if (!res.timedOut) await this.clearStagedDraw(purpose);
       return {ok: false, drawn: 0, error: res.error};
     }
+    // Same ok-but-EMPTY quota marker as drawTokens above (allowance spent ≠ connection trouble).
+    this._lastDrawFailure =
+      res.tokens.length === 0
+        ? {purpose, error: 'epoch allowance spent', quotaSpent: true, at: Date.now()}
+        : null;
     await wallet.add(epoch, res.tokens);
     await this.clearStagedDraw(purpose);
     return {ok: true, drawn: res.tokens.length};
@@ -3639,7 +3780,7 @@ export class AppRuntime {
         },
       );
       if (!drawn.ok) {
-        this._lastDrawFailure = {purpose: Purpose.Read, error: drawn.error, code: drawn.code, at: Date.now()};
+        this._lastDrawFailure = {purpose: Purpose.Read, error: drawn.error, code: drawn.code, timedOut: drawn.timedOut, at: Date.now()};
         if (!drawn.timedOut) await this.clearStagedDraw(Purpose.Read);
         return {ok: false, error: drawn.error, transient: drawn.timedOut === true};
       }
@@ -4072,6 +4213,12 @@ export class AppRuntime {
    *  honest about the actual cause (key re-sync, fixes itself) instead of blaming the connection. */
   private static readonly KEY_RESYNC_REASON =
     'Your community updated its security keys — the app is re-syncing them now. This will send automatically in a moment.';
+  /** The calm reason when the wallet is empty because the organizer's epoch allowance is genuinely
+   *  SPENT (the last refill came back ok-but-empty): the default exhaustion copy says "check your
+   *  connection", which sends a member whose quota ran out off to debug a network that is fine —
+   *  the mirror image of the 2026-07-21 mislead, surfaced by the 2026-07-28 arti outage. */
+  private static readonly QUOTA_SPENT_REASON =
+    "You've used this community's posting allowance for now — it refills automatically. This will send once it does.";
   /** How long a recorded draw failure may explain a subsequent exhaustion before it goes stale. */
   private static readonly DRAW_FAILURE_REASON_TTL_MS = 10 * 60_000;
 
@@ -4080,17 +4227,22 @@ export class AppRuntime {
    * recent draw failure: when the wallet is empty BECAUSE the community's issuer keys changed under
    * us (the stale-key family), says so — "check your connection" was the 2026-07-21 incident's
    * misleading dead-end, sending members off to debug their network while retries could never help.
-   * Every string returned for the exhaustion family is one of the two calm, pre-written messages —
-   * raw draw/token prose still never reaches a user (F2/F4/B6 unchanged).
+   * When the wallet is empty because the last refill returned ok-but-EMPTY (allowance spent), says
+   * THAT — the connection copy misleads in the opposite direction. A draw that merely timed out
+   * keeps the default connection copy, which is then the truth. Every string returned for the
+   * exhaustion family is one of the calm, pre-written messages — raw draw/token prose still never
+   * reaches a user (F2/F4/B6 unchanged).
    */
   exhaustionReason(e: unknown): string {
     if (e instanceof BlindTokensExhausted) {
       const f = this._lastDrawFailure;
-      const staleRecent =
-        f !== null &&
-        Date.now() - f.at < AppRuntime.DRAW_FAILURE_REASON_TTL_MS &&
-        isStaleKeyDrawFailure({ok: false, error: f.error, code: f.code});
-      return staleRecent ? AppRuntime.KEY_RESYNC_REASON : e.message;
+      if (f !== null && Date.now() - f.at < AppRuntime.DRAW_FAILURE_REASON_TTL_MS) {
+        if (isStaleKeyDrawFailure({ok: false, error: f.error, code: f.code})) {
+          return AppRuntime.KEY_RESYNC_REASON;
+        }
+        if (f.quotaSpent) return AppRuntime.QUOTA_SPENT_REASON;
+      }
+      return e.message;
     }
     return e instanceof Error ? e.message : String(e);
   }
@@ -4690,11 +4842,22 @@ export class AppRuntime {
     //    by the host; on ANY failure the previous/fallback caps stand so connect is never blocked.
     if (this.deps.fetchRelayInfo) {
       try {
-        this._relayCaps = parseRelayCapabilities(await this.deps.fetchRelayInfo());
+        const relayInfoDoc = await this.deps.fetchRelayInfo();
+        // Sticky enforcement (2026-07-28 fix): fold the doc's EXPLICIT enforcement fields into the
+        // per-community sticky record BEFORE adopting the parsed caps. parseRelayCapabilities maps
+        // "absent" to the constant fallback (false/0) — indistinguishable from an explicit
+        // downgrade — so the sticky overlay below is what keeps a known token-enforcing community
+        // enforcing across a doc that omits the block, while an explicit `false` still lands (it
+        // updates the sticky record itself, so the overlay carries the downgrade too).
+        this._stickyEnforced = {...this._stickyEnforced, ...explicitEnforcedFlags(relayInfoDoc)};
+        void saveStickyEnforcement(this._stickyEnforced, this.activeCid ?? undefined);
+        this._relayCaps = parseRelayCapabilities(relayInfoDoc);
         // Weight-pricing (client half): activate token weight-pricing at the relay's advertised rate.
         // bytes_per_token = 0 (caps fallback / relay didn't advertise) → pricing off → every post costs
         // exactly one token, unchanged. Must MATCH the relay's identical chargeableSize computation.
-        setBytesPerToken(this._relayCaps.enforcedFlags.bytesPerToken);
+        // applyStickyEnforcement re-derives it from the MERGED flags (explicit ⊇ sticky for every
+        // field this doc advertised, so a fresh advertisement is never overridden).
+        this.applyStickyEnforcement();
         // C5 — re-verify domain separation now that caps are known (the first resolution ran before
         // this fetch, so this is where a mis-provisioned invite is actually caught on cold start).
         this.verifyCommunityProvisioning();
@@ -4745,7 +4908,10 @@ export class AppRuntime {
 
   /** Open the scoped relay subscription for each remembered group (idempotent). */
   private resubscribeGroups(): void {
-    for (const groupId of this.joinedGroups) {
+    // joinedGroups = membership (persisted); openGroups = views on screen right now (session).
+    // The union covers the discovery case: an OPEN UNJOINED group's sub must survive reconnects
+    // (and a subscribe swallowed by a null relay at open time) exactly like an open channel's.
+    for (const groupId of new Set([...this.joinedGroups, ...this.openGroups])) {
       this.deps.subscribeGroup?.(groupId);
       // A reconnect is exactly the "cold reconnect" moment the M32 field incident traces to — give
       // every remembered group's invited-accept sweep another chance here too, so a stranded
@@ -5546,11 +5712,15 @@ export class AppRuntime {
     const overlay = this.enrolled ? this.cachedOverlay(moderators) : undefined;
     // Locked/pinned arrays keep a stable identity while `overlay` is unchanged (finding #11).
     const {locked: lockedPostIds, pinned: pinnedPostIds} = this.overlayIdArrays(overlay);
+    // Hoisted (rather than computed inline in the literal below) so newFeedItemCountSince can reuse
+    // the SAME reference below without a second visibleFeed() call — cheap either way (cache hit),
+    // but this keeps it to exactly one call site per snapshot, matching the rest of this function.
+    const feed = this.enrolled ? this.visibleFeed(moderators, overlay) : EMPTY_FEED;
     const snapshot: AppSnapshot = {
       enrolled: this.enrolled,
       lock: this.autolock.getState(),
       pinEnabled: this.pinEnabled,
-      feed: this.enrolled ? this.visibleFeed(moderators, overlay) : EMPTY_FEED,
+      feed,
       inbox: this.enrolled ? this.inbox : [],
       channels,
       subscribedChannelIds: this.enrolled ? this.subscribedChannelSet(channels) : [],
@@ -5603,6 +5773,7 @@ export class AppRuntime {
           this._draftDeliveryDecryptVersion,
       },
       notifUnreadCount: this.enrolled ? this.deriveNotifications().reduce((n, it) => n + (it.read ? 0 : 1), 0) : 0,
+      newFeedItemCount: this.enrolled ? this.newFeedItemCountSince(feed) : 0,
       syncing: this.relaySyncing(),
       tokenStatus: this.buildTokenEconomyStatus(),
     };
@@ -5670,6 +5841,9 @@ export class AppRuntime {
       // Cheap idle snapshot: skip the store-touching derive entirely (matches isModerator/feed/etc.
       // above) — the real build on unlock/deferred-heavy-lift recomputes the true value immediately.
       notifUnreadCount: 0,
+      // Same reasoning: `feed` is EMPTY_FEED behind the lock gate, so there is nothing to count "new"
+      // against — the real build picks the true count back up immediately.
+      newFeedItemCount: 0,
       // Nothing sync-related renders behind the lock gate / off the splash critical path — always
       // false here regardless of the live relaySyncing() flag; the real build (unlock/deferred-heavy
       // lift) picks up the true value immediately.
@@ -5984,6 +6158,84 @@ export class AppRuntime {
   }
 
   /**
+   * Record the CURRENT feed as "seen" — the read-position baseline
+   * {@link AppSnapshot.newFeedItemCount} measures forward from (the feed UI's "N new posts" pill).
+   * Call it once the feed on screen is the one "new" should be measured against: e.g. when the feed
+   * tab first shows real content, or when the user taps the pill / scrolls back to the top to view
+   * what just arrived.
+   *
+   * Computes the mark from a FRESH visibleFeed() call rather than trusting whatever snapshot happens
+   * to be cached on {@link _lastSnapshot}: a store mutation (store.save) bumps the version counters
+   * the instant it happens, but nothing re-derives `_lastSnapshot` until the next getSnapshot() call —
+   * which, outside of the normal render/emit loop, isn't guaranteed to have happened yet (e.g. a
+   * caller that reacts to an event straight off the wire, before any render). Reading a stale
+   * snapshot here would silently under- or over-count everything that arrived since it was built.
+   * visibleFeed/_cachedBuildFeed are themselves version-cached (see their docs), so this is a cache
+   * HIT — and therefore cheap — in the common case where nothing changed since the last real build;
+   * it only does real work exactly when there's a genuine change to account for, which is also
+   * exactly when a stale answer would be wrong. No-op while not enrolled — nothing to mark.
+   *
+   * RETURNS whether the mark actually MOVED — i.e. whether any snapshot field could have changed as
+   * a result. This exists so the UI host can skip the re-render on the (very common) repeat mark
+   * against an unchanged feed: getSnapshot() builds a brand-new object on every call, so a host that
+   * unconditionally setState()s its result can never bail out on Object.is and re-renders the whole
+   * tree for nothing. It is also a hard bound on the render→mark→render cycle App.tsx's
+   * handleMarkFeedSeen sits in: a mark can only trigger a render while it is still genuinely
+   * advancing, which real content arrival bounds — so even if a future caller reintroduces an
+   * unstable callback identity (the vc9 100%-CPU bug), the cycle terminates after one pass instead
+   * of running forever. Idempotent by construction: calling it twice with no new content returns
+   * false the second time.
+   */
+  markFeedSeen(): boolean {
+    if (!this.enrolled) return false;
+    const moderators = this.moderatorNpubs();
+    const items = this.visibleFeed(moderators, this.cachedOverlay(moderators)).items;
+    let mark = 0;
+    for (const item of items) {
+      if (item.createdAt > mark) mark = item.createdAt;
+    }
+    if (this._feedSeenMark === mark) return false;
+    this._feedSeenMark = mark;
+    return true;
+  }
+
+  /**
+   * Count of `feed`'s items with a wire `createdAt` strictly newer than the last {@link markFeedSeen}
+   * mark. Backs {@link AppSnapshot.newFeedItemCount} — see its doc for the 0-before-a-mark /
+   * 0-after-a-switch contract.
+   *
+   * Deliberately createdAt-only — NOT sortFeed's sortAt-preferring `at()` recency key (feed/sort.ts).
+   * `sortAt` exists solely to locally reorder the viewer's OWN posts past their bucket-fuzzed wire
+   * timestamp (FeedItem.sortAt's doc, audit #48), is in MILLISECONDS, and is undefined for every
+   * other author — mixing it into a createdAt-SECONDS comparison here would read every own post from
+   * anytime this session as "newer" than any real timestamp (the identical unit trap sort.ts's
+   * risingScore doc warns against). Excluding it costs nothing: the viewer already saw their own post
+   * render instantly via the optimistic-write path (scheduleOptimisticEmit) — it doesn't need a "new
+   * content" pill to announce it too. A blind post's createdAt can be fuzzed up to
+   * BLIND_TS_BUCKET_SECONDS (180s) backward, which can rarely undercount a just-arrived post by that
+   * margin — an existing, accepted imprecision of the whole ordering scheme (sortFeed's 'new' mode
+   * carries the identical limit), not one this introduces.
+   *
+   * Version-cached on the exact `feed` reference crossed with the mark (see _newFeedCountCache): a
+   * getSnapshot() that leaves the feed untouched (a channel/group-only write, or simply no relay
+   * event since the last call) is an O(1) hit. A genuine feed change is one O(n) scan reading an
+   * already-computed field off already-built FeedItems — buildFeed/toFeedItem are never invoked here
+   * — which is what keeps this affordable to compute on every emit rather than a full feed rebuild.
+   */
+  private newFeedItemCountSince(feed: Feed): number {
+    const mark = this._feedSeenMark;
+    if (mark === undefined) return 0;
+    const c = this._newFeedCountCache;
+    if (c && c.feed === feed && c.mark === mark) return c.count;
+    let count = 0;
+    for (const item of feed.items) {
+      if (item.createdAt > mark) count++;
+    }
+    this._newFeedCountCache = {feed, mark, count};
+    return count;
+  }
+
+  /**
    * Resolve the original post + thread behind a moderation-log entry, for the Log's full-post
    * view. When the target is a comment, we open its ROOT post so the comment shows in context.
    * The post may itself be hidden (it's then found in the feed's moderation log), so we look in
@@ -6241,6 +6493,10 @@ export class AppRuntime {
       const cid = ev.tags.find(t => t[0] === 'a')?.[1];
       if (!cid || !channelIds.has(cid)) continue;
       if (ev.pubkey === this.myPubkey) continue; // my own broadcast — never notify me
+      // An EDIT is not new activity: it must neither mint a fresh notification (its own id would
+      // re-notify a message the user already read) nor let its fresh created_at outrank a genuinely
+      // newer broadcast. The row is keyed to the ORIGINAL; the edit only refreshes the preview text.
+      if (editTargetId(ev)) continue;
       const prev = latestByChannel.get(cid);
       if (!prev || ev.created_at > prev.created_at) latestByChannel.set(cid, ev);
     }
@@ -6252,7 +6508,9 @@ export class AppRuntime {
       const desc: NotifDescriptor = {kind: 'channel', channelId: ch.id, channelType: 'channel'};
       if (!isNotifAllowed(prefs, desc)) continue;
       const posterName = this.displayNames.nameFor(latestEv.pubkey);
-      const previewText = excerpt(inlineMediaSummary(decodeNameHeader(latestEv.content).text), 140);
+      // Preview through the edit fold so the row shows the broadcast's CURRENT text.
+      const shownEv = foldChannelEdit(this.deps.store, latestEv) ?? latestEv;
+      const previewText = excerpt(inlineMediaSummary(decodeNameHeader(shownEv.content).text), 140);
       items.push({
         id: latestEv.id,
         ts: latestEv.created_at,
@@ -6782,6 +7040,17 @@ export class AppRuntime {
    */
   private resolveRef(ref: string): import('nostr-tools/pure').Event | null {
     if (/^[0-9a-f]{64}$/i.test(ref)) return this.deps.store.getById(ref) ?? null;
+    // A raw addressable coordinate (`kind:pubkey:d`). NostrLinkPreview hands the tap/lookup path a
+    // DECODED naddr in exactly this shape (decodeNostrUri), so without this branch an
+    // unresolved-naddr card could fetch but never resolve/open.
+    const coord = /^(\d+):([0-9a-f]{64}):(.+)$/.exec(ref);
+    if (coord) {
+      return (
+        this.deps.store
+          .query({kinds: [Number(coord[1])], authors: [coord[2]!]})
+          .find(e => e.tags.some(t => t[0] === 'd' && t[1] === coord[3])) ?? null
+      );
+    }
     try {
       const decoded = nip19.decode(ref.replace(/^nostr:/, ''));
       if (decoded.type === 'note') return this.deps.store.getById(decoded.data) ?? null;
@@ -6819,8 +7088,8 @@ export class AppRuntime {
 
   /** Look up a single event for a quoted-post embed; lazily fetch it from the relay if absent. */
   getEvent(ref: string): import('../ui/NostrLinkPreview').NostrEventSummary | null {
-    const ev = this.resolveRef(ref);
-    if (!ev) {
+    const raw = this.resolveRef(ref);
+    if (!raw) {
       // Not cached yet — ask the relay for it. When it arrives, the store-change re-render
       // resolves this lookup. Both fetch paths de-dupe repeated requests, so it's safe to call
       // on every render of an unresolved embed.
@@ -6829,10 +7098,34 @@ export class AppRuntime {
         // hex / note / nevent → id-scoped fetch.
         this.deps.fetchEvents?.([id]);
       } else {
-        // naddr (addressable, e.g. NIP-23 article) → filter-scoped fetch by {kind,author,#d}.
+        // naddr / raw coordinate (addressable, e.g. NIP-23 article) → filter-scoped fetch.
         this.fetchNaddr(ref);
       }
       return null;
+    }
+    // A quoted channel/group message must agree with what the open surface renders: the live views
+    // fold the author's latest edit in place (channelMessages/groupChatMessages) while this
+    // resolver reads the raw store — without the same fold an embed card would show the pre-edit
+    // text forever while the destination it opens shows the edit.
+    let ev = foldChannelEdit(this.deps.store, raw) ?? foldGroupChatEdit(this.deps.store, raw) ?? raw;
+    // Space-sealed content (`['encrypted','nip44']` — private channels/groups): decrypt with the
+    // held space key exactly like the open surface would; without a key the body stays HIDDEN.
+    // resolveContent below only understands the blind content-epoch scheme and would otherwise
+    // pass space-sealed NIP-44 ciphertext through as if it were plaintext (never render ciphertext).
+    const embedSpaceId =
+      ev.kind === Kind.LiveChat
+        ? messageChannelId(ev)
+        : ev.kind === GroupKind.Chat || ev.kind === GroupKind.Thread || ev.kind === GroupKind.Reply
+          ? eventGroupId(ev)
+          : null;
+    if (embedSpaceId) {
+      const dec = this.decryptSpaceMessages([ev], embedSpaceId);
+      if (dec.length === 0) {
+        // Sealed and not decryptable here (no key / stripped tags): attribute the card, hide the body.
+        const who = this.resolveIdentity(ev);
+        return {id: ev.id, pubkey: who.pubkey, content: '', name: who.name, kind: ev.kind, gradient: who.gradient};
+      }
+      ev = dec[0]!;
     }
     // Attribution goes through the ONE shared resolver (resolveIdentity → displayIdentityFor), NOT
     // the raw `ev.pubkey`: content published blind is signed by a PER-POST THROWAWAY key, so the
@@ -6867,6 +7160,11 @@ export class AppRuntime {
           if (rootEpoch !== null) requestEpochUnlock(rootEpoch);
         }
         rootTitle = titleOf(root) ?? decodeNameHeader(rootBody.text).text.replace(/\s+/g, ' ').slice(0, 64);
+      } else if (rootId) {
+        // The embed both names and NAVIGATES to the root ("in <title>", tap → open the thread), and
+        // the tap can only land once the root is cached — fetch it exactly like the comment itself
+        // was fetched (id-scoped, de-duped + un-blacklisted one layer down in RelayClient).
+        this.deps.fetchEvents?.([rootId]);
       }
     }
     return {
@@ -6897,14 +7195,26 @@ export class AppRuntime {
    * re-issues the fetch instead of it staying permanently unresolved for the rest of the session.
    */
   private fetchNaddr(ref: string): void {
-    let decoded;
-    try {
-      decoded = nip19.decode(ref.replace(/^nostr:/, ''));
-    } catch {
-      return; // not a bech32/nostr ref
+    let kind: number;
+    let pubkey: string;
+    let identifier: string;
+    // Accept both the bech32 `naddr` form and the raw `kind:pubkey:d` coordinate form —
+    // resolveRef resolves both, so both must be fetchable or a coordinate ref never heals.
+    const coord = /^(\d+):([0-9a-f]{64}):(.+)$/.exec(ref);
+    if (coord) {
+      kind = Number(coord[1]);
+      pubkey = coord[2]!;
+      identifier = coord[3]!;
+    } else {
+      let decoded;
+      try {
+        decoded = nip19.decode(ref.replace(/^nostr:/, ''));
+      } catch {
+        return; // not a bech32/nostr ref
+      }
+      if (decoded.type !== 'naddr') return;
+      ({kind, pubkey, identifier} = decoded.data);
     }
-    if (decoded.type !== 'naddr') return;
-    const {kind, pubkey, identifier} = decoded.data;
     const key = `${kind}:${pubkey}:${identifier}`;
     if (this.requestedNaddrs.has(key)) return;
     this.requestedNaddrs.add(key);
@@ -7448,10 +7758,17 @@ export class AppRuntime {
    * relay just means publishOptimistic queues to the outbox and retries on reconnect.
    */
   private async announceIdentity(): Promise<void> {
-    if (!this.identity || !this.enrolled) return;
+    if (!this.identity || !this.enrolled) {
+      // Edited before enrollment finished (or without a signer): remember that an announce is
+      // owed so the next unlock retries it — otherwise the change stays local-only until the
+      // NEXT identity edit, with nothing on the wire in between.
+      this._identityAnnouncePending = true;
+      return;
+    }
     const name = this.displayNames.getMyName();
     const wire = this.gradients.myWire();
     if (!hasIdentityToPublish(name, wire)) return;
+    this._identityAnnouncePending = false;
     // Strictly-monotonic timestamp so each announce replaces the last and cross-device adoption
     // always sees a newer created_at (guards against two edits in the same wall-clock second).
     const at = Math.max(Math.floor(Date.now() / 1000), this._myIdentityAt + 1);
@@ -7461,14 +7778,17 @@ export class AppRuntime {
       try {
         await this.publishOptimistic(await this.identity.sign(beacon));
       } catch {
-        // signing/publish failed (e.g. key locked) — the header still rides the next real post
+        // signing failed (e.g. key locked) — retried on the next unlock via the pending flag;
+        // the header also still rides the next real post
+        this._identityAnnouncePending = true;
       }
     }
     try {
       const profile = await this.identity.buildEncryptedProfile(encodeProfilePayload(name, wire), at);
       await this.publishOptimistic(profile);
     } catch {
-      // key locked / offline — the encrypted profile is best-effort; retried on the next change
+      // key locked / offline — retried on the next unlock via the pending flag
+      this._identityAnnouncePending = true;
     }
   }
 
@@ -8273,6 +8593,88 @@ export class AppRuntime {
       // failed publish retries on the next 39002 arrival.
       void this.deliverCurrentSpaceKeyTo(groupId, member);
     }
+  }
+
+  /**
+   * The highest space-key epoch demonstrably IN USE in `spaceId` — the max `ke` tag across its
+   * cached messages (−1 when none carry one). Cheap store scan, run only on opening a
+   * private/encrypted space; the vc14 on-open backfill is what keeps this evidence fresh.
+   */
+  private maxSeenSpaceEpoch(spaceId: string): number {
+    let max = -1;
+    for (const ev of this.deps.store.query({kinds: [9, 11, 12, Kind.LiveChat]})) {
+      const sid = ev.tags.find(t => (t[0] === 'h' || t[0] === 'a') && t[1])?.[1];
+      if (sid !== spaceId) continue;
+      const epoch = messageEpoch(ev);
+      if (epoch !== null && epoch > max) max = epoch;
+    }
+    return max;
+  }
+
+  /**
+   * REQUESTER half of the key-redelivery loop (the "private space looks empty forever" fix,
+   * OPEN_ITEMS §3.1). A member can end up in a private space holding no usable key with NOTHING
+   * left to heal them: the admin's kind-30079 delivery never reached this device (relay pruned or
+   * paged it out, publish lost in an outage) while the admin's persisted `_deliveredKeyTo`
+   * watermark says "already keyed at this epoch" — so the 39002-driven backfill will never send
+   * again, decryptSpaceMessages hides everything, and the space renders a legitimate-looking
+   * "No messages yet." indefinitely.
+   *
+   * The break-out is explicit: publish ONE addressable kind-30078 request doc
+   * (`d="space-key-request:<spaceId>"`, h-tagged so it rides the group's own scoped sub) that any
+   * keyed admin's {@link maybeRedeliverSpaceKey} answers by re-running the current-epoch delivery,
+   * watermark notwithstanding. Fires from the same on-open moment as hydrateSpaceKeys — the open
+   * is what proves the member actually wants in — and only when the evidence says we're behind:
+   * we hold NO key at all, or cached messages carry a `ke` above our highest epoch (a rotation we
+   * missed). Once per space per session; the addressable doc replaces itself server-side.
+   */
+  private async maybeRequestSpaceKeyRedelivery(spaceId: string): Promise<void> {
+    if (!this.identity || !this.enrolled || !this.myPubkey) return;
+    if (this._keyRedeliveryRequested.has(spaceId)) return;
+    const held = this._spaceEpoch.get(spaceId) ?? -1;
+    if (held >= 0 && held >= this.maxSeenSpaceEpoch(spaceId)) return; // current — nothing to heal
+    // Non-members don't ask: a keyed admin ignores an outsider's request anyway (the responder's
+    // membership gate), so skip the publish when the relay-signed roster is known and excludes us.
+    // An absent roster (39002 not yet synced) errs toward asking — worst case an unanswered doc.
+    const members = groupMembersOf(this.deps.store, spaceId);
+    if (members.length > 0 && !members.includes(this.myPubkey)) return;
+    this._keyRedeliveryRequested.add(spaceId);
+    const event = await this.identity.sign(buildSpaceKeyRequest(spaceId));
+    await this.publishOptimistic(event);
+  }
+
+  /**
+   * RESPONDER half of the key-redelivery loop: an incoming `space-key-request:` doc (see
+   * {@link maybeRequestSpaceKeyRedelivery}) from a CURRENT member of a private/encrypted space
+   * this device holds the key for → re-run the per-member current-epoch delivery.
+   *
+   * Guards, in order of what they protect:
+   *  • admin-of-space + member-of-space (relay-signed 39001/39002) — a key must never leave for an
+   *    outsider: a kicked/never-joined requester fails the roster check, exactly like every other
+   *    delivery path (this is the same relay-confirmed truth maybeDeliverKeyToNewMembers acts on);
+   *  • CURRENT epoch only — a rejoiner who lost old epochs must not recover the history a rotation
+   *    deliberately locked away from them;
+   *  • created_at watermark per (space, requester) — the same addressable request replayed by a
+   *    reconnect is answered once; a genuinely NEW request (fresh created_at from the member's next
+   *    session) is answered again.
+   *
+   * The point of this path is that it deliberately BYPASSES the `_deliveredKeyTo` watermark:
+   * that watermark records "this device already sent it", the request is the member proving the
+   * key never ARRIVED, and the request wins. deliverCurrentSpaceKeyTo publishes unconditionally
+   * and re-marks the watermark on success, so the 39002 sweep's dedupe stays consistent after.
+   */
+  private maybeRedeliverSpaceKey(event: Event): void {
+    const req = parseSpaceKeyRequest(event);
+    if (!req || !this.myPubkey || req.requester === this.myPubkey) return;
+    const {spaceId, requester} = req;
+    if (!isGroupAdminOf(this.deps.store, spaceId, this.myPubkey)) return;
+    if (!(this.isPrivateSpace(spaceId) || isEncryptedSpace(spaceId))) return;
+    if (!this.outgoingSpaceKey(spaceId)) return; // we hold nothing to hand out
+    if (!groupMembersOf(this.deps.store, spaceId).includes(requester)) return;
+    const answeredKey = `${spaceId}:${requester}`;
+    if ((this._keyRequestAnswered.get(answeredKey) ?? 0) >= req.at) return;
+    this._keyRequestAnswered.set(answeredKey, req.at);
+    void this.deliverCurrentSpaceKeyTo(spaceId, requester);
   }
 
   /** Admin action: edit a group's metadata/access. */
@@ -9497,6 +9899,10 @@ export class AppRuntime {
 
   /** Open a group's scoped relay subscription (chat + state) while its view is on screen. */
   openGroup(groupId: string): void {
+    // Track BEFORE subscribing (mirror of openChannel): if the relay is null/mid-reconnect right
+    // now, the subscribe call below is a silent no-op, and the next onRelaySubscribed's
+    // resubscribeGroups() is what actually opens it — but only if the id is in a tracked set.
+    this.openGroups.add(groupId);
     this.deps.subscribeGroup?.(groupId);
     // Pull this space's E2E keys into the in-memory cache (so its messages decrypt on render), then
     // give the invited-accept auto-approve sweep another chance — see sweepInvitedAfterKeys's doc for
@@ -9523,7 +9929,13 @@ export class AppRuntime {
     // Relay-independent, same condition hydrateSpaceKeys itself is gated on: a public space's
     // invited doc is plaintext (no key needed), so the sweep can run immediately, synchronously.
     if (this.isPrivateSpace(groupId) || isEncryptedSpace(groupId)) {
-      void this.hydrateSpaceKeys(groupId).then(() => this.autoApproveInvited(groupId));
+      void this.hydrateSpaceKeys(groupId).then(() => {
+        this.autoApproveInvited(groupId);
+        // AFTER hydration (so the keystore has had its say): if this member still holds no usable
+        // key, ask the space's admins to re-deliver — the "private space looks empty forever"
+        // self-heal. See maybeRequestSpaceKeyRedelivery.
+        void this.maybeRequestSpaceKeyRedelivery(groupId);
+      });
     } else {
       this.autoApproveInvited(groupId);
     }
@@ -9534,7 +9946,9 @@ export class AppRuntime {
     // Admins of a CLOSED space keep its pending/state (and chat) subscription live even after
     // leaving the screen, so the requests badge + join-request notifications stay current without
     // waiting for the next reconnect's resubscribeGroups(). Bounded to the few closed groups you run.
+    // The id stays in openGroups too, so a reconnect keeps that deliberately-live sub alive.
     if (this.isGroupAdmin(groupId) && groupStateOf(this.deps.store, groupId)?.closed) return;
+    this.openGroups.delete(groupId);
     this.deps.unsubscribeGroup?.(groupId);
   }
 
@@ -10144,7 +10558,11 @@ export class AppRuntime {
       // not be applied to the incoming community (e.g. a stale purpose-key fingerprint would spuriously
       // flag the new community as mis-provisioned, or an old weight-pricing rate would misprice its
       // posts). Back to the constant fallback until the new relay's onRelayConnected re-negotiates.
+      // The sticky enforcement record is per-community too: drop it with the caps (the incoming
+      // community's own persisted flags reload in loadWorkspaceState below, closing the gap long
+      // before its relay connects).
       this._relayCaps = defaultRelayCapabilities();
+      this._stickyEnforced = {};
       setBytesPerToken(this._relayCaps.enforcedFlags.bytesPerToken);
       await this.flushSentMessages();
       await this.flushFailedWraps();
@@ -10196,6 +10614,11 @@ export class AppRuntime {
     this._channelsCache = undefined;
     this._identityVersion = 0;
     this._notifCache = undefined;
+    // The "new since" pill's mark is one community's createdAt timeline — comparing it against the
+    // incoming community's would report nonsense (e.g. every post there reading as "new"). A switch
+    // starts the pill fresh instead; see _feedSeenMark's doc.
+    this._feedSeenMark = undefined;
+    this._newFeedCountCache = undefined;
     // Rebuild the incoming (cold) community posts-first too: reset the score latch and drop any
     // pending scored pass so the switch's first feed build skips the new store's kind-7 warm.
     this._feedScored = false;
@@ -10660,6 +11083,12 @@ export class AppRuntime {
       return 'rejected';
     }
     const outcome = await this.lockController.submitPin(pin);
+    if (outcome === 'unlocked' && this._identityAnnouncePending) {
+      // An identity edit's announce was gated or failed while the key was locked/pre-enrollment —
+      // the signer is live again now, so settle the debt (fire-and-forget: best-effort like every
+      // announce; failure re-arms the flag).
+      void this.announceIdentity();
+    }
     if (outcome === 'wiped' && this.identity) {
       this.enrolled = await this.identity.isEnrolled(); // duress cleared it
       this.myPubkey = undefined;
@@ -11256,6 +11685,15 @@ export class AppRuntime {
         }
         return;
       }
+      // Key-redelivery request (d="space-key-request:<spaceId>"): a stranded member of a private
+      // space asking its admins to re-send the current epoch key — the delivery they were owed
+      // never arrived, and the _deliveredKeyTo watermark means no other path will ever re-send it.
+      // Arrives on the group's own scoped sub (buildSpaceKeyRecoveryFilters). Fully guarded inside
+      // (admin + roster + created_at dedupe); see maybeRedeliverSpaceKey.
+      if (identityD?.startsWith(SPACE_KEY_REQUEST_D_PREFIX)) {
+        this.maybeRedeliverSpaceKey(event);
+        return;
+      }
     }
 
     // Private-space E2E key delivery (kind 30079) addressed to me: authenticate the sender, unwrap
@@ -11331,6 +11769,9 @@ export class AppRuntime {
     }
 
     if (event.kind === Kind.LiveChat && this.myPubkey) {
+      // An EDIT of an existing broadcast is not new activity — never raise a "posted in" push for
+      // it (deriveNotifications applies the same rule to the notification centre).
+      if (editTargetId(event) !== null) return;
       const channelId = event.tags.find(t => t[0] === 'a')?.[1];
       if (channelId) {
         const ch = this.listChannels().find(c => c.id === channelId);
@@ -11626,6 +12067,18 @@ export class AppRuntime {
       return cached.value;
     }
     const reasons = new Map(this.outbox.reasons());
+    // Token-family rejections recorded while the last draw TIMED OUT get the transport-honest copy
+    // instead of "You're out of tokens" (2026-07-28 outage: EVENT frames rode the surviving WS while
+    // draws died, so a send could reach the relay token-less and be rejected as a quota problem the
+    // member didn't have). Recency check matches exhaustionReason's TTL. Evaluated at snapshot time,
+    // so the substitution follows the same cache invalidation as the reasons themselves — a TTL
+    // expiry alone doesn't rebuild the cache, which is acceptable: the next outbox/sign change does.
+    const f = this._lastDrawFailure;
+    if (f?.timedOut && Date.now() - f.at < AppRuntime.DRAW_FAILURE_REASON_TTL_MS) {
+      for (const [id, reason] of reasons) {
+        if (isTokenFamilyRejection(reason)) reasons.set(id, DRAW_TIMEOUT_TOKEN_REASON);
+      }
+    }
     for (const [id, entry] of this.awaitingSign) {
       if (entry.reason !== undefined) reasons.set(id, entry.reason);
     }
@@ -12727,25 +13180,34 @@ export class AppRuntime {
   private _deferredTimer: ReturnType<typeof setTimeout> | undefined;
 
   // Deferred variant: coalesces rapid relay-event bursts (initial sync, firehose) into at most one
-  // render per RELAY_EMIT_THROTTLE_MS. The whole component tree re-renders on each emit and the old
-  // architecture runs render + touch dispatch on ONE JS thread, so during a burst (cold-start sync,
-  // reconnect, rapid posting) this throttle is what keeps the thread free enough to process taps —
-  // measured: tap/back stayed unresponsive for seconds while a cold-start firehose hammered emits at
-  // 100ms. 250ms cuts the burst render load ~2.5× (feed still updates 4×/s — imperceptible for
-  // reading) while leaving idle windows for touch. User actions call emit() directly (instant).
-  private static readonly RELAY_EMIT_THROTTLE_MS = 250;
+  // render per RELAY_EMIT_THROTTLE_MS — a TRAILING, non-resetting coalesce (see emitDeferred): the
+  // first call in a burst arms ONE timer, every call before it fires is a no-op, and that deadline is
+  // never pushed back out by later calls. That SHAPE, not the specific number below, is what actually
+  // bounds render count under load: a 500-event EOSE backlog delivered inside one window still costs
+  // exactly ONE render; spread across N windows it costs N renders — never 500, and never starved
+  // indefinitely either, since the first event's deadline always holds regardless of how many more
+  // arrive behind it. Tightening this constant only trades a little coalescing margin for latency; it
+  // cannot reopen the "hundreds of renders" failure mode the throttle exists to prevent.
+  //
+  // 80ms (~5 frames @60Hz) is the number: fast enough that a live update reads as arriving "by
+  // itself" rather than "batched in" (the point of this whole workstream — nothing should ever need a
+  // pull-to-refresh to appear), while still collapsing anything hotter than ~12/s into one render.
+  // This is NOT a rerun of the "100ms" finding the next paragraph would otherwise bring to mind: that
+  // measurement was of UNTHROTTLED per-event emission — every relay message rendering immediately,
+  // back to back, with no coalescing window and no guaranteed idle gap at all, during a firehose
+  // sending roughly one message every 100ms. This constant IS the coalescing window: no matter how
+  // hot the burst, there is always at least 80ms of guaranteed idle time between renders for touch
+  // dispatch to run, and anything arriving faster than that folds into one render instead of
+  // multiplying. If a future profile shows the per-render cost itself is still too high at this
+  // cadence, the fix is cutting that cost (memoize harder / render less per snapshot), not widening
+  // this window back up.
+  private static readonly RELAY_EMIT_THROTTLE_MS = 80;
   /**
-   * Widened throttle while the relay is mid-initial-sync (pre-EOSE backlog). During that burst the
-   * paced ingest drain, the per-event verifies, and the O(total-cache) feed rebuild all contend for
-   * the ONE JS thread; rebuilding 4×/s on top of that measurably starves touch. 1 Hz still shows the
-   * backlog filling in live, and the moment sync completes (setRelaySyncing(false)) the throttle
-   * snaps back to the normal 250 ms. User actions call emit() directly and are never throttled.
-   */
-  private static readonly RELAY_EMIT_THROTTLE_SYNCING_MS = 1000;
-  /**
-   * Stale-flag cap: a syncing window older than this is treated as over even if no setRelaySyncing
-   * (false) arrived (e.g. the relay dropped mid-sync and no onSynced ever fired), so a missed clear
-   * can never leave the app permanently on the widened throttle.
+   * Stale-flag cap for {@link relaySyncing} — which now feeds ONLY the snapshot's `syncing` indicator
+   * (see its doc; sync no longer widens the emit throttle above, see emitDeferred): a syncing window
+   * older than this is treated as over even if no setRelaySyncing(false) ever arrived (e.g. the relay
+   * dropped mid-sync and no onSynced fired), so a missed clear can't leave the "Syncing…" indicator on
+   * forever.
    */
   private static readonly RELAY_SYNCING_MAX_MS = 60_000;
   /**
@@ -12756,7 +13218,19 @@ export class AppRuntime {
   private static readonly RELAY_SCROLL_MAX_MS = 1_200;
   /** Date.now() when the current relay sync round started; undefined = not syncing. */
   private _relaySyncingSince: number | undefined;
-  /** App is backgrounded (no UI visible) — deferred emits park until foreground. */
+  /**
+   * App is backgrounded (no UI visible) — deferred emits park until foreground. Unlike its sibling
+   * parks (relaySyncing's RELAY_SYNCING_MAX_MS, _scrolling's RELAY_SCROLL_MAX_MS) this one has NO
+   * self-expiry timer, and that is deliberate, not a gap: a sync round and a scroll gesture are both
+   * short, bounded interactions, so force-clearing them after a fixed backstop when the real signal
+   * never arrives is safe. Backgrounding has no such bound — a user legitimately leaving the app for
+   * hours or days is the ORDINARY case, not an edge case, and a timer that force-flipped this back to
+   * "foreground" after some fixed window would render the invisible tree this park exists to avoid,
+   * for every normal background session that outlives it. What actually needed hardening here (see
+   * setAppBackgrounded) was making the EVENTUAL real foreground signal flush immediately with no
+   * extra delay, and stopping a render from leaking through WHILE genuinely backgrounded via a timer
+   * that happened to already be armed the instant before backgrounding began.
+   */
   private _appBackgrounded = false;
   /** A deferred emit arrived while backgrounded; flush one emitDeferred on foreground. */
   private _emitPendingWhileBackgrounded = false;
@@ -12769,8 +13243,11 @@ export class AppRuntime {
 
   /**
    * Relay sync-in-progress signal (App.tsx: set true when the relay (re)connects and opens its
-   * subscriptions, false on onSynced / relay teardown). Only widens the DEFERRED emit throttle —
-   * urgent user-action emits are untouched. Self-expires after RELAY_SYNCING_MAX_MS as a backstop.
+   * subscriptions, false on onSynced / relay teardown). Feeds ONLY the snapshot's `syncing` indicator
+   * (the quiet "Syncing…" UI, M7) — it no longer widens the deferred emit throttle (see emitDeferred's
+   * doc: the backlog burst now gets the SAME tight cadence as everything else, since a fresh sync is
+   * exactly when the user most wants to see content land). Self-expires after RELAY_SYNCING_MAX_MS as
+   * a backstop so a missed clear can't leave the indicator on forever.
    */
   setRelaySyncing(syncing: boolean): void {
     this._relaySyncingSince = syncing ? Date.now() : undefined;
@@ -12795,12 +13272,33 @@ export class AppRuntime {
    */
   setAppBackgrounded(backgrounded: boolean): void {
     this._appBackgrounded = backgrounded;
-    if (!backgrounded) {
-      this.reviveStuckEpochUnlocks('app foreground');
-      if (this._emitPendingWhileBackgrounded) {
-        this._emitPendingWhileBackgrounded = false;
-        this.emitDeferred();
+    if (backgrounded) {
+      // A relay event that landed just BEFORE backgrounding may have already armed _deferredTimer —
+      // emitDeferred's early-return-if-backgrounded guard only stops NEW calls, it can't retract a
+      // timer that's already ticking. Left alone, that timer fires DURING backgrounding: a full
+      // snapshot build + whole-tree render for a screen nobody can see, exactly the waste this park
+      // exists to prevent. Cancel it and fold its intent into the pending flag instead — nothing is
+      // lost, it rides the guaranteed foreground flush below instead of firing blind mid-background.
+      if (this._deferredTimer !== undefined) {
+        clearTimeout(this._deferredTimer);
+        this._deferredTimer = undefined;
+        this._emitPendingWhileBackgrounded = true;
       }
+      return;
+    }
+    this.reviveStuckEpochUnlocks('app foreground');
+    if (this._emitPendingWhileBackgrounded) {
+      this._emitPendingWhileBackgrounded = false;
+      // emit(), not emitDeferred(): a background stretch can be seconds or days, so whatever was
+      // parked may already be stale — "flush the moment it foregrounds" means zero EXTRA delay on top
+      // of that. Routing back through emitDeferred() would tack another throttle window onto it for
+      // no reason (nothing is parking it anymore — _appBackgrounded is already false above) and would
+      // leave the flush hostage to whatever _scrolling happens to read at that instant. Ordering is
+      // trivially preserved either way: this is a full rebuild from the store (the actual source of
+      // truth, which kept accepting writes the whole time — only the PUSH to listeners was ever
+      // parked), not a replay of individually-queued events, so there is nothing to reorder or drop no
+      // matter how long the park lasted or how much landed during it.
+      this.emit(false);
     }
   }
 
@@ -12907,7 +13405,12 @@ export class AppRuntime {
     return tallies;
   }
 
-  /** Lazily fetch an event doc we've only seen referenced (an embed token) — fetchNaddr idiom. */
+  /**
+   * Lazily fetch an event doc we've only seen referenced (an embed token) — fetchNaddr idiom,
+   * INCLUDING its un-blacklist-on-failure half: `fetchByFilter` is fire-and-forget, so without the
+   * timed release below one failed/timed-out attempt (common over Tor) would dedupe this coordinate
+   * FOREVER and strand the event card on "Fetching event…" for the rest of the session.
+   */
   private fetchEventDoc(coordinate: string): void {
     if (this.requestedEventCoords.has(coordinate)) return;
     const pk = this.eventHostPk(coordinate);
@@ -12915,6 +13418,13 @@ export class AppRuntime {
     if (!/^[0-9a-f]{64}$/.test(pk) || !d) return;
     this.requestedEventCoords.add(coordinate);
     this.deps.fetchByFilter?.([{kinds: [KIND_EVENT], authors: [pk], '#d': [d]}]);
+    const timer = setTimeout(() => {
+      const resolved = this.deps.store
+        .query({kinds: [KIND_EVENT], authors: [pk]})
+        .some(e => e.tags.some(t => t[0] === 'd' && t[1] === d));
+      if (!resolved) this.requestedEventCoords.delete(coordinate);
+    }, FETCH_TIMEOUT_MS);
+    (timer as unknown as {unref?: () => void}).unref?.();
   }
 
   /** Live card state for an embed (the events/eventCardState.ts resolver backend). */
@@ -13675,6 +14185,16 @@ export class AppRuntime {
       this._scrollExpiryTimer = undefined;
     }
     if (scrolling) {
+      // Same pre-armed-timer race as setAppBackgrounded(true) (see its doc): a relay event just
+      // before the drag began may have already armed _deferredTimer, which would otherwise fire
+      // MID-DRAG and jump the list under the user's finger — precisely what this park exists to
+      // prevent. Cancel it and fold into the pending flag so settling still flushes it, same as any
+      // other parked change.
+      if (this._deferredTimer !== undefined) {
+        clearTimeout(this._deferredTimer);
+        this._deferredTimer = undefined;
+        this._emitPendingWhileScrolling = true;
+      }
       this._scrollExpiryTimer = setTimeout(() => {
         this._scrollExpiryTimer = undefined;
         this.setScrolling(false); // liveness backstop — no scroll-end callback ever arrived
@@ -13697,13 +14217,10 @@ export class AppRuntime {
       return;
     }
     if (this._deferredTimer !== undefined) return;
-    const throttleMs = this.relaySyncing()
-      ? AppRuntime.RELAY_EMIT_THROTTLE_SYNCING_MS
-      : AppRuntime.RELAY_EMIT_THROTTLE_MS;
     this._deferredTimer = setTimeout(() => {
       this._deferredTimer = undefined;
       this.emit(false); // relay firehose — non-urgent
-    }, throttleMs);
+    }, AppRuntime.RELAY_EMIT_THROTTLE_MS);
   }
 
   private emit(urgent = true): void {

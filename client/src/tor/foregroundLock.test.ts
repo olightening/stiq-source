@@ -214,6 +214,15 @@ describe('runYieldingToBackgroundSync (TS-3/TS-4/TS-5 regression lock)', () => {
     }
   });
 
+  // Restored to 10s after a brief, incorrectly-justified 2s cut: syncTask.ts's ABORT_POLL_MS (500ms)
+  // checkpoint only runs in the DRAIN block, AFTER a connect has already succeeded — a background sync
+  // mid-connect() (bounded by WARM_TIMEOUT_MS=45s warm, ~80s on the cold cascade) has no abort
+  // checkpoint at ALL and cannot release early no matter how long this waits; TorManager.connect() has
+  // no knowledge of shouldBackgroundSyncAbort(). Even the drain-phase release this WOULD help isn't a
+  // flat 500ms: it still runs native stopTor()/arti_stop(), which gives its own graceful drain up to a
+  // 2s STOP_BUDGET (arti-ffi/src/lib.rs) before it aborts tasks outright. See the full rationale on
+  // runYieldingToBackgroundSync in foregroundLock.ts. This assertion is the regression lock on that
+  // value, so it moves with it deliberately rather than being relaxed.
   it('defaults the wait to 10s when no timeoutMs is given', async () => {
     jest.useFakeTimers();
     try {

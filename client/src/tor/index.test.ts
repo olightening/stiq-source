@@ -1,18 +1,16 @@
 /**
- * createTorBackend() flag-selection matrix (T17 spike, S3).
+ * createTorBackend() (index.ts) is the seam that selects the app's Tor backend — the ONE place
+ * the two Android product flavors (arti / ctor, see the `tor` flavor dimension in
+ * app/build.gradle) diverge on the JS side. Covered outcomes:
  *
- * The whole safety story of the dark Arti flag lives in this one factory:
- *   - flag OFF (the shipped default) → behavior is BYTE-IDENTICAL to before the spike:
- *       StiqTor present  → NativeTorBackend
- *       StiqTor absent   → UnavailableTorBackend (offline, never clearnet)
- *   - flag ON  → route to Arti:
- *       StiqArti present → ArtiTorBackend
- *       StiqArti absent  → UnavailableTorBackend (offline, never clearnet) — the safe-degrade that
- *         guarantees a spike build missing the Arti .so goes offline, NOT onto a clearnet path.
+ *   - StiqArti linked  → ArtiTorBackend   (arti flavor)
+ *   - StiqTor linked   → CTorBackend      (ctor flavor)
+ *   - both linked      → ArtiTorBackend   (arti wins; no shipped flavor links both, but the
+ *                                          probe order must stay deterministic)
+ *   - neither linked   → UnavailableTorBackend (offline, NEVER a clearnet path)
  *
- * USE_ARTI_BACKEND is a compile-time const, so we mock '../config' per-case (resetModules +
- * doMock) to exercise both flag states. ALLOW_CLEARNET_FALLBACK must stay false in the mock —
- * TorManager's constructor asserts it, and it encodes the no-clearnet invariant.
+ * getArtiTorModule()/getCtorTorModule() read NativeModules at CALL time, not module load time,
+ * so tests just mutate NativeModules per case — no isolateModules/doMock needed.
  */
 jest.mock('react-native', () => ({
   NativeModules: {},
@@ -25,67 +23,36 @@ jest.mock('react-native', () => ({
   },
 }));
 
-type Mods = {StiqTor?: unknown; StiqArti?: unknown};
+import {NativeModules} from 'react-native';
+import {createTorBackend} from './index';
 
-/**
- * (Re)load ./index with USE_ARTI_BACKEND forced to `flag` and the given native modules present.
- * resetModules gives a fresh react-native mock each time, so NativeModules starts empty and we
- * seed only what the case needs.
- */
-function loadIndex(flag: boolean, mods: Mods) {
-  let api!: typeof import('./index');
-  jest.isolateModules(() => {
-    jest.doMock('../config', () => ({
-      USE_ARTI_BACKEND: flag,
-      ALLOW_CLEARNET_FALLBACK: false,
-    }));
-    const rn = require('react-native') as {NativeModules: Mods};
-    Object.assign(rn.NativeModules, mods);
-    api = require('./index');
-  });
-  return api;
-}
+const nm = NativeModules as {StiqArti?: unknown; StiqTor?: unknown};
+
+const fakeModule = () => ({startTor: () => Promise.resolve(), stopTor: () => Promise.resolve()});
 
 afterEach(() => {
-  jest.resetModules();
-  jest.dontMock('../config');
+  delete nm.StiqArti;
+  delete nm.StiqTor;
 });
 
-describe('createTorBackend — flag OFF (shipped default, unchanged)', () => {
-  it('returns NativeTorBackend when the StiqTor module is present', () => {
-    const {createTorBackend} = loadIndex(false, {
-      StiqTor: {startTor: () => Promise.resolve(), stopTor: () => Promise.resolve()},
-    });
-    expect(createTorBackend().constructor.name).toBe('NativeTorBackend');
-  });
-
-  it('returns UnavailableTorBackend (offline, never clearnet) when StiqTor is absent', () => {
-    const {createTorBackend} = loadIndex(false, {});
-    expect(createTorBackend().constructor.name).toBe('UnavailableTorBackend');
-  });
-
-  it('ignores a present StiqArti module while the flag is off', () => {
-    const {createTorBackend} = loadIndex(false, {
-      StiqArti: {startTor: () => Promise.resolve(), stopTor: () => Promise.resolve()},
-    });
-    // No StiqTor and flag off → Unavailable, NOT Arti. The flag is the only thing that selects Arti.
-    expect(createTorBackend().constructor.name).toBe('UnavailableTorBackend');
-  });
-});
-
-describe('createTorBackend — flag ON (spike build)', () => {
-  it('returns ArtiTorBackend when the StiqArti module is present', () => {
-    const {createTorBackend} = loadIndex(true, {
-      StiqArti: {startTor: () => Promise.resolve(), stopTor: () => Promise.resolve()},
-    });
+describe('createTorBackend', () => {
+  it('returns ArtiTorBackend when the StiqArti module is present (arti flavor)', () => {
+    nm.StiqArti = fakeModule();
     expect(createTorBackend().constructor.name).toBe('ArtiTorBackend');
   });
 
-  it('degrades to UnavailableTorBackend (offline, NEVER clearnet) when StiqArti is absent', () => {
-    // A spike build with the flag on but no Arti .so packaged must go offline, not clearnet.
-    const {createTorBackend} = loadIndex(true, {
-      StiqTor: {startTor: () => Promise.resolve(), stopTor: () => Promise.resolve()},
-    });
+  it('returns CTorBackend when only the StiqTor module is present (ctor flavor)', () => {
+    nm.StiqTor = fakeModule();
+    expect(createTorBackend().constructor.name).toBe('CTorBackend');
+  });
+
+  it('prefers Arti when both engine modules are present', () => {
+    nm.StiqArti = fakeModule();
+    nm.StiqTor = fakeModule();
+    expect(createTorBackend().constructor.name).toBe('ArtiTorBackend');
+  });
+
+  it('degrades to UnavailableTorBackend (offline, NEVER clearnet) when neither engine is linked', () => {
     expect(createTorBackend().constructor.name).toBe('UnavailableTorBackend');
   });
 });

@@ -62,6 +62,7 @@ import {notifyChannel, notifyComment, notifyDm} from './notifications';
 import {openDM} from '../dm/dm';
 import {Kind, GroupKind, KIND_VOICE_MESSAGE} from '../contracts';
 import {isStiqComment, commentParentAuthor, commentRootAuthor, commentRootId} from '../feed/comments';
+import {groupEditTargetId} from '../channels/groups';
 import type {PostType} from './prefs';
 import type {Event} from '../nostr/events';
 
@@ -148,6 +149,8 @@ export async function deriveHeadlessNotifications(deps: HeadlessNotifyDeps): Pro
       if (!hId || !followedGroupIds.has(hId)) continue;
       // A self-authored message must never notify the author.
       if (myPubkey && ev.pubkey === myPubkey) continue;
+      // An EDIT of an existing group message is not new activity — never re-ping for it.
+      if (groupEditTargetId(ev)) continue;
       await notifyChannel(hId, hId, 'public', ev.created_at);
       continue;
     }

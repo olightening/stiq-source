@@ -116,7 +116,7 @@ describe('shouldRotateCircuit (NEWNYM every Nth failure)', () => {
     ]);
   });
 
-  it('never rotates twice in a row, so tor never rate-limits a rotation we counted on', () => {
+  it('never rotates twice in a row, so a just-rotated circuit is never retired before it can be used', () => {
     const rotations = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].filter(shouldRotateCircuit);
     let previous: number | undefined;
     for (const streak of rotations) {

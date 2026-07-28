@@ -393,3 +393,42 @@ describe('deriveHeadlessNotifications — comments: reply-to-my-comment (root OR
     expect(fired).toHaveLength(0); // notifyComment's own isPushAllowed check suppresses it
   });
 });
+
+describe('deriveHeadlessNotifications — group message EDITS are not new activity', () => {
+  it('pings for the original but never re-pings for its edit (the edit outruns the HWM by design)', async () => {
+    setSessionFloor(nowSec() - 900);
+    const authorSk = generateSecretKey();
+    const author = getPublicKey(authorSk);
+    const myPubkey = getPublicKey(generateSecretKey());
+    const at = nowSec();
+    const original: Event = {
+      id: 'a'.repeat(64),
+      pubkey: author,
+      created_at: at,
+      kind: GroupKind.Chat,
+      tags: [['h', 'grp1']],
+      content: 'hello',
+      sig: 's',
+    } as Event;
+    // The edit's created_at is NEWER than the original's, so the shared HWM alone would let it
+    // fire a second "new message" ping — only the explicit edit gate stops it.
+    const edit: Event = {
+      id: 'b'.repeat(64),
+      pubkey: author,
+      created_at: at + 5,
+      kind: GroupKind.Chat,
+      tags: [['h', 'grp1'], ['e', original.id, '', 'edit']],
+      content: 'hello (fixed)',
+      sig: 's',
+    } as Event;
+
+    await deriveHeadlessNotifications({
+      events: [original, edit],
+      mySk: null,
+      myPubkey,
+      followedGroupIds: new Set(['grp1']),
+    });
+
+    expect(fired).toHaveLength(1); // the original — and ONLY the original
+  });
+});

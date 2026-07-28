@@ -1,19 +1,34 @@
 /**
- * Adaptive deferred-emit throttle + background emit parking (JS-thread jank fixes, 2026-07-12).
+ * Deferred-emit throttle + background/scroll emit parking (JS-thread jank fixes, 2026-07-12;
+ * tightened + hardened 2026-07-27 as part of the "no pull-to-refresh, ever" pass).
  *
- * emitDeferred coalesces relay-driven re-renders. These tests pin its three behaviours:
- *   • normal: one emit per RELAY_EMIT_THROTTLE_MS (250 ms) window;
- *   • syncing (setRelaySyncing(true), i.e. the relay's pre-EOSE backlog burst): the window widens to
- *     1000 ms so burst ingest + O(cache) feed rebuilds don't stack on the one JS thread, snapping
- *     back on setRelaySyncing(false) and self-expiring after 60 s as a stale-flag backstop;
- *   • backgrounded (setAppBackgrounded(true)): deferred emits PARK (nothing is on screen), and the
- *     first foreground transition flushes exactly one coalesced emit.
- *   • scrolling (setScrolling(true), i.e. the feed FlatList is mid-drag/fling): deferred emits PARK
- *     so a sync burst can't jump the list under the user's finger; settle (setScrolling(false))
- *     flushes exactly one coalesced emit, self-expiring after RELAY_SCROLL_MAX_MS (1200 ms) if no
- *     scroll-end callback ever arrives. Urgent emits still fire immediately while scrolling and clear
- *     any parked flush (the fresh snapshot already reflects it — see AppRuntime.emit).
- * Urgent user-action emits bypass emitDeferred entirely and are not throttled/backgrounded-parked.
+ * emitDeferred coalesces relay-driven re-renders. These tests pin its behaviours:
+ *   • normal: one emit per RELAY_EMIT_THROTTLE_MS (80 ms) window, TRAILING and NON-RESETTING — a
+ *     call while a window is already armed is a no-op, it never pushes the deadline back out, but a
+ *     trailing emit always fires at the original deadline. That SHAPE is what caps render count
+ *     under an arbitrarily large burst (a 500-event EOSE backlog costs at most one render per
+ *     window, never one render per event) — independent of the exact window size.
+ *   • syncing (setRelaySyncing(true), the relay's pre-EOSE backlog burst) no longer widens this
+ *     window — the backlog now gets the SAME tight cadence as everything else (a live sync is
+ *     exactly when the user most wants to see content land). setRelaySyncing only drives the
+ *     snapshot's `syncing` indicator now, which still self-expires after 60 s as a stale-flag
+ *     backstop (a missed clear can't leave the indicator on forever).
+ *   • backgrounded (setAppBackgrounded(true)): deferred emits PARK (nothing is on screen). Unlike
+ *     the syncing/scroll parks, this one has NO timed self-expiry (a legitimate background stretch
+ *     can last hours — see AppRuntime._appBackgrounded's doc for why a timer would be wrong here).
+ *     What IS hardened: a relay event that armed the deferred timer just BEFORE backgrounding began
+ *     can no longer sneak a render through DURING backgrounding (the timer is cancelled and folded
+ *     into the pending flag), and the foreground transition flushes any pending change with a
+ *     DIRECT, immediate emit() — not routed back through emitDeferred()'s own throttle — so "the
+ *     moment it foregrounds" carries zero extra delay.
+ *   • scrolling (setScrolling(true), the feed FlatList mid-drag/fling): deferred emits PARK so a
+ *     sync burst can't jump the list under the user's finger; settle (setScrolling(false)) flushes
+ *     exactly one coalesced emit THROUGH the normal deferred window (deliberately not instant —
+ *     unlike backgrounding, there's no "away for hours" staleness to race against here), self-
+ *     expiring after RELAY_SCROLL_MAX_MS (1200 ms) if no scroll-end callback ever arrives. Scrolling
+ *     shares the same pre-armed-timer hardening as backgrounding: a timer already ticking when the
+ *     drag begins is cancelled and folded in, rather than firing mid-drag.
+ * Urgent user-action emits bypass emitDeferred entirely and are never throttled or parked.
  */
 jest.mock('@react-native-async-storage/async-storage', () =>
   require('@react-native-async-storage/async-storage/jest/async-storage-mock'),
@@ -68,7 +83,7 @@ describe('AppRuntime deferred-emit throttle', () => {
     jest.useRealTimers();
   });
 
-  it('emits once per 250 ms window normally', async () => {
+  it('emits once per 80 ms window normally', async () => {
     const runtime = await makeRuntime();
     jest.useFakeTimers();
     const {count, unsub} = countEmits(runtime);
@@ -76,63 +91,74 @@ describe('AppRuntime deferred-emit throttle', () => {
     runtime.notifyStoreChanged();
     runtime.notifyStoreChanged(); // coalesces into the same window
     expect(count()).toBe(0);
-    jest.advanceTimersByTime(249);
+    jest.advanceTimersByTime(79);
     expect(count()).toBe(0);
     jest.advanceTimersByTime(1);
     expect(count()).toBe(1);
     unsub();
   });
 
-  it('widens the window to 1000 ms while the relay is syncing, and restores it on clear', async () => {
+  it('a large burst arriving inside one window still costs exactly ONE render, never one per event', async () => {
     const runtime = await makeRuntime();
     jest.useFakeTimers();
     const {count, unsub} = countEmits(runtime);
 
-    runtime.setRelaySyncing(true);
-    runtime.notifyStoreChanged();
-    jest.advanceTimersByTime(999);
-    expect(count()).toBe(0); // still parked — the 250 ms window no longer applies
-    jest.advanceTimersByTime(1);
-    expect(count()).toBe(1);
-
-    runtime.setRelaySyncing(false); // backlog EOSEd — normal cadence again
-    runtime.notifyStoreChanged();
-    jest.advanceTimersByTime(250);
-    expect(count()).toBe(2);
+    // Stand-in for a 500-event EOSE backlog delivered faster than the coalescing window: every call
+    // before the first one's timer fires is a no-op (see emitDeferred), so this can never become
+    // 500 renders no matter how the window size is tuned.
+    for (let i = 0; i < 500; i++) runtime.notifyStoreChanged();
+    expect(count()).toBe(0); // nothing has rendered yet — all 500 calls coalesced into one timer
+    jest.advanceTimersByTime(80);
+    expect(count()).toBe(1); // exactly one render for the whole burst
     unsub();
   });
 
-  it('does not reset the widened window on later events, but still fires a trailing emit', async () => {
+  it('no longer widens the window while the relay is syncing — same tight cadence as normal', async () => {
     const runtime = await makeRuntime();
     jest.useFakeTimers();
     const {count, unsub} = countEmits(runtime);
 
     runtime.setRelaySyncing(true);
-    runtime.notifyStoreChanged(); // arms the 1000 ms window
-    jest.advanceTimersByTime(500);
-    runtime.notifyStoreChanged(); // mid-window — must NOT push the deadline out to 1500
     runtime.notifyStoreChanged();
-    jest.advanceTimersByTime(499);
-    expect(count()).toBe(0); // 999 ms since the FIRST call — still pending
+    jest.advanceTimersByTime(79);
+    expect(count()).toBe(0); // still within the (single, tight) window
     jest.advanceTimersByTime(1);
-    expect(count()).toBe(1); // trailing emit fires at the original 1000 ms deadline, not starved
+    expect(count()).toBe(1); // fires at 80 ms — NOT held to the old widened 1000 ms
+
+    runtime.setRelaySyncing(false);
+    runtime.notifyStoreChanged();
+    jest.advanceTimersByTime(80);
+    expect(count()).toBe(2); // identical cadence on either side of the sync flag
     unsub();
   });
 
-  it('a stale syncing flag self-expires after 60 s (missed clear cannot park the app on 1 Hz)', async () => {
+  it('does not reset the coalescing window on later events, but still fires a trailing emit', async () => {
     const runtime = await makeRuntime();
     jest.useFakeTimers();
     const {count, unsub} = countEmits(runtime);
 
+    runtime.notifyStoreChanged(); // arms the 80 ms window
+    jest.advanceTimersByTime(40);
+    runtime.notifyStoreChanged(); // mid-window — must NOT push the deadline out to 120
+    runtime.notifyStoreChanged();
+    jest.advanceTimersByTime(39);
+    expect(count()).toBe(0); // 79 ms since the FIRST call — still pending
+    jest.advanceTimersByTime(1);
+    expect(count()).toBe(1); // trailing emit fires at the original 80 ms deadline, not starved
+    unsub();
+  });
+
+  it('the syncing indicator self-expires after 60 s (a missed clear cannot leave it on forever)', async () => {
+    const runtime = await makeRuntime();
+    jest.useFakeTimers();
+
     runtime.setRelaySyncing(true);
+    expect(runtime.getSnapshot().syncing).toBe(true);
     jest.advanceTimersByTime(61_000); // relay died mid-sync; nothing ever cleared the flag
-    runtime.notifyStoreChanged();
-    jest.advanceTimersByTime(250); // expired flag → back on the normal window
-    expect(count()).toBe(1);
-    unsub();
+    expect(runtime.getSnapshot().syncing).toBe(false); // stale-flag backstop, not a real clear
   });
 
-  it('parks deferred emits while backgrounded and flushes ONE on foreground', async () => {
+  it('parks deferred emits while backgrounded and flushes ONE the instant it foregrounds', async () => {
     const runtime = await makeRuntime();
     jest.useFakeTimers();
     const {count, unsub} = countEmits(runtime);
@@ -145,8 +171,24 @@ describe('AppRuntime deferred-emit throttle', () => {
     expect(count()).toBe(0); // fully parked — no build, no render while off-screen
 
     runtime.setAppBackgrounded(false);
-    jest.advanceTimersByTime(250); // the flush goes through the normal deferred window
-    expect(count()).toBe(1); // exactly one coalesced catch-up emit
+    // No advanceTimersByTime here: the foreground flush is a DIRECT emit(), not routed back through
+    // emitDeferred()'s throttle — see AppRuntime.setAppBackgrounded's doc for why.
+    expect(count()).toBe(1); // exactly one coalesced catch-up emit, with zero extra delay
+    unsub();
+  });
+
+  it('cancels an already-armed deferred timer when backgrounding begins, instead of letting it render mid-background', async () => {
+    const runtime = await makeRuntime();
+    jest.useFakeTimers();
+    const {count, unsub} = countEmits(runtime);
+
+    runtime.notifyStoreChanged(); // arms the 80 ms deferred timer WHILE STILL FOREGROUNDED
+    runtime.setAppBackgrounded(true); // must cancel that timer, not let it ride to completion
+    jest.advanceTimersByTime(1_000); // well past the original 80 ms deadline
+    expect(count()).toBe(0); // no render leaked through while backgrounded
+
+    runtime.setAppBackgrounded(false);
+    expect(count()).toBe(1); // the cancelled timer's intent is not lost — it flushes on foreground
     unsub();
   });
 
@@ -177,8 +219,24 @@ describe('AppRuntime deferred-emit throttle', () => {
     expect(count()).toBe(0); // fully parked — no whole-tree render mid-drag
 
     runtime.setScrolling(false);
-    jest.advanceTimersByTime(250); // the flush goes through the normal deferred window
+    jest.advanceTimersByTime(80); // the flush goes through the normal deferred window
     expect(count()).toBe(1); // exactly one coalesced catch-up emit
+    unsub();
+  });
+
+  it('cancels an already-armed deferred timer when a scroll begins, instead of letting it jump the list mid-drag', async () => {
+    const runtime = await makeRuntime();
+    jest.useFakeTimers();
+    const {count, unsub} = countEmits(runtime);
+
+    runtime.notifyStoreChanged(); // arms the 80 ms deferred timer WHILE STILL SETTLED
+    runtime.setScrolling(true); // must cancel that timer, not let it fire mid-drag
+    jest.advanceTimersByTime(1_000); // well past the original deadline, still under RELAY_SCROLL_MAX_MS
+    expect(count()).toBe(0); // no render leaked through mid-scroll
+
+    runtime.setScrolling(false);
+    jest.advanceTimersByTime(80); // settle flush still goes through the normal deferred window
+    expect(count()).toBe(1); // the cancelled timer's intent is not lost — it flushes on settle
     unsub();
   });
 
@@ -207,7 +265,7 @@ describe('AppRuntime deferred-emit throttle', () => {
     expect(count()).toBe(1); // urgent emits are never parked, even mid-scroll
 
     runtime.setScrolling(false);
-    jest.advanceTimersByTime(250);
+    jest.advanceTimersByTime(80);
     expect(count()).toBe(1); // the urgent emit's snapshot already reflected the parked change
     unsub();
   });
@@ -222,7 +280,7 @@ describe('AppRuntime deferred-emit throttle', () => {
     jest.advanceTimersByTime(1_199);
     expect(count()).toBe(0); // still under the ceiling — still parked
     jest.advanceTimersByTime(1); // 1200 ms — self-expiry fires setScrolling(false)
-    jest.advanceTimersByTime(250); // the resulting flush goes through the normal deferred window
+    jest.advanceTimersByTime(80); // the resulting flush goes through the normal deferred window
     expect(count()).toBe(1);
     unsub();
   });
@@ -233,7 +291,8 @@ describe('AppRuntime deferred-emit throttle', () => {
  * write's data is instantly available) but must NOT run its heavy getSnapshot→buildFeed rebuild on
  * the touch handler — that rebuild is deferred to the next macrotask so the tap never freezes on the
  * old architecture (render + touch dispatch share one JS thread). See renderPlaceholder /
- * scheduleOptimisticEmit.
+ * scheduleOptimisticEmit. Unaffected by the RELAY_EMIT_THROTTLE_MS retune above: this path is a
+ * separate, always-0ms macrotask yield, not the relay-driven deferred throttle.
  */
 describe('AppRuntime optimistic-placeholder emit deferral', () => {
   afterEach(() => {

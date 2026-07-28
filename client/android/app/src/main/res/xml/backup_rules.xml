@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Pre-Android-12 (API 23-30) Auto Backup rules, referenced as android:fullBackupContent.
+
+  This is defence in depth, not a live control path: with android:allowBackup="false" the platform
+  never consults it, and API 31+ uses data_extraction_rules.xml instead. It is here so that if
+  allowBackup is ever flipped to true — for a settings-export feature, say, or by a merged library
+  manifest — the SQLCipher event cache and the Tor guard state in app_ArtiState/ do not start
+  leaving the device by default on the ~API 24-30 devices this app still supports (minSdk 24).
+
+  See data_extraction_rules.xml for the full rationale on why guard state and the cache must never
+  leave the device, and for why the device_* domains below are NOT redundant duplicates of the
+  unprefixed ones (they name device-protected storage, /data/user_de/<u>/<pkg>/, which the
+  unprefixed credential-protected domains do not reach). All nine domains the platform's XML
+  parser accepts are listed; do not delete either group.
+-->
+<full-backup-content>
+    <exclude domain="root" />
+    <exclude domain="file" />
+    <exclude domain="database" />
+    <exclude domain="sharedpref" />
+    <exclude domain="external" />
+    <exclude domain="device_root" />
+    <exclude domain="device_file" />
+    <exclude domain="device_database" />
+    <exclude domain="device_sharedpref" />
+</full-backup-content>

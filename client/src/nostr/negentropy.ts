@@ -4,6 +4,20 @@
  * with the relay tells us exactly which event ids it has that we don't, so we fetch only the
  * delta instead of re-streaming overlapping history — a real bandwidth win over Tor.
  *
+ * PROVENANCE: the protocol's original reference implementation is hoytech/negentropy
+ * (public domain / Unlicense, github.com/hoytech/negentropy), which ships its own
+ * dependency-free `js/` port. This file is DELIBERATELY an independent reimplementation of
+ * go-nostr's Go port instead (github.com/nbd-wtf/go-nostr v0.52.3, MIT licensed) rather than a
+ * vendor of either upstream source: go-nostr's `nip77/negentropy` package is the EXACT code our
+ * pinned khatru v0.19.1 relay executes (khatru's negentropy.go imports it directly — see
+ * relay/go.mod), so matching it byte-for-byte (verified against the vendored source under
+ * `$GOMODCACHE/github.com/nbd-wtf/go-nostr@v0.52.3/nip77/negentropy/`: protocol version 0x61,
+ * 16-item default buckets, the varint/timestamp-delta encoding, and the accumulator in
+ * storage/accumulator.go) is wire-compatibility evidence against what this repo actually runs,
+ * not just against the published spec. No source from either project is copied verbatim here —
+ * the shared shape (varints, bounds, fingerprints) follows from the WIRE FORMAT being specified,
+ * not from reused code.
+ *
  * This is a faithful wire-compatible port: the encoding (varint + delta-coded timestamps +
  * bounds), the fingerprint accumulator (8×uint32 little-endian add → SHA-256, first 16 bytes),
  * and the recursive range/fingerprint/id-list protocol must match the Go side byte-for-byte or

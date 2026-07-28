@@ -102,6 +102,13 @@ export const spacesEncryptedKey = (slotId: string): string => `stiq.spaces.encry
  *  dedupe behind the member-arrival key backfill. Per ACCOUNT: deliveries are signed by one npub. */
 export const spaceKeysDeliveredKey = (slotId?: string): string =>
   slotId ? `stiq.spacekeys.delivered.slot.${slotId}` : 'stiq.spacekeys.delivered';
+/** Last EXPLICITLY-advertised relay enforcement flags — per COMMUNITY (enforcement is a property
+ *  of the community's relay, shared by every account in it, never of one identity slot). The
+ *  sticky half of capability negotiation: a failed/absent NIP-11 fetch must never downgrade what
+ *  the community is known to enforce (see nostr/capabilities.ts explicitEnforcedFlags). Plain
+ *  booleans/numbers — no secret — so AsyncStorage is the right home. */
+export const stickyEnforcementKey = (cid?: string): string =>
+  cid ? `stiq.caps.enforced.sticky.${cid}` : 'stiq.caps.enforced.sticky';
 /** Per-period picture-allowance spend — per ACCOUNT (a metered budget belongs to one npub). */
 export const pictureSpendKey = (slotId: string): string => `stiq.pictures.spend.${slotId}`;
 /** Durable recovery queue of token-exhausted compose intents (raw post bodies) awaiting an auto

@@ -294,6 +294,45 @@ describe('AppRuntime NIP-29 group actions', () => {
   });
 });
 
+// ── openGroup/closeGroup session set (openGroups) ────────────────────────────────────────────────
+//
+// resubscribeGroups() unions `joinedGroups` (persisted membership) with `openGroups` (session-only
+// views currently on screen) so an OPEN-BUT-UNJOINED group — a locked preview, a space you're
+// deciding whether to request — keeps its scoped subscription alive across a reconnect exactly like
+// a joined one does, instead of losing it permanently the moment sendSubscribe() resets knownSubIds.
+
+describe('AppRuntime openGroup/closeGroup session-set resubscribe (openGroups ∪ joinedGroups)', () => {
+  it('openGroup on a group you have NOT joined keeps resubscribing it via the openGroups union', async () => {
+    const {runtime, subscribed} = await enrolledRuntime();
+    const groupId = 'discovered-unjoined-group-1';
+    runtime.openGroup(groupId);
+    subscribed.length = 0; // clear the open-time subscribe
+    runtime.onRelaySubscribed();
+    expect(subscribed).toContain(groupId);
+  });
+
+  it('closeGroup on an unjoined group removes it, so a later onRelaySubscribed no longer resubscribes it', async () => {
+    const {runtime, subscribed} = await enrolledRuntime();
+    const groupId = 'discovered-unjoined-group-2';
+    runtime.openGroup(groupId);
+    runtime.closeGroup(groupId);
+    subscribed.length = 0;
+    runtime.onRelaySubscribed();
+    expect(subscribed).not.toContain(groupId);
+  });
+
+  it('a joined group still resubscribes alongside an unrelated open (unjoined) one — no regression', async () => {
+    const {runtime, subscribed} = await enrolledRuntime();
+    const joinedId = (await runtime.createGroup({name: 'Joined'}))!;
+    const openOnlyId = 'discovered-unjoined-group-3';
+    runtime.openGroup(openOnlyId);
+    subscribed.length = 0; // clear the create-time + open-time subscribes
+    runtime.onRelaySubscribed();
+    expect(subscribed).toContain(joinedId);
+    expect(subscribed).toContain(openOnlyId);
+  });
+});
+
 // ── M32 field fix: invited+pending auto-approve sweep re-runs (Olene's incident) ────────────────
 //
 // Ground truth (verified live): admin invites Olene to a private/closed group; her request-to-join

@@ -1,6 +1,4 @@
 //! Restricted-discovery (a.k.a. onion client authorization) key handling — T17-S4.
-//! ⚠ SCAFFOLD — NOT COMPILED. The base32 decode + validation below is real and unit-tested in
-//! spirit (see #[cfg(test)]); the KeyMgr install is a documented TODO(arti-api).
 //!
 //! STIQ "lever 2": the community relay onion publishes its descriptor ENCRYPTED to a shared
 //! x25519 auth PUBLIC key; only a client holding the matching PRIVATE key can resolve/rendezvous.
@@ -14,6 +12,13 @@
 //! SAME 52-char base32 key STIQ already ships, but installs it via Arti's API instead of writing a
 //! file. onionAuth.ts stays untouched (the C-tor path keeps working for the default backend); the
 //! Arti-specific validation lives in client/src/tor/onionAuthArti.ts (pure TS mapper) + here.
+
+use std::str::FromStr as _;
+
+use arti_client::{HsClientDescEncKey, HsId, KeystoreSelector, TorClient};
+use tor_hscrypto::pk::HsClientDescEncSecretKey;
+use tor_llcrypto::pk::curve25519;
+use tor_rtcompat::Runtime;
 
 /// x25519 client-auth key = 32 bytes → 52 chars of unpadded UPPERCASE base32 (RFC4648).
 /// Mirrors ONION_AUTH_KEY_LEN / BASE32_KEY_RE in client/src/tor/onionAuth.ts exactly.
@@ -46,30 +51,91 @@ pub fn decode_secret(priv_key_base32: &str) -> Result<[u8; 32], String> {
     if !priv_key_base32.bytes().all(is_upper_base32) {
         return Err("key must be unpadded UPPERCASE base32 ([A-Z2-7])".to_string());
     }
-    // TODO(arti-api): use data_encoding::BASE32_NOPAD to decode. 52 base32 chars → 32.5 bytes; the
-    // decoder yields 32 bytes (the trailing 4 bits are zero padding for a 256-bit key). Keep the
-    // 32-byte prefix. Sketch:
-    //   let bytes = data_encoding::BASE32_NOPAD
-    //       .decode(priv_key_base32.as_bytes())
-    //       .map_err(|e| format!("base32 decode: {e}"))?;
-    //   let mut out = [0u8; 32];
-    //   out.copy_from_slice(&bytes[..32]);
-    //   Ok(out)
-    Err("decode_secret: not compiled in the spike host (see TODO)".to_string())
+    // 52 base32 chars carry 260 bits, and a x25519 secret is 256 — the last character contributes
+    // 4 bits of zero padding. `BASE32_NOPAD` checks those trailing bits are actually zero, which is
+    // a free extra sanity check on the credential: a truncated or re-encoded key fails here rather
+    // than silently becoming a different key.
+    let bytes = data_encoding::BASE32_NOPAD
+        .decode(priv_key_base32.as_bytes())
+        .map_err(|e| format!("base32 decode: {e}"))?;
+    let out: [u8; 32] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| format!("decoded {} bytes, want 32", bytes.len()))?;
+    Ok(out)
 }
 
-/// Install a decoded x25519 secret into Arti's onion-service-client authorization store for `host`.
-/// ⚠ TODO(arti-api): the exact types must be verified against the pinned Arti version and recorded
-/// in RESTRICTED_DISCOVERY.md. Intended shape (provisional):
-///   * build an `HsClientDescEncKey` / `HsClientDescEncSecretKey` from the 32 bytes,
-///   * insert it into the TorClient's `KeyMgr` under the key specifier for the parsed `HsId(host)`,
-///   * so descriptor decryption uses it automatically on the next connect to that .onion.
-/// MUST fail closed: if the key can't be installed OR the descriptor later fails to resolve, the
-/// client must NOT connect (unauthorized reach is the exact thing lever-2 prevents).
-#[allow(unused_variables)]
-pub fn install_into_keymgr(host: &str, secret: [u8; 32]) -> Result<(), String> {
-    // TODO(arti-api): real KeyMgr install. See tor-hsclient / arti-client key management docs.
-    Err("install_into_keymgr: not compiled in the spike host (see TODO)".to_string())
+/// Install a decoded x25519 secret into Arti's keystore so it can decrypt `onion_host`'s descriptor.
+///
+/// This is STIQ's "lever 2" under Arti: the community relay publishes its descriptor encrypted to a
+/// shared auth public key, and only a client holding the private half can resolve it. Everyone in a
+/// community shares one keypair, which is what keeps reach npub-blind.
+///
+/// Two things here are easy to get wrong:
+///
+///   * **`HsId` will not parse a bare host.** Its `FromStr` calls `strip_suffix_ignore_ascii_case(".onion")`
+///     and returns `NotOnionDomain` when the suffix is absent. STIQ stores hosts *without* the
+///     suffix (see `onionAuth.ts`), so it has to be appended here.
+///   * **This is not the C-tor format.** Tor reads a `<host>.auth_private` file whose single line is
+///     `<host>:descriptor:x25519:<BASE32>`. Arti reads nothing of the sort; the key goes into its
+///     keystore through this API. `onionAuth.ts` stays as it is — it still feeds the C-tor backend —
+///     and only the transport of the same 52-char secret changes.
+///
+/// Callers must treat a failure as fatal. A client that starts without its key bootstraps perfectly
+/// well and then cannot resolve the descriptor at all, which surfaces much later as an opaque
+/// connect failure.
+/// It must also be IDEMPOTENT, and that is not free.
+///
+/// `insert_service_discovery_key` hardcodes `overwrite = false` and exposes no way to change it, so
+/// inserting a key that is already stored fails with `KeyAlreadyExists` → `ErrorKind::BadApiUsage`
+/// → "bad API usage (bug): Error while trying to access a key store". Since the keystore lives in
+/// app-private storage and survives restarts, while `startTor` runs on every connect and on every
+/// rung of the connect ladder, the *first* install succeeds and every subsequent one fails — which
+/// is a permanently broken app after one successful run, from a message that reads like a bug in
+/// the caller.
+///
+/// So: install only what is missing, and replace what has changed. The second case is the one that
+/// matters operationally — a community that rotates its auth key would otherwise keep being reached
+/// with the stale one, and the only symptom would be a descriptor that will not decrypt.
+pub fn install_into_keymgr<R: Runtime>(
+    client: &TorClient<R>,
+    onion_host: &str,
+    secret: [u8; 32],
+) -> Result<(), String> {
+    // `HsId::from_str` requires the suffix; STIQ stores hosts without it.
+    let hsid = HsId::from_str(&format!("{onion_host}.onion"))
+        .map_err(|e| format!("bad onion host '{onion_host}': {e}"))?;
+    let sk = HsClientDescEncSecretKey::from(curve25519::StaticSecret::from(secret));
+    let wanted = HsClientDescEncKey::from(&sk);
+
+    // Every `{e}` below is an `arti_client::Error` routed through `describe_arti_error` rather
+    // than interpolated raw. These are local keystore operations, not live circuit-building, so
+    // there is no HsDir/rendezvous relay to name here today — but the error type is the SAME
+    // opaque, kitchen-sink `arti_client::Error` used on the live-connect paths, and nothing
+    // guarantees a future arti version keeps it that way. See `describe_arti_error`'s doc in
+    // lib.rs for why this crate does not interpolate that type raw anywhere.
+    let stored = client
+        .get_service_discovery_key(hsid)
+        .map_err(|e| format!("keystore read failed: {}", crate::describe_arti_error(&e)))?;
+
+    match stored {
+        // Already installed and identical — nothing to do. This is the common path on every
+        // connect after the first.
+        Some(existing) if existing == wanted => return Ok(()),
+        // A different key is stored for this onion: the community rotated it. Remove before
+        // inserting, because insert alone cannot overwrite.
+        Some(_) => {
+            client
+                .remove_service_discovery_key(KeystoreSelector::Primary, hsid)
+                .map_err(|e| format!("keystore replace failed: {}", crate::describe_arti_error(&e)))?;
+        }
+        None => {}
+    }
+
+    client
+        .insert_service_discovery_key(KeystoreSelector::Primary, hsid, sk)
+        .map_err(|e| format!("keystore insert failed: {}", crate::describe_arti_error(&e)))?;
+    Ok(())
 }
 
 #[inline]
@@ -106,7 +172,31 @@ mod tests {
         assert_eq!(KEY.len(), ONION_AUTH_KEY_LEN);
     }
 
-    // NOTE: a real decode round-trip test is gated on the toolchain (data_encoding). It belongs
-    // here once the crate compiles:
-    //   #[test] fn decodes_known_key() { assert_eq!(decode_secret(KEY).unwrap().len(), 32); }
+    #[test]
+    fn decodes_a_52_char_key_to_exactly_32_bytes() {
+        let all_a = decode_secret(KEY).expect("52 'A's is a valid all-zero key");
+        assert_eq!(all_a, [0u8; 32]);
+    }
+
+    #[test]
+    fn decodes_a_key_with_real_entropy() {
+        // BASE32_NOPAD of 32 bytes 0x00,0x01,…,0x1F. Round-trips through the same encoder the TS
+        // side uses, so this pins the alphabet and bit order, not just the length.
+        let mut raw = [0u8; 32];
+        for (i, b) in raw.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let encoded = data_encoding::BASE32_NOPAD.encode(&raw);
+        assert_eq!(encoded.len(), ONION_AUTH_KEY_LEN);
+        assert_eq!(decode_secret(&encoded).unwrap(), raw);
+    }
+
+    #[test]
+    fn rejects_a_key_whose_padding_bits_are_not_zero() {
+        // 260 bits of base32 hold a 256-bit key plus 4 bits that must be zero. A key that sets them
+        // is not a re-encoding of any 32-byte secret — it is a corrupted or truncated credential,
+        // and silently accepting it would install a DIFFERENT key than the community issued.
+        let bad = "A".repeat(51) + "B"; // 'B' = 00001, so the low padding bits are set
+        assert!(decode_secret(&bad).is_err());
+    }
 }

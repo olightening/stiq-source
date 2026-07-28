@@ -178,12 +178,6 @@ export const COMMUNITY_SEEDED_BRIDGES = false as boolean;
 export const COMPACTION_V2 = false as boolean;
 
 /**
- * T17 — Route the embedded-Tor backend through the experimental Arti (pure-Rust) implementation
- * instead of the bundled C-tor/IPtProxy. Spike-only; OFF = the shipping C-tor backend.
- */
-export const USE_ARTI_BACKEND = false as boolean;
-
-/**
  * T18 — Fuzzy Message Detection (FMD) EVALUATION harness. Eval-only, never flipped in a shipped
  * APK: gates FMD flag-tag injection on DMs/mentions, the client-side detection filter, and the
  * on-device throughput bench. OFF = no FMD anywhere.

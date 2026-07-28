@@ -37,7 +37,7 @@ import Reanimated, {
   useSharedValue,
   withTiming,
 } from 'react-native-reanimated';
-import {useScrollChrome} from '../../ui/useScrollChrome';
+import {useScrollChrome, JUMP_AFTER} from '../../ui/useScrollChrome';
 import {useLazyModalMount} from '../../ui/useLazyModalMount';
 import {TabLayer} from '../../ui/TabLayer';
 import {SubScreen, useSubScreenTransition} from '../../ui/SubScreen';
@@ -436,6 +436,11 @@ export interface MainScreenProps {
   onSetDisplayName?: (name: string) => void;
   /** Set or change the viewer's identity gradient. */
   onSetGradient?: (spec: import('../../media/gradient').GradientSpec) => void;
+  /** The viewer's crafted gradient, read straight off the runtime's identity store. Authoritative
+   *  the moment a Profile save lands — unlike the feed-item fallback below, which goes stale for a
+   *  viewer with no visible self-authored items (the "edited my gradient, header never changed"
+   *  field bug). */
+  myCraftedGradient?: import('../../media/gradient').GradientSpec;
   /** Look up a single cached event for Nostr link preview / reference embed cards. */
   onGetEvent?: (id: string) => NostrEventSummary | null;
   /** Aggregate reaction score + the viewer's vote for an event (drives the ✦ like on comments). */
@@ -662,6 +667,21 @@ export interface MainScreenProps {
   pinnedPostIds?: readonly string[];
   /** Pull-to-refresh: re-run the NIP-77 feed reconciliation against the relay. Resolves when done. */
   onRefreshFeed?: () => Promise<void>;
+  /**
+   * Count of feed items newer than the reader's last {@link onMarkFeedSeen} mark — the "N new
+   * posts" pill (AppRuntime.markFeedSeen/AppSnapshot.newFeedItemCount's doc has the full contract).
+   * Surfaced on the feed's existing return-to-top bubble (BottomDock's `jump.count`) rather than a
+   * new floating element. Defaults to 0 so a caller that hasn't wired this yet renders identically
+   * to before this prop existed.
+   */
+  newFeedItemCount?: number;
+  /**
+   * Advance the "seen" baseline the pill counts forward from. Called by MainScreen itself (never
+   * by a caller) at the moments AppRuntime.markFeedSeen's doc calls out: the feed tab first showing
+   * real content, the reader scrolling back to the top, and an explicit pill tap. Omitted in tests
+   * that don't care about the pill — every call site below is optional-chained.
+   */
+  onMarkFeedSeen?: () => void;
   /** Scroll-back pagination (bug #3): stream in older feed history from the relay past the cached slice. */
   onLoadOlderFeed?: (until: number) => void;
   /** Scroll-back pagination for an open channel — fires past the locally-cached message history. */
@@ -696,6 +716,85 @@ export interface MainScreenProps {
 function toVoidPromise(p: Promise<boolean> | void): Promise<void> | void {
   if (!p) return undefined;
   return p.then(ok => { if (!ok) throw new Error('SEND_FAILED'); });
+}
+
+/**
+ * The feed HOLD (instant-refresh Gap 1) — buffer arrivals, don't inject them.
+ *
+ * Given `held` (the feed order captured the last time the reader was inside the top band) and `live`
+ * (the order right now), returns what the list should render while the reader sits still, scrolled
+ * away. Freezes the reader's *page* — which rows, in which order — while letting each row's CONTENT
+ * flow through live. Splicing a row in, or out, is what shifts everything below it; changing what a
+ * row SAYS does not.
+ *
+ * Three things are never held, because none of them can move a row the reader is looking at:
+ *
+ *  - **The reader's own new post.** The urgent path. It is the only kind of item that carries
+ *    `sortAt` (AppRuntime._ownPostOrder's local publish-order key — see feedItemKey), so it needs no
+ *    new plumbing to recognise, and it goes to the FRONT where the author expects to find it.
+ *  - **Older history.** That is what `onLoadOlderFeed` streams in. Appending below the last held row
+ *    shifts nothing above it, so "Load more" keeps working while held instead of silently returning
+ *    nothing. "Older" is decided TWO ways, and it needs both: live places it past the held tail, OR
+ *    it is no newer than the oldest held row. The positional test alone is not enough — it silently
+ *    assumes the live order is chronological, which is only true under `sort: 'new'`. Under the
+ *    app's persisted default 'hot' (and under Rising), rank comes from vote/comment velocity and
+ *    all-time score, so a backfilled month-old post can legitimately out-rank a decaying held row
+ *    and land ABOVE the tail. Such an item used to match neither branch and was therefore DROPPED,
+ *    not deferred: `displayArranged` never grew, `hasMoreFeed` stayed false, the "Load more" footer
+ *    never came back, and every further scroll to the bottom fired another `onLoadOlderFeed` for
+ *    ever-older history that the list could never show. `createdAt` is the sort-independent test,
+ *    and it is exactly the axis `loadMore` requests on (`until: oldest`), so it catches precisely
+ *    what a backfill can return. A non-backfill arrival that happens to be older than the whole
+ *    held page appends too — harmless, since appending below the tail moves nothing either way.
+ *  - **A row's own contents.** buildFeed hands back identity-stable FeedItem objects (feed.ts's
+ *    `_itemCache` reuses the same reference until a post's rendered inputs actually change), so a
+ *    background arrival leaves every held row `===` what it was and this returns the very SAME array
+ *    reference — no reflow, no cell re-render, FlatList skips the update entirely. The reader's own
+ *    vote rebuilds exactly one item, so that one card updates in place with nothing moving.
+ *
+ * A held row that has VANISHED from `live` (muted, hidden, evicted) keeps its last-known object
+ * rather than being dropped: splicing it out reflows exactly as visibly as splicing one in, and the
+ * removal lands the moment the hold releases.
+ */
+export function holdFeedComposition(held: readonly FeedItem[], live: readonly FeedItem[]): FeedItem[] {
+  // A feed that has gone empty is a replacement (community switch, cache wipe), not an arrival to
+  // buffer — there is no page left to protect, so hold nothing.
+  if (live.length === 0) return live as FeedItem[];
+  const liveById = new Map<string, FeedItem>();
+  const liveIndex = new Map<string, number>();
+  live.forEach((it, i) => { liveById.set(it.id, it); liveIndex.set(it.id, i); });
+  const heldIds = new Set<string>();
+  let tailIndex = -1;
+  // The held page's chronological floor. Anything at or below it is history, wherever the active
+  // sort ranks it. Infinity when nothing is held, which keeps the empty-held case appending
+  // everything exactly as the positional test already did.
+  let heldOldest = Number.POSITIVE_INFINITY;
+  for (const it of held) {
+    heldIds.add(it.id);
+    if (it.createdAt < heldOldest) heldOldest = it.createdAt;
+    const i = liveIndex.get(it.id);
+    if (i !== undefined && i > tailIndex) tailIndex = i;
+  }
+  let contentChanged = false;
+  const rows = held.map(it => {
+    const fresh = liveById.get(it.id);
+    if (fresh !== undefined && fresh !== it) contentChanged = true;
+    return fresh ?? it;
+  });
+  const ownNew: FeedItem[] = [];
+  const olderTail: FeedItem[] = [];
+  live.forEach((it, i) => {
+    if (heldIds.has(it.id)) return;
+    if (it.sortAt !== undefined) ownNew.push(it);
+    // `<=` because loadMore requests `until: oldest` and nostr's `until` is inclusive, so a page of
+    // backfill can come back carrying the boundary timestamp itself.
+    else if (i > tailIndex || it.createdAt <= heldOldest) olderTail.push(it);
+  });
+  if (ownNew.length === 0 && olderTail.length === 0) {
+    // Identity, not just equality: an unchanged page must hand FlatList the exact same `data`.
+    return contentChanged ? rows : (held as FeedItem[]);
+  }
+  return [...ownNew, ...rows, ...olderTail];
 }
 
 export function MainScreen({
@@ -782,6 +881,7 @@ export function MainScreen({
   onRevokeDraftAccess,
   onSetDisplayName,
   onSetGradient,
+  myCraftedGradient,
   pinEnabled,
   onSetPinEnabled,
   onVerifyPin,
@@ -884,6 +984,8 @@ export function MainScreen({
   lockedPostIds = [],
   pinnedPostIds = [],
   onRefreshFeed,
+  newFeedItemCount = 0,
+  onMarkFeedSeen,
   onLoadOlderFeed,
   onLoadOlderChannelPage,
   onLoadOlderGroupPage,
@@ -919,6 +1021,40 @@ export function MainScreen({
   const feedScrollYRef = useRef(0);
   const channelsScrollYRef = useRef(0);
   const logHearthScrollYRef = useRef(0);
+  // Whether the reader was within the jump-bubble's own JUMP_AFTER band of the top as of the last
+  // check — backs the "N new posts" pill's auto-clear (Task: instant-refresh overhaul), edge-
+  // triggered so a bounce/rubber-band at the top can't turn a per-frame onScroll callback into a
+  // repeated O(feed-size) scan (AppRuntime.markFeedSeen walks every visible item — see its doc).
+  // Starts `false` (not "already caught up") so the very first check — mount, or the first switch
+  // into the feed tab — always fires once real content exists, matching markFeedSeen's own "call it
+  // once the feed first shows real content" contract. A plain ref, never state: it must not itself
+  // cause a render (see handleFeedScroll below, which runs on every scroll frame).
+  const feedCaughtUpRef = useRef(false);
+
+  // ── The feed HOLD (instant-refresh Gap 1) ──────────────────────────────────────────────────────
+  // True while the reader is resting OUTSIDE the top band — the SAME `y <= JUMP_AFTER` band
+  // feedCaughtUpRef above tracks and the jump bubble itself uses. Deliberately one predicate, never a
+  // second threshold that could drift away from the pill's own notion of "at top".
+  //
+  // While it is true the feed renders the composition captured the last time the reader WAS inside
+  // that band (see displayArranged below), so a post arriving from someone else cannot splice itself
+  // into the array under their eyes and shift every card beneath it. That shift is real and
+  // uncompensated: `maintainVisibleContentPosition` is deliberately unusable here (a continuously
+  // re-scored Hot/Rising order defeats it — see ChannelView.tsx's note where it IS used), and the
+  // "N new posts" pill only ever COUNTED arrivals; it never held them back. Now it does: the count
+  // keeps climbing, nothing reflows, and returning to the top band (or tapping the pill) releases.
+  //
+  // Mirrored in a ref and written ONLY through setFeedHeld so a transition can never be dispatched
+  // redundantly. Its writers are a per-scroll-frame callback and an effect keyed on feed.items, and
+  // this exact boundary has already shipped one silent infinite render loop (see the regression
+  // describe in MainScreen.newPostsPill.test.tsx) — a self-guarding setter is cheap insurance.
+  const feedHeldRef = useRef(false);
+  const [feedHeld, setFeedHeldState] = useState(false);
+  const setFeedHeld = useCallback((next: boolean): void => {
+    if (feedHeldRef.current === next) return;
+    feedHeldRef.current = next;
+    setFeedHeldState(next);
+  }, []);
 
   // A horizontal chip rail (feed sort/tag row, Spaces filter, hearth people rail) scrolls natively
   // and would otherwise be stolen by the stage swipe — a native horizontal ScrollView doesn't join
@@ -937,10 +1073,41 @@ export function MainScreen({
     }),
     [],
   );
+  // Hold the latest mark-seen callback in a ref and reach it through a STABLE wrapper — the same
+  // load-bearing idiom (and for the identical documented reason) as onOpenGroupRef/onOpenChannelRef
+  // below. App.tsx hands this down as a fresh inline arrow on every render, AND the handler itself
+  // writes App state back (markFeedSeen + setSnapshot), so listing the raw prop in a dependency
+  // array closes a render→effect→setState→render cycle with nothing to terminate it.
+  //
+  // That is not hypothetical: it shipped in release APK vc9 and pegged mqt_js at 100% CPU with RES
+  // climbing past 1 GB, permanently, the moment the app settled on the feed tab with cached content
+  // at the top — see MainScreen.newPostsPill.test.tsx's regression describe for the full chain and
+  // for why React's "Maximum update depth exceeded" guard never fires on this app's legacy root.
+  // Everything below therefore depends on markFeedSeen (stable, []) and never on onMarkFeedSeen.
+  const onMarkFeedSeenRef = useRef(onMarkFeedSeen);
+  onMarkFeedSeenRef.current = onMarkFeedSeen;
+  const markFeedSeen = useCallback((): void => {
+    onMarkFeedSeenRef.current?.();
+  }, []);
+  // Edge-triggers the mark the moment a LIVE scroll gesture crosses BACK into the "caught up"
+  // band — the only place that needs edge-guarding (a per-frame onScroll callback resting inside the
+  // band would otherwise re-scan the whole feed on every frame; see feedCaughtUpRef's doc). The
+  // tab-switch/content-arrival effect below reads the ref this maintains but never edge-guards
+  // itself — see its own comment for why that's correct there.
+  const syncFeedCaughtUp = useCallback((y: number): void => {
+    const caughtUp = y <= JUMP_AFTER;
+    if (caughtUp && !feedCaughtUpRef.current) markFeedSeen();
+    feedCaughtUpRef.current = caughtUp;
+    // Arm/release the hold on the SAME edge and from the SAME predicate as the mark above. setFeedHeld
+    // self-guards, so a reader resting anywhere (inside or outside the band) dispatches nothing at all
+    // from this per-frame callback — only a genuine crossing costs a render.
+    setFeedHeld(!caughtUp);
+  }, [markFeedSeen, setFeedHeld]);
   const handleFeedScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>): void => {
     feedScrollYRef.current = e.nativeEvent.contentOffset.y;
     feedScroll.onScroll(e);
-  }, [feedScroll]);
+    syncFeedCaughtUp(e.nativeEvent.contentOffset.y);
+  }, [feedScroll, syncFeedCaughtUp]);
   // FIX 3 (stale jump bubble): re-derive chrome visibility + the jump-to-top bubble from the known
   // restore offset the instant the feed tab becomes current, BEFORE paint — mirrors the
   // tabContentFade pre-paint pattern below. Correct under FIX 2 by construction: the same ref
@@ -949,6 +1116,39 @@ export function MainScreen({
   useLayoutEffect(() => {
     if (tab === 'feed') feedScroll.syncOffset(feedScrollYRef.current);
   }, [tab, feedScroll]);
+  // Marks the feed seen (clearing/advancing the "N new posts" pill's baseline) both when the feed
+  // tab becomes current AND whenever the feed's content actually changes — as long as the reader is
+  // AT the top either way. Deliberately keyed on `tab` too (not just feed.items) so switching INTO
+  // the feed tab while the remembered offset (feedScrollYRef survives the tab staying mounted, Phase
+  // 4.1) is already within the band clears the pill immediately, without waiting for a live scroll
+  // event that may never come if they don't touch the list again. Deliberately NOT edge-guarded via
+  // feedCaughtUpRef the way the scroll handler is: unlike a per-frame onScroll callback, this only
+  // runs when `tab` or `feed.items` actually changes — already infrequent — and it must keep firing
+  // on EVERY content change while the reader stays at the top, or a reader who never scrolls away
+  // would stay marked "caught up" as of whenever they FIRST arrived, so once they eventually do
+  // scroll away the pill would wrongly claim everything that arrived while they were actually
+  // watching it live. (On the very first mount both this effect and nothing else can fire the mark,
+  // so there is no double-count to worry about — the scroll handler's edge guard exists solely to
+  // stop ITS OWN high-frequency callback from re-scanning, not to coordinate with this effect.)
+  // Keyed on feed.items (not pagedItems/arranged) so a sort or tag-filter change alone can never
+  // re-mark anything — only a genuine content change does. Skipped while the feed is still empty
+  // (cold start / pre-sync) so the very first backlog to arrive can never read as "seen" against a
+  // same-instant mark of nothing, which would make everything that follows look "new".
+  // Depends on `markFeedSeen` (stable, []) rather than the raw `onMarkFeedSeen` prop — see that
+  // wrapper's doc above: the prop's identity changes on every host render and the handler re-renders
+  // the host, so depending on it here is an unterminated loop, not a redundant re-run.
+  // Also the one place that arms the hold WITHOUT a scroll gesture: switching into the feed tab while
+  // the remembered offset (feedScrollYRef, which survives because the tab body stays mounted) is
+  // already outside the band must start holding, or the first arrival after the switch would reflow
+  // the exact page the reader left. setFeedHeld self-guards, so re-running this on every feed.items
+  // change while they stay away dispatches nothing.
+  useEffect(() => {
+    if (tab !== 'feed' || feed.items.length === 0) return;
+    if (feedScrollYRef.current > JUMP_AFTER) { setFeedHeld(true); return; }
+    feedCaughtUpRef.current = true;
+    setFeedHeld(false);
+    markFeedSeen();
+  }, [tab, feed.items, markFeedSeen, setFeedHeld]);
   // Feed sort (Rising/New). The remembered choice is hydrated synchronously from feedSortPrefs —
   // AppRuntime.loadWorkspaceState eager-loads it before the splash lifts — so the lazy initializer
   // reads it on the very first render. No async in-component load, so no flash of the default 'new'
@@ -1085,17 +1285,16 @@ export function MainScreen({
     setResumeDraft(undefined);
     setComposerOpen(true);
   };
-  // Snapshot the live-derived list at open time (per the shared "no persisted log" contract).
   // Opening the center does NOT mark anything read — the badge count clears per row tap or via
-  // the center's ✓✓ Mark-all-read (design behavior).
+  // the center's ✓✓ Mark-all-read (design behavior). The derive itself no longer lives here: this
+  // used to snapshot onGetNotifications() ONCE, right at this call site, which meant anything that
+  // arrived while the screen stayed open was invisible until the user closed and reopened it — the
+  // one surface in the app that wasn't live. See the notifLiveRecompute effect below (next to
+  // threadNodes): it fires the instant notifOpen flips true — same open-modal-first,
+  // derive-after-the-animation sequencing as before — and again on every relevant store change for
+  // as long as the center stays open.
   const openNotifications = (): void => {
-    // Open the modal FIRST so its slide-in animation isn't blocked by the heavy
-    // synchronous derive (onGetNotifications = O(total-store) scan+buildFeed). Derive the
-    // snapshot only after the open interaction/animation settles.
     setNotifOpen(true);
-    InteractionManager.runAfterInteractions(() => {
-      setNotifItems(onGetNotifications?.() ?? []);
-    });
   };
   const resume = (d: Draft): void => {
     setDraftsOpen(false);
@@ -1351,9 +1550,37 @@ export function MainScreen({
     if (!pinnedSet.size) return base;
     return [...base.filter(i => pinnedSet.has(i.id)), ...base.filter(i => !pinnedSet.has(i.id))];
   }, [onFeedTab, searched, selectedTags, sort, searchSort, searchActive, pinnedSet, ranking]);
-  // Paginated slice of arranged — default 25 items, "Load more" adds 25 at a time.
-  const pagedItems = useMemo(() => arranged.slice(0, feedLimit), [arranged, feedLimit]);
-  const hasMoreFeed = onFeedTab && arranged.length > feedLimit;
+  // ── What the list actually renders (the HOLD applied) ───────────────────────────────────────────
+  // `arranged` above is the LIVE order. `displayArranged` is the live order while the reader is inside
+  // the top band, and otherwise the order + membership captured the last time they were, with each
+  // row's CONTENT still read live (holdFeedComposition). See feedHeldRef's doc for the why.
+  //
+  // The hold is dropped outright whenever `feedViewKey` changes: sort, search text, search sort, the
+  // search time-frame, the tag filter, or the active community. Every one of those is the reader's own
+  // action (or a wholesale content replacement), so it must recompose under their finger even while
+  // they are scrolled away. Background content signals are deliberately NOT in the key — a moderator's
+  // pin or an organizer's ranking change rides the hold like any other arrival.
+  const feedViewKey =
+    `${feedPageKey} ${searchSort} ${JSON.stringify(searchTimeRange ?? null)} ${communityCid ?? ''}`;
+  const heldArrangedRef = useRef<FeedItem[] | null>(null);
+  const heldViewKeyRef = useRef(feedViewKey);
+  const displayArranged = useMemo(() => {
+    // Off the feed tab `arranged` is `[]` by design (the memos above are tab-gated). Capturing THAT as
+    // the composition would throw the reader's place away, so leave the hold untouched and let it
+    // resume when they come back — which is also why the hold cannot leak across a tab switch: the
+    // only thing that resumes it is the same still-matching feedViewKey check below.
+    if (!onFeedTab) return arranged;
+    const held = heldArrangedRef.current;
+    if (!feedHeld || held === null || heldViewKeyRef.current !== feedViewKey) {
+      heldViewKeyRef.current = feedViewKey;
+      heldArrangedRef.current = arranged;
+      return arranged;
+    }
+    return holdFeedComposition(held, arranged);
+  }, [onFeedTab, arranged, feedHeld, feedViewKey]);
+  // Paginated slice of the (possibly held) order — default 25 items, "Load more" adds 25 at a time.
+  const pagedItems = useMemo(() => displayArranged.slice(0, feedLimit), [displayArranged, feedLimit]);
+  const hasMoreFeed = onFeedTab && displayArranged.length > feedLimit;
 
   const openPostFromFeed = useCallback((item: FeedItem) => {
     setOpenPost(item);
@@ -1505,7 +1732,27 @@ export function MainScreen({
   const pushNavOriginRef = useRef(pushNavOrigin);
   pushNavOriginRef.current = pushNavOrigin;
 
-  const openEmbedTarget = useCallback((id: string) => {
+  /** How long a tapped-but-uncached embed target keeps trying to complete once its fetch lands. */
+  const PENDING_EMBED_OPEN_MS = 15_000;
+  const pendingEmbedOpenRef = useRef<{id: string; expiresAt: number; origin: string} | null>(null);
+  /**
+   * Where the reader is right now (tab + open surface). A pending embed-open is dropped the moment
+   * this changes — the deferred navigation must never yank the screen away from somewhere the user
+   * deliberately went after the tap.
+   */
+  const embedNavFingerprint = useCallback(
+    (): string =>
+      [
+        navTabRef.current,
+        navOpenPostRef.current?.id ?? '',
+        navOpenChannelIdRef.current ?? '',
+        navOpenGroupIdRef.current ?? '',
+        navOpenPeerRef.current ?? '',
+      ].join('|'),
+    [],
+  );
+
+  const openEmbedTarget = useCallback((id: string, retryPass = false): boolean => {
     const feed = embedFeedRef.current;
     const channels = embedChannelsRef.current;
     const groups = embedGroupsRef.current;
@@ -1551,12 +1798,12 @@ export function MainScreen({
     const draftRef = parseDraftEmbed(id);
     if (draftRef) {
       setEmbedReader({token: id, draft: draftRef});
-      return;
+      return true;
     }
     const msgRef = parseMsgEmbed(id);
     if (msgRef) {
       setEmbedReader({token: id, msg: msgRef});
-      return;
+      return true;
     }
 
     // Self-contained `stiq:event:…` tokens (event cards) resolve FIRST for the same reason as
@@ -1567,13 +1814,13 @@ export function MainScreen({
       pushIfOrigin({kind: 'event', coordinate: eventRef.coordinate});
       setOpenEventRef(eventRef);
       setOpenEventCoord(eventRef.coordinate);
-      return;
+      return true;
     }
     if (/^31923:[0-9a-f]{64}:.+$/.test(id)) {
       pushIfOrigin({kind: 'event', coordinate: id});
       setOpenEventRef(null);
       setOpenEventCoord(id);
-      return;
+      return true;
     }
 
     // Self-contained `stiq:space:…` tokens (channel/private-group cards) resolve FIRST — they
@@ -1593,7 +1840,7 @@ export function MainScreen({
         setChannelDetailOpen(false);
         fetchChannelIfUnknown(spaceRef.coordinate, channels, onGetEvent);
         setOpenChannelId(spaceRef.coordinate);
-        return;
+        return true;
       }
       // Private group (kind 39000): identifier is the group's h/d id.
       const isMember = groups.some(g => g.id === spaceRef.identifier);
@@ -1617,14 +1864,14 @@ export function MainScreen({
         embedPreviewSpaceRef.current?.(spaceRef.identifier);
         setJoinReq({groupId: spaceRef.identifier, name: spaceRef.name, gradient: spaceRef.gradient});
       }
-      return;
+      return true;
     }
 
     const direct = feed.items.find(f => f.id === id);
-    if (direct) { pushIfOrigin({kind: 'post', postId: direct.id}); setOpenPost(direct); return; }
+    if (direct) { pushIfOrigin({kind: 'post', postId: direct.id}); setOpenPost(direct); return true; }
     const summary = onGetEvent?.(id);
     const root = summary?.rootId ? feed.items.find(f => f.id === summary.rootId) : undefined;
-    if (root) { pushIfOrigin({kind: 'post', postId: root.id}); setOpenPost(root); return; }
+    if (root) { pushIfOrigin({kind: 'post', postId: root.id}); setOpenPost(root); return true; }
 
     // Not a feed post/comment — check whether `id` is a channel broadcast (kind 1311) already
     // cached in one of the user's channels, and land on it (channel + the single-post overlay).
@@ -1637,7 +1884,7 @@ export function MainScreen({
         setChannelDetailOpen(false);
         setOpenChannelId(ch.id);
         setOpenChannelPostId(id);
-        return;
+        return true;
       }
     }
     // Or a group chat/thread/reply message (kinds 9/11/12) — no single-message overlay exists for
@@ -1650,7 +1897,7 @@ export function MainScreen({
         setOpenChannelId(null);
         setChannelDetailOpen(false);
         setOpenGroupId(g.id);
-        return;
+        return true;
       }
     }
     // Or the id IS already a channel/LiveActivity coordinate (`30311:<owner>:<d>`) — an unresolved
@@ -1663,8 +1910,36 @@ export function MainScreen({
       setOpenGroupId(null);
       setChannelDetailOpen(false);
       setOpenChannelId(asChannel.id);
+      return true;
     }
+    // Nothing local matched. The onGetEvent lookup above already kicked the relay fetch for the
+    // ref, so register a one-shot pending open and let the data-driven retry effect below complete
+    // the navigation when the event lands — over Tor the fetch takes seconds, and without this the
+    // FIRST tap on any not-yet-cached target reads as a dead button (the fetch succeeded, but
+    // nothing ever re-ran the navigation). A retry pass never re-registers: one window per tap.
+    if (!retryPass) {
+      pendingEmbedOpenRef.current = {
+        id,
+        expiresAt: Date.now() + PENDING_EMBED_OPEN_MS,
+        origin: embedNavFingerprint(),
+      };
+    }
+    return false;
   }, []);
+
+  // Completes a tapped embed whose target wasn't cached at tap time. Runs on every render on
+  // purpose (no dep array): the store snapshots that can resolve the target — feed items, channel
+  // and group message versions — all arrive via renders, and the null-check makes the idle cost
+  // nil. Cleared on success, on expiry, or as soon as the reader navigates somewhere else.
+  useEffect(() => {
+    const p = pendingEmbedOpenRef.current;
+    if (!p) return;
+    if (Date.now() > p.expiresAt || embedNavFingerprint() !== p.origin) {
+      pendingEmbedOpenRef.current = null;
+      return;
+    }
+    if (openEmbedTarget(p.id, true)) pendingEmbedOpenRef.current = null;
+  });
 
   // ── Close helpers (FIX 1) ────────────────────────────────────────────────────
   // Each closes exactly one overlay/surface and, if the nav-origin stack's TOP entry was pushed FOR
@@ -1960,6 +2235,72 @@ export function MainScreen({
       .then(added => Alert.alert(added ? 'Saved to embed later' : 'Already saved'))
       .catch(() => Alert.alert('Could not save', 'Please try again.'));
   }, [openChannel, openGroupId, openGroupState, currentUserPubkey]);
+  // notifLiveRecompute — the notification center used to snapshot onGetNotifications() ONCE at open
+  // time (see openNotifications above) and never again, so a reply/DM/channel post/join-request
+  // arriving a second after the user opened the bell was invisible until they closed and reopened
+  // it. Re-derive on notifOpen AND on every signal AppRuntime's OWN _notifCache key already treats
+  // as authoritative for this exact derivation (see its doc) — one source of truth, same reasoning
+  // as channelMsgs/threadNodes above keying on the data layer's own invalidation signals:
+  //   • feed — Kind.Comment (replies) and Post/Article/Poll/Voice (the Posts source) are all in
+  //     FEED_KINDS, so a new one bumps feedVer and this reference changes.
+  //   • inbox — a DM decrypts asynchronously into a REBUILT array with NO store-version bump (see
+  //     _notifCache's doc); the array identity is the only signal, exactly what the runtime's own
+  //     cache keys on.
+  //   • storeVersions.channels — channel broadcasts (CHANNEL_VIEW_KINDS ⊇ LiveChat).
+  //   • storeVersions.groups — the admin join-request queue (GROUP_VIEW_KINDS ⊇ GroupKind.Pending).
+  //   • storeVersions.identity — a name learned after the fact re-renders a row's actor text, same
+  //     reasoning as logHearth's identity dependency below.
+  //   • storeVersions.draftAccess — share-request/grant/silent-deny (the DEDICATED signal, not the
+  //     noisier .config AppData bump every unrelated organizer doc write also shares).
+  //   • notifUnreadCount — belt-and-suspenders for a prefs edit or read-state change with no unread
+  //     DELTA of its own (e.g. toggling a category that has zero unread rows right now), which none
+  //     of the signals above would otherwise catch.
+  // Deliberately NOT storeVersions.thread: that counter is scoped to whichever ONE thread is
+  // currently open (see its doc below), but the center lists replies across EVERY post the viewer
+  // authored — a signal scoped to one open thread would neither help nor mean anything here.
+  //
+  // Cost: onGetNotifications() (= AppRuntime.deriveNotifications()) is version-cached (_notifCache)
+  // and ALREADY runs on every single snapshot regardless of whether this screen is open, just to
+  // produce notifUnreadCount for the bell badge — so calling it again here on a coarser,
+  // over-inclusive key is a cache-key check (a handful of O(1) counter reads), never a re-scan,
+  // whenever nothing in the derivation's own narrower key actually moved. Gated on notifOpen so a
+  // background change pays even that small cost only while the center is actually open.
+  //
+  // Read-state / badge / scroll safety: onGetNotifications is a pure read (no HWM advance, no
+  // delivery side effect — see its own doc), so recomputing can never silently mark anything read.
+  // The bell badge renders off the notifUnreadCount PROP (above, in the header), never off
+  // notifItems, so it cannot flicker from this. A cache hit returns the SAME array reference, so
+  // setNotifItems bails out via React's Object.is check with no re-render at all — nothing to
+  // reorder or scroll-reset for a tick that changed nothing the center cares about. A genuine change
+  // rebuilds the array, but a row keeps its id/ts unless ITS OWN source event changed, and
+  // NotificationsScreen sorts with a stable sort — so unrelated rows never reshuffle. A brand-new
+  // row's id was never marked read (readState.ts: an unseen id defaults unread), so an item arriving
+  // while the screen is open surfaces as unread rather than being silently swallowed.
+  // NotificationsScreen itself stays mounted throughout this (only its `items` prop changes), so its
+  // own read-tap overlay (readIds/allRead) and the list's native scroll offset are untouched — a new
+  // row prepends above whatever the user is currently reading instead of resetting them to the top.
+  useEffect(() => {
+    if (!notifOpen) return;
+    let cancelled = false;
+    const handle = InteractionManager.runAfterInteractions(() => {
+      if (cancelled) return;
+      setNotifItems(onGetNotifications?.() ?? []);
+    });
+    return () => {
+      cancelled = true;
+      handle.cancel();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    notifOpen,
+    feed,
+    inbox,
+    storeVersions.channels,
+    storeVersions.groups,
+    storeVersions.identity,
+    storeVersions.draftAccess,
+    notifUnreadCount,
+  ]);
   // Defer the heavy thread build off the opening tap and refresh it only on a REAL thread change.
   // Open the overlay first (setOpenPost, already committed) so the tap returns immediately; compute
   // threadNodes after the touch/animation settles — exactly the openNotifications pattern. Key the
@@ -2047,10 +2388,17 @@ export function MainScreen({
   const myGradientRef = useRef<GradientSpec | undefined>(undefined);
   const myGradient = useMemo(() => {
     if (!currentUserPubkey) return undefined;
+    // The runtime-provided crafted gradient wins outright: identity edits bump identityVersion and
+    // emit, so this prop is fresh on the very render after a Profile save. The feed-item scan stays
+    // as the fallback for callers that don't pass the prop.
+    if (myCraftedGradient) {
+      myGradientRef.current = myCraftedGradient;
+      return myCraftedGradient;
+    }
     const own = feed.items.find(i => i.authorPubkey === currentUserPubkey)?.authorGradient;
     if (own) myGradientRef.current = own;
     return own ?? myGradientRef.current;
-  }, [currentUserPubkey, feed]);
+  }, [currentUserPubkey, feed, myCraftedGradient]);
   // The FULL profile (posts / channels / idea-count) is read ONLY by the Settings surface and the
   // viewer's own profile overlay. Build it lazily — never on the plain feed path. While Settings is
   // open we rebuild per snapshot (not the scroll-critical path); a ref preserves the value through the
@@ -3082,9 +3430,11 @@ export function MainScreen({
             <Text style={styles.bannerText} numberOfLines={1} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>{connectionText}</Text>
             <Text style={styles.bannerChevron} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>›</Text>
           </View>
-          {/* Determinate Tor-bootstrap line ON the bottom edge: forward motion during the 30–90s cold
-              connect, for 1.5px of height. Renders null once the percent clears on a dead circuit, so
-              it never looks hung — the hairline border below it keeps the strip's edge either way. */}
+          {/* Determinate Tor-bootstrap line ON the bottom edge: forward motion while Arti connects —
+              seconds, not the 30–90s the old (removed) C-tor engine needed; a warm reconnect
+              typically lands in ~2-3s now. 1.5px of height. Renders null once the percent clears on
+              a dead circuit, so it never looks hung — the hairline border below it keeps the strip's
+              edge either way. */}
           <ProgressBar percent={torBootstrap?.percent} height={1.5} trackColor="transparent" />
         </Press>
       )}
@@ -4548,12 +4898,33 @@ export function MainScreen({
           }))}
           // The feed's return-to-top control lives IN the dock row now (the ↑ bubble mirroring the
           // ≡ bubble). Other tabs pass nothing; sub-screens keep their own standalone JumpButtons
-          // (the dock — and so this bubble — is hidden there anyway).
+          // (the dock — and so this bubble — is hidden there anyway). `count` turns it into the
+          // "N new posts" pill (Task: instant-refresh overhaul) whenever there's something to
+          // announce; a tap both jumps to the top AND marks the feed seen, same as the auto-clear
+          // the reader gets for free by scrolling there themselves (syncFeedCaughtUp above).
           jump={
             tab === 'feed'
               ? {
                   visible: feedScroll.showJump,
-                  onPress: () => feedListRef.current?.scrollToOffset({offset: 0, animated: true}),
+                  // Gated on showJump too, not just the raw count: while the bubble itself is
+                  // hidden (reader at/near the top), a truthy count here would be meaningless —
+                  // that content is already visible live (Task A's emit pipeline), no affordance
+                  // is needed, and handing a hidden control a stale-looking count invites exactly
+                  // the kind of prop/render mismatch this file's own scroll-restore tests
+                  // (MainScreen.tabScrollRestore.test.tsx) assert against for `visible`.
+                  count: feedScroll.showJump && newFeedItemCount > 0 ? newFeedItemCount : undefined,
+                  onPress: () => {
+                    feedListRef.current?.scrollToOffset({offset: 0, animated: true});
+                    feedCaughtUpRef.current = true;
+                    // The pill's whole promise, now literal: RELEASE the arrivals the hold has been
+                    // buffering (see feedHeldRef) so the jump lands on them. feedScrollYRef is set to
+                    // the offset we just commanded so the feed.items effect above cannot re-arm the
+                    // hold from a stale position before the scroll animation's own onScroll frames
+                    // arrive.
+                    feedScrollYRef.current = 0;
+                    setFeedHeld(false);
+                    markFeedSeen();
+                  },
                 }
               : undefined
           }

@@ -140,3 +140,33 @@ test('jump visible:false never mounts, and visible→false unmounts after the fa
   await flush();
   expect(jumpOf(tree)).toBeUndefined();
 });
+
+// Coerces every Text's children to a string (unlike textLabels above, which deliberately keeps
+// only STRING children for the tab-label checks) — the badge passes a raw number below 100
+// (matching MainScreen's identical nbadge idiom: `count > 99 ? '99+' : count`), so a string-only
+// filter would silently miss it.
+const allTexts = (tree: renderer.ReactTestRenderer): string[] =>
+  tree.root.findAllByType(Text).map(n => String(n.props.children));
+
+test('jump.count > 0 renders as a badge on the ↑ bubble', async () => {
+  const tree = render(<BottomDock items={items('feed')} jump={{visible: true, onPress: () => {}, count: 3}} />);
+  await flush();
+  expect(allTexts(tree)).toContain('3');
+});
+
+test('jump.count of 0 or omitted renders no badge', async () => {
+  const treeZero = render(<BottomDock items={items('feed')} jump={{visible: true, onPress: () => {}, count: 0}} />);
+  await flush();
+  expect(allTexts(treeZero)).not.toContain('0');
+
+  const treeNone = render(<BottomDock items={items('feed')} jump={{visible: true, onPress: () => {}}} />);
+  await flush();
+  // Only the three tab labels and the ⌄ chevron should render as text — no stray numeral.
+  expect(allTexts(treeNone).some(t => /^\d+\+?$/.test(t))).toBe(false);
+});
+
+test('jump.count above 99 caps its display at "99+"', async () => {
+  const tree = render(<BottomDock items={items('feed')} jump={{visible: true, onPress: () => {}, count: 140}} />);
+  await flush();
+  expect(allTexts(tree)).toContain('99+');
+});

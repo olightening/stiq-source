@@ -263,6 +263,12 @@ export class MirrorSet {
   private readonly pendingConnectTimers = new Set<ReturnType<typeof setTimeout>>();
   /** Bounded wall-clock arm for startSecondaries() when the primary never syncs (withholding). */
   private startupDeadlineTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * Consecutive `createSocket` failures for a secondary URL BEFORE it ever produced a socket (so
+   * there is no {@link ChildEntry} yet to hold a per-instance `failureStreak` on) — see
+   * {@link connectSecondary}'s try/catch. Keyed by url; cleared the moment that url next opens.
+   */
+  private readonly preConnectFailureStreak = new Map<string, number>();
 
   private readonly eventListeners = new Set<(event: Event) => void>();
   private readonly seenListeners = new Set<(event: Event) => void>();
@@ -271,7 +277,8 @@ export class MirrorSet {
   private readonly noticeListeners = new Set<(message: string) => void>();
   /** Forwarded from the sub-carrying child only (scoped subs live on primary-or-promoted). */
   private readonly scopedEoseListeners = new Set<(subId: string) => void>();
-  /** Forwarded from the PRIMARY child only — scoped subs live on the primary (subscribeScoped). */
+  /** Forwarded from the sub-carrying child only (primary-or-promoted, same as scopedEoseListeners
+   *  above) — a reconcile-only secondary's plan send must never fabricate a resubscribe trigger. */
   private readonly subscribedListeners = new Set<() => void>();
 
   constructor(primarySocket: RelaySocket, store: EventStore, opts: MirrorSetOptions) {
@@ -489,6 +496,7 @@ export class MirrorSet {
     this.clearStartupDeadline();
     for (const timer of this.pendingConnectTimers) clearTimeout(timer);
     this.pendingConnectTimers.clear();
+    this.preConnectFailureStreak.clear();
     for (const entry of [...this.secondaries]) {
       this.teardownEntry(entry);
     }
@@ -693,8 +701,54 @@ export class MirrorSet {
     };
   }
 
-  private connectSecondary(spec: MirrorSpec, options: RelayClientOptions, isPromoted: boolean): ChildEntry {
-    const rawSocket = this.opts.createSocket(spec.url);
+  /**
+   * Build (or rebuild, after a failure) one SECONDARY child.
+   *
+   * `createSocket` dials Tor exactly like the primary's own connect path does (App.tsx's
+   * `startRelay`), and throws SYNCHRONOUSLY when Tor is momentarily offline (torSocket.ts's
+   * `requireTorTransport`). `startRelay` wraps that call in a try/catch for exactly this reason; this
+   * one didn't — so a secondary's staggered start, a promotion, or (worst of all) THIS FUNCTION'S OWN
+   * onClose-driven auto-retry below firing while Tor was still mid-reconnect threw UNCAUGHT out of a
+   * bare `setTimeout` callback, with no caller anywhere in a position to catch it. Retried on the SAME
+   * `relayBackoffMs` schedule a post-connect failure gets, keyed by url in
+   * {@link preConnectFailureStreak} since there is no ChildEntry yet to hold a per-instance streak on.
+   * `isPromoted` is threaded through the retry so a promotion in flight (`promotionPending`) still
+   * resolves once Tor is back, instead of being silently abandoned mid-promotion.
+   */
+  private connectSecondary(spec: MirrorSpec, options: RelayClientOptions, isPromoted: boolean): void {
+    // Every path into this function except promoteSecondary()'s own immediate call is timer-scheduled
+    // (the initial stagger, a newcomer stagger, a post-close backoff retry, or the pre-connect retry
+    // below), so `this.secondaryMirrors` — the CURRENT set — may have changed underneath any of them
+    // by the time they actually fire. That matters most for the pre-connect retry just below: a
+    // synchronous createSocket() throw means NO ChildEntry exists yet for this url (see
+    // preConnectFailureStreak's doc comment), so updateSecondaryMirrors's de-list loop — which walks
+    // ChildEntrys — can never see or cancel this armed closure. Left unchecked it would keep retrying
+    // the OLD spec on its backoff schedule and could connect a mirror the organizer has since removed
+    // — a trust problem (operators drop a mirror for a reason), not just untidiness. Re-checking live
+    // membership here, right before doing anything, closes that gap for every deferred entry path in
+    // one place. This mirrors close()'s own ordering rule (it sets `this.closed` before clearing any
+    // timers) — updateSecondaryMirrors assigns `this.secondaryMirrors` before it tears down or skips
+    // anything, so a read of it here always sees whatever the most recent call decided.
+    if (this.closed || !this.secondaryMirrors.some(s => hostKey(s.url) === hostKey(spec.url))) {
+      this.preConnectFailureStreak.delete(spec.url);
+      return;
+    }
+    let rawSocket: RelaySocket;
+    try {
+      rawSocket = this.opts.createSocket(spec.url);
+    } catch {
+      if (this.closed) return; // never (re)arm a retry once torn down
+      const streak = (this.preConnectFailureStreak.get(spec.url) ?? 0) + 1;
+      this.preConnectFailureStreak.set(spec.url, streak);
+      const timer = setTimeout(() => {
+        this.pendingConnectTimers.delete(timer);
+        this.connectSecondary(spec, options, isPromoted);
+      }, relayBackoffMs(streak));
+      unref(timer);
+      this.pendingConnectTimers.add(timer);
+      return;
+    }
+    this.preConnectFailureStreak.delete(spec.url);
     const socket = multiplexSocket(rawSocket);
     const client = new RelayClient(socket, this.store, options);
     const entry: ChildEntry = {
@@ -747,7 +801,6 @@ export class MirrorSet {
     });
     this.secondaries.push(entry);
     if (isPromoted) this.promotedEntry = entry;
-    return entry;
   }
 
   private teardownEntry(entry: ChildEntry): void {

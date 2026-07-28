@@ -9,43 +9,54 @@ export {
   buildStartConfig,
 } from './bridges';
 export {TorManager, requireTorTransport, type TorManagerOptions} from './TorManager';
-export {TOR_MIN_SUPPORTED_VERSION, parseTorVersion, torVersionAtLeast} from './torVersion';
 export {
   deriveOnionAuth,
   getActiveOnionAuth,
   setActiveOnionAuth,
   isValidAuthKeyBase32,
   onionHostOf,
+  // The reachability-probe target (TorStartConfig.relayOnion). Published alongside
+  // setActiveOnionAuth on community (re)activation — it must be set for PUBLIC communities too,
+  // which carry no auth credential but do have a relay onion to probe.
+  setActiveRelayOnion,
+  getActiveRelayOnion,
+  relayOnionHostOf,
   type OnionAuth,
 } from './onionAuth';
 export type {TorBackend} from './backend';
+/**
+ * Off-seam daemon controls (NEWNYM, dormancy). Exported from here so callers get the accessor
+ * instead of reaching into `NativeModules.StiqArti` themselves — see ./daemonControl for why every
+ * off-seam call is routed through that one chokepoint.
+ */
+export {getTorDaemonControl, type TorDaemonControl} from './daemonControl';
 
-import {USE_ARTI_BACKEND} from '../config';
 import {TorManager, type TorManagerOptions} from './TorManager';
 import type {TorBackend} from './backend';
-import {NativeTorBackend, getNativeTorModule} from './nativeBackend';
 import {ArtiTorBackend, getArtiTorModule} from './artiBackend';
+import {CTorBackend, getCtorTorModule} from './ctorBackend';
 import {UnavailableTorBackend} from './backend.fake';
 
 /**
- * Returns the real native Tor backend (StiqTor native module) when the module is linked,
- * otherwise an UnavailableTorBackend that immediately goes offline.  There is no clearnet
- * fallback — if the native module is absent the app surfaces an offline state.
+ * Returns the Tor backend for whichever engine module this binary linked. The Android build
+ * ships as two feature-identical product flavors that differ only here (the `tor` flavor
+ * dimension in app/build.gradle):
  *
- * T17 spike: when USE_ARTI_BACKEND is on (dark, default false), route to the experimental Arti
- * (pure-Rust) backend via the StiqArti native module instead. This is the ONLY control-flow edit
- * above the TorBackend seam. If Arti is selected but its native module is absent (a build that
- * didn't package the Arti .so, or jest/host), degrade to UnavailableTorBackend — offline, NEVER a
- * clearnet path (ALLOW_CLEARNET_FALLBACK stays false). With the flag OFF this is byte-identical to
- * before: the incumbent NativeTorBackend/UnavailableTorBackend logic below.
+ *   arti — NativeModules.StiqArti → ArtiTorBackend (Rust arti-client)
+ *   ctor — NativeModules.StiqTor  → CTorBackend (info.guardianproject:tor-android + IPtProxy)
+ *
+ * The JS bundle is identical in both flavors, so this probe — not a build flag — is the engine
+ * selection. Arti wins if both modules were ever present (no shipped flavor links both). When
+ * neither is linked (jest/host, or a build that didn't package its engine's native library) the
+ * app surfaces an offline state via UnavailableTorBackend — NEVER a clearnet path
+ * (ALLOW_CLEARNET_FALLBACK stays false).
  */
 export function createTorBackend(): TorBackend {
-  if (USE_ARTI_BACKEND) {
-    const arti = getArtiTorModule();
-    return arti ? new ArtiTorBackend(arti) : new UnavailableTorBackend();
-  }
-  const native = getNativeTorModule();
-  return native ? new NativeTorBackend(native) : new UnavailableTorBackend();
+  const arti = getArtiTorModule();
+  if (arti) return new ArtiTorBackend(arti);
+  const ctor = getCtorTorModule();
+  if (ctor) return new CTorBackend(ctor);
+  return new UnavailableTorBackend();
 }
 
 export function createTorManager(options?: TorManagerOptions): TorManager {

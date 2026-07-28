@@ -99,6 +99,17 @@ Thumbs.db
 
 # Build artifacts (do not commit binaries — build via CI/releases)
 *.exe
+# Rust build output for the arti-ffi crate. Cargo.lock IS committed (it pins the 417-crate
+# arti graph the Android build must reproduce); target/ is ~19MB of host artifacts and is not.
+client/arti-ffi/target/
+# Native artifacts emitted by arti-ffi/build.sh and build-pt.sh into the arti flavor's jniLibs
+# (src/arti/ since the two-APK flavor split — the ctor flavor gets its natives from maven).
+# These are multi-MB binaries rebuilt from source by those scripts — the RECIPES are committed,
+# not the output.
+client/android/app/src/arti/jniLibs/*/libLyrebird.so
+client/android/app/src/arti/jniLibs/*/libSnowflake.so
+client/android/app/src/arti/jniLibs/*/libWebtunnel.so
+client/android/app/src/arti/jniLibs/*/libarti_mobile.so
 relay/stiq-relay-linux
 relay/stiq-relay-new
 relay/organizer

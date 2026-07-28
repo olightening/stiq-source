@@ -221,6 +221,8 @@ export interface AppShellProps {
   onSetDisplayName?: (name: string) => void;
   /** Set or change the viewer's identity gradient. */
   onSetGradient?: (spec: import('../media/gradient').GradientSpec) => void;
+  /** The viewer's crafted gradient, straight from the runtime's identity store (see MainScreen). */
+  myCraftedGradient?: import('../media/gradient').GradientSpec;
   /** Load the list of enrolled communities for the Settings switcher. */
   onLoadCommunities?: () => Promise<{list: import('../communities/communityStore').EnrolledCommunity[]; activeId: string | null}>;
   /** Switch the active community (updates the relay the app connects to). */
@@ -320,6 +322,11 @@ export interface AppShellProps {
   onUnlockContent?: (epoch: number) => void;
   /** Pull-to-refresh: re-run the NIP-77 feed reconciliation against the relay. */
   onRefreshFeed?: () => Promise<void>;
+  /** Count of feed items newer than the reader's last onMarkFeedSeen mark — the "N new posts"
+   *  pill (see MainScreenProps.newFeedItemCount / AppRuntime.markFeedSeen for the full contract). */
+  newFeedItemCount?: number;
+  /** Advance the "seen" baseline the pill counts forward from (see MainScreenProps.onMarkFeedSeen). */
+  onMarkFeedSeen?: () => void;
   /** Scroll-back pagination (bug #3): stream in older feed history from the relay. */
   onLoadOlderFeed?: (until: number) => void;
   /** Scroll-back pagination for an open channel. */
@@ -539,6 +546,7 @@ export function AppShell(props: AppShellProps): React.JSX.Element {
           onRevokeDraftAccess={props.onRevokeDraftAccess}
           onSetDisplayName={props.onSetDisplayName}
           onSetGradient={props.onSetGradient}
+          myCraftedGradient={props.myCraftedGradient}
           pinEnabled={props.pinEnabled}
           onSetPinEnabled={props.onSetPinEnabled}
           onVerifyPin={props.onVerifyPin}
@@ -594,6 +602,8 @@ export function AppShell(props: AppShellProps): React.JSX.Element {
           onMuteAuthor={props.onMuteAuthor}
           onUnlockContent={props.onUnlockContent}
           onRefreshFeed={props.onRefreshFeed}
+          newFeedItemCount={props.newFeedItemCount}
+          onMarkFeedSeen={props.onMarkFeedSeen}
           onLoadOlderFeed={props.onLoadOlderFeed}
           onLoadOlderChannelPage={props.onLoadOlderChannelPage}
           onLoadOlderGroupPage={props.onLoadOlderGroupPage}

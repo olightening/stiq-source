@@ -3,12 +3,23 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Detect default-network changes (Wi-Fi↔cellular) to reconnect Tor promptly -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <!-- TorService foreground service -->
+    <!-- StiqSyncService foreground service (background sync) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <!-- Android 14+: foreground service type companion permission -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-    <!-- Android 13+: runtime permission to show the TorService foreground notification -->
+    <!-- Android 13+: runtime permission to show the StiqSyncService foreground notification -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Held briefly by StiqSyncService.handleFgsTimeout so the headless sync task can finish its
+         unwind — in particular the Arti disconnect — after the Android 15 dataSync FGS timeout
+         strips our foreground status. React Native's HeadlessJsTaskService already relies on this
+         permission (acquireWakeLockNow) and it merges in from a library manifest, but our own use
+         must not depend on someone else's dependency continuing to declare it. Normal protection
+         level: granted at install, no user prompt. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Anti-tapjacking: lets MainActivity call Window.setHideOverlayWindows(true) (API 31+), which
+         hides OTHER apps' TYPE_APPLICATION_OVERLAY windows while ours is visible. Normal protection
+         level; it only ever restricts what other apps may draw over us. -->
+    <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
     <!-- Doze/battery-optimization exemption (Tor stability workstream): lets StiqPowerModule prompt
          the user to whitelist the app so the OS does not suspend the dormant Tor daemon in deep sleep.
          Not auto-granted; the app requests it via ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS. -->
@@ -53,6 +64,8 @@
       android:icon="@mipmap/ic_launcher"
       android:roundIcon="@mipmap/ic_launcher_round"
       android:allowBackup="false"
+      android:fullBackupContent="@xml/backup_rules"
+      android:dataExtractionRules="@xml/data_extraction_rules"
       android:theme="@style/AppTheme"
       android:networkSecurityConfig="@xml/network_security_config"
       android:supportsRtl="true">
@@ -85,36 +98,21 @@
             <data android:scheme="stiq" android:host="channel" />
         </intent-filter>
       </activity>
-      <!-- TorService from tor-android: bundled Tor daemon.
-           foregroundServiceType required on Android 14+ (API 34).
-           android:process=":tor" runs the daemon in its OWN process. tor-android calls
-           tor_run_main() IN-PROCESS; when tor aborts (SIGABRT — e.g. the hs_circuitmap/pubsub_install
-           assertion tripped by re-entering tor_run_main before the previous run's globals are freed)
-           that abort used to kill the WHOLE app (Samsung "app has a bug" dialog). Isolating TorService
-           into :tor means such an abort only kills that process — the main process (and the JS/UI
-           layer) survives and the reconnect cascade (TorManager/App.tsx) sees the daemon go away and
-           starts a FRESH :tor process, which also has fresh globals and so cannot re-trip the same
-           assert. StiqTorModule.kt talks to this process ONLY via the filesystem-based Tor control
-           socket (a Unix domain socket under app-private storage, shared across all processes of this
-           app) and real (non-Local) broadcasts — never a LocalBinder cast, which would break
-           cross-process. IPtProxy's pluggable-transport SOCKS listener stays in the main process;
-           127.0.0.1 sockets are not process-scoped on Android, so tor in :tor still reaches it. -->
-      <!-- StiqTorService (W2 change 4) subclasses org.torproject.jni.TorService purely to promote the
-           daemon to a FOREGROUND service with a NEUTRAL IMPORTANCE_MIN notification (no "Tor" wording)
-           and to let it survive backgrounding. The bundled AAR's TorService ships no res/ and never
-           calls startForeground, so a resource/notification override is impossible — subclassing is
-           the sanctioned fallback. Still runs in the :tor process (isolates the tor_run_main abort),
-           still not exported, still stopWithTask=false + dataSync FGS type (preserved from Phase A). -->
-      <service
-        android:name=".StiqTorService"
-        android:exported="false"
-        android:process=":tor"
-        android:stopWithTask="false"
-        android:foregroundServiceType="dataSync" />
       <!-- Headless JS service for WorkManager background sync (PLAN.md Obj. 4).
            Not exported — only SyncWorker (same process) or the UnifiedPush receiver (T1, same
            process) starts it. foregroundServiceType=dataSync so StiqUnifiedPushReceiver.onMessage can
-           start it via startForegroundService from a background/killed state on API 34+. -->
+           start it via startForegroundService from a background/killed state on API 34+.
+
+           dataSync is still the correct type after re-checking it against the Android 15 timeout
+           (step 2 of the TOR-NATIVE-1 checklist in android/build.gradle). The alternatives are
+           worse: shortService caps a run at ~3 minutes (below our 90s task plus Tor bootstrap
+           headroom, with no margin), mediaProcessing carries the identical 6h/24h budget and does
+           not describe what this does, and specialUse — which has no timeout — would be a
+           deliberate misdeclaration for what is genuinely a data sync. Budget headroom is ample
+           regardless: each run is bounded at 90s by HeadlessJsTaskConfig, so even a maximally
+           chatty device at the ~15-minute periodic floor spends ~2.4h of the 6h window. The
+           residual risk is push-wake volume stacking on top of that, and StiqSyncService.onTimeout
+           now handles the exhausted case gracefully. -->
       <service
         android:name=".StiqSyncService"
         android:exported="false"

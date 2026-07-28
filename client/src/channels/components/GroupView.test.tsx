@@ -26,7 +26,7 @@ jest.mock('./primitives', () => {
 
 import 'react-native';
 import React from 'react';
-import {Alert, BackHandler} from 'react-native';
+import {Alert, BackHandler, FlatList} from 'react-native';
 import renderer, {act} from 'react-test-renderer';
 import Clipboard from '@react-native-clipboard/clipboard';
 import {GroupView, type GroupViewProps} from './GroupView';
@@ -106,6 +106,46 @@ it('renders group name, chat, and a member-count header', () => {
   expect(text).toContain('Builders');
   expect(text).toContain('hi group');
   expect(text).toContain('member'); // "2 member(s)" header
+});
+
+it('anchors the chat with maintainVisibleContentPosition so an arriving message cannot yank a reader scrolled into history', () => {
+  const tree = render(base());
+  const list = tree.root.findByType(FlatList);
+  expect(list.props.maintainVisibleContentPosition).toEqual({minIndexForVisible: 0});
+});
+
+it('does NOT pair removeClippedSubviews with maintainVisibleContentPosition (they fight over the same native child list)', () => {
+  // On Android, removeClippedSubviews detaches off-screen child views from the very ScrollView
+  // content ViewGroup that MaintainVisibleScrollPositionHelper walks by index to find/track its
+  // anchor — a view clipped away mid-update can vanish out from under the anchor the helper is
+  // tracking, defeating the "arriving message cannot yank a scrolled-away reader" guarantee above.
+  const tree = render(base());
+  const list = tree.root.findByType(FlatList);
+  expect(list.props.removeClippedSubviews).not.toBe(true);
+});
+
+it('a plain group chat stops auto-following to the newest message once the reader has scrolled away to read history', () => {
+  const scrollToEnd = jest.spyOn(FlatList.prototype, 'scrollToEnd').mockImplementation(() => {});
+  const tree = render(base());
+  const list = tree.root.findByType(FlatList);
+
+  // Mount's own initial layout: the reader hasn't scrolled at all yet (jump.showJump starts
+  // false), so the pre-existing "open scrolled to the newest message" behaviour must be intact.
+  act(() => list.props.onContentSizeChange());
+  expect(scrollToEnd).toHaveBeenCalledTimes(1);
+
+  // Scroll far enough from the bottom to cross useReturnToLatest('bottom')'s own SHOW_AFTER
+  // threshold (320px) — distance = contentSize.height - (contentOffset.y + layoutMeasurement.height).
+  act(() => {
+    (list.props.onScrollEndDrag as (e: unknown) => void)({
+      nativeEvent: {contentOffset: {y: 0}, contentSize: {height: 2000}, layoutMeasurement: {height: 600}},
+    });
+  });
+
+  // A new message lands (content size changes again) while the reader is mid-history — must NOT
+  // yank them back to the bottom.
+  act(() => list.props.onContentSizeChange());
+  expect(scrollToEnd).toHaveBeenCalledTimes(1); // still just the one call from the initial mount
 });
 
 /** Member management moved to the full MANAGE page (membership handoff): open the quick sheet,

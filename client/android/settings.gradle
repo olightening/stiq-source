@@ -5,7 +5,7 @@ rootProject.name = 'stiq'
 include ':app'
 includeBuild('../node_modules/@react-native/gradle-plugin')
 
-// Additional maven repos needed for Tor + pluggable transport dependencies.
+// Additional maven repos needed for Tor + pluggable transport dependencies (ctor flavor).
 // These are injected via dependencyResolutionManagement so they apply to all modules.
 dependencyResolutionManagement {
     repositories {

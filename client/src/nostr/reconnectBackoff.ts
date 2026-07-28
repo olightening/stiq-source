@@ -19,6 +19,32 @@ export const RELAY_BACKOFF_MAX_MS = 60_000;
  * outage), the delay includes +/-20% jitter: final = MIN(MAX, base * (0.8 + 0.4 * rng())).
  * The optional `rng` parameter is a function returning [0, 1) for testability; it defaults to
  * Math.random() for production.
+ *
+ * RESET CONTRACT for every caller that keeps its OWN `streak` (and any `nextAttemptAt` deadline
+ * computed from this function's return value) outside this module — e.g. App.tsx's
+ * `relayFailureStreak` / `nextRelayAttemptAt` closure state driving the PRIMARY relay socket, or a
+ * per-url streak keyed externally (see MirrorSet.ts's `preConnectFailureStreak` /
+ * `ChildEntry.failureStreak` for secondaries): the streak must be reset to 0 the INSTANT a fresh,
+ * independent, more-recent signal proves the transport is healthy again — not just on the caller's
+ * own next successful connect.
+ *
+ * MEASURED ON DEVICE (2026-07-27): after Tor reconnected, the relay was not re-dialled for ~90s.
+ * Cause: App.tsx's `manager.onChange('connected')` handler calls `startRelay()` directly (the socket
+ * having gone `null` while Tor itself was down), and `startRelay()` only consults its backoff floor
+ * `nextRelayAttemptAt` while `relayFailureStreak > 0` — but that ONE call site was the only caller of
+ * `startRelay()` that did not reset the streak first. A streak built from failures dialling THROUGH
+ * Tor says nothing about whether Tor itself just now regained a circuit; honouring it there re-stales
+ * the app for up to RELAY_BACKOFF_MAX_MS after every single Tor recovery, silently, with no further
+ * signal to break out of it before the stale floor's own deadline. Every OTHER place this codebase
+ * resets a relay failure streak (a community switch, an applied Tor-mode change, a network-change
+ * bounce — all in App.tsx) already zeroes it inline (`relayFailureStreak = 0`) at the point of reset;
+ * there is deliberately no stateful helper exported here for that — the state lives entirely in the
+ * caller's closure, so a bare, grep-able `= 0` at the Tor-'connected' call site (immediately before
+ * its `startRelay()` call) is the fix, matching the existing sites rather than inventing a new shape
+ * for this one. Resetting `relayFailureStreak` alone is sufficient: `startRelay()`'s backoff-floor
+ * check is gated on `streak > 0`, so zeroing the streak makes the stale `nextRelayAttemptAt` moot
+ * without needing to also touch it (though clearing both is more defensive against future refactors
+ * of that gate).
  */
 export function relayBackoffMs(streak: number, rng: () => number = Math.random): number {
   const base = Math.min(RELAY_BACKOFF_MAX_MS, RELAY_BACKOFF_BASE_MS * 2 ** Math.max(0, streak - 1));
@@ -26,10 +52,12 @@ export function relayBackoffMs(streak: number, rng: () => number = Math.random):
 }
 
 /**
- * Tor rate-limits NEWNYM to roughly once per 10s, so requesting a fresh circuit on every fast
- * failure wastes the rotation (Tor ignores it) and churns half-built circuits. Rotate only every
- * Nth failure. With N=2 and a streak incremented before the check, this fires on every other
- * attempt once rotation has started.
+ * Requesting a fresh circuit on every fast failure churns half-built circuits, so rotate only every
+ * Nth failure instead. Under C-tor this restraint doubled as respecting Tor's own ~once/10s NEWNYM
+ * rate limit; Arti's equivalent (`arti_new_identity()` → `retire_all_circuits()`, arti-ffi/src/lib.rs)
+ * has NO rate limit at all — every call fully executes and immediately retires every onion circuit,
+ * so over-rotating is now fully self-inflicted rather than harmlessly throttled away. With N=2 and a
+ * streak incremented before the check, this fires on every other attempt once rotation has started.
  */
 export const RELAY_NEWNYM_EVERY = 2;
 
@@ -37,16 +65,20 @@ export const RELAY_NEWNYM_EVERY = 2;
  * Consecutive failures tolerated BEFORE the first circuit rotation.
  *
  * Rotating used to start at failure #1, which was actively counter-productive for the case it was
- * meant to help. NEWNYM drops the client's hidden-service DESCRIPTOR cache along with half-built
- * circuits, so rotating early throws away the descriptor fetch that the very next dial needs and
- * forces it to start over — each rotation making the following attempt slower, not fresher. Early
- * failures against an onion are usually "the descriptor isn't here yet", which a retry fixes and a
- * rotation actively sabotages. A rotation only earns its cost once several attempts have failed,
- * which is real evidence the circuit itself is bad rather than merely young.
+ * meant to help. NEWNYM-equivalent rotation drops the client's hidden-service DESCRIPTOR cache along
+ * with half-built circuits, so rotating early throws away the descriptor fetch that the very next
+ * dial needs and forces it to start over — each rotation making the following attempt slower, not
+ * fresher. Early failures against an onion are usually "the descriptor isn't here yet", which a retry
+ * fixes and a rotation actively sabotages. A rotation only earns its cost once several attempts have
+ * failed, which is real evidence the circuit itself is bad rather than merely young.
  *
- * This is also what the torrc built in StiqTorModule already says about the keep-alive path: "we
- * deliberately do NOT spam SIGNAL NEWNYM — that doesn't refresh a live circuit and only costs
- * reachability." The reconnect path now honours the same policy.
+ * This is also the policy `requestNewTorCircuit` (App.tsx) already follows for the keep-alive path:
+ * do NOT rotate on every failure — that doesn't refresh a live circuit and only costs reachability by
+ * retiring circuits that were about to succeed. Arti's `arti_new_identity()` (arti-ffi/src/lib.rs)
+ * has no rate limit of its own to lean on here (every call fully executes and retires ALL onion
+ * circuits — see RELAY_NEWNYM_EVERY's doc above), so this app-level restraint is the ONLY thing
+ * standing between a fast failure streak and needlessly destroying a circuit that was still warming
+ * up. The reconnect path honours the same policy.
  */
 export const RELAY_NEWNYM_AFTER = 2;
 

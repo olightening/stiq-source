@@ -34,9 +34,11 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {utf8ToBytes, bytesToUtf8} from '@noble/hashes/utils.js';
 import type {Event} from 'nostr-tools/pure';
+import type {UnsignedEvent} from '../keys/keystore';
 import {bytesToBase64, base64ToBytes} from '../util/base64';
 import type {EventStore} from '../nostr/store';
 import {Kind} from '../nostr/events';
+import {SPACE_KEY_REQUEST_D_PREFIX} from '../contracts';
 import {joinRequestsKey, invitesDismissedKey, spaceKeysDeliveredKey} from '../app/workspaceKeys';
 import {sanitizeSpaceName} from './spaceEmbed';
 import {GroupKind, eventGroupId} from './groups';
@@ -411,4 +413,60 @@ export async function saveDeliveredSpaceKeys(
   } catch {
     // best effort
   }
+}
+
+// ── Space-key redelivery request (kind-30078, d="space-key-request:<spaceId>") ────────────────
+//
+// The self-heal for a member stranded in a private space whose kind-30079 key delivery never
+// reached their device (relay lost/paged it out, or the admin's delivery watermark says "already
+// keyed" so the 39002 backfill will never re-send). The keyless member publishes this tiny
+// addressable doc; any keyed admin whose client sees it re-runs the per-member delivery for the
+// CURRENT epoch (never old epochs — a rejoiner must not gain the history a rotation locked away).
+//
+// Wire choices, all deliberate:
+//  • kind 30078 with a NON-`stiq:` `d` prefix — allowed from any bound member with zero relay
+//    changes (`stiq:` d-tags are organizer-reserved; see spaceInvitesDTag's identical caveat).
+//  • addressable per (author, d) — a member re-requesting REPLACES their own doc server-side, so
+//    requests can never pile up; the responder dedupes on created_at.
+//  • `['h', spaceId]` + the exact-`d` filter in buildSpaceKeyRecoveryFilters is how it reaches an
+//    admin: it rides the group's own scoped subscription, so it has the same liveness as the
+//    39002-driven key backfill (an admin opening the space answers it).
+//  • content is EMPTY — the request carries no secret and needs none; the response is the normal
+//    authenticated, NIP-44-wrapped 30079 path.
+
+export {SPACE_KEY_REQUEST_D_PREFIX};
+
+/** Addressable `d` for a member's key-redelivery request. Never `stiq:`-prefixed (organizer-reserved). */
+export function spaceKeyRequestDTag(spaceId: string): string {
+  return `${SPACE_KEY_REQUEST_D_PREFIX}${spaceId}`;
+}
+
+/** Build the UNSIGNED redelivery-request doc for `spaceId` (the caller signs + publishes). */
+export function buildSpaceKeyRequest(spaceId: string): UnsignedEvent {
+  return {
+    kind: Kind.AppData,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [
+      ['d', spaceKeyRequestDTag(spaceId)],
+      ['h', spaceId],
+    ],
+    content: '',
+  };
+}
+
+/** A parsed redelivery request: which space, who asks, and when (the responder's dedupe key). */
+export interface SpaceKeyRequest {
+  spaceId: string;
+  requester: string;
+  at: number;
+}
+
+/** Parse a kind-30078 redelivery request. Returns null for anything that isn't one. */
+export function parseSpaceKeyRequest(event: Event): SpaceKeyRequest | null {
+  if (event.kind !== Kind.AppData) return null;
+  const d = event.tags.find(t => t[0] === 'd' && t[1])?.[1];
+  if (!d || !d.startsWith(SPACE_KEY_REQUEST_D_PREFIX)) return null;
+  const spaceId = d.slice(SPACE_KEY_REQUEST_D_PREFIX.length);
+  if (!spaceId) return null;
+  return {spaceId, requester: event.pubkey, at: event.created_at};
 }

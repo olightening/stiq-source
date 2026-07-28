@@ -21,6 +21,7 @@ import {GradientAvatar} from '../../ui/GradientAvatar';
 import {JumpButton} from '../../ui/JumpButton';
 import {BackButton} from '../../ui/BackButton';
 import {useReturnToLatest} from '../../ui/useReturnToLatest';
+import {useNewWhileAway} from '../../ui/useNewWhileAway';
 import {SearchTimeButton} from '../../ui/SearchTimeButton';
 import {TimeFrameSheet} from '../../ui/TimeFrameSheet';
 import {ALL_TIME, filterByTime, selectionToRange, type TimeSelection} from '../../ui/timeframe';
@@ -169,6 +170,8 @@ export function ConversationView({
   // is exactly the 'top' anchor's distance math — so useReturnToLatest('top') drives the FAB here.
   const listRef = useRef<FlatList<DirectMessage>>(null);
   const jump = useReturnToLatest('top');
+  // "N new" on the FAB while the reader is up in history — the per-space sibling of the feed pill.
+  const newWhileAway = useNewWhileAway(conversation.messages, m => m.createdAt, jump.showJump);
   const scrollToLatest = useCallback(() => {
     listRef.current?.scrollToOffset({offset: 0, animated: true});
   }, []);
@@ -365,6 +368,22 @@ export function ConversationView({
           keyExtractor={dmKey}
           style={s.transcript}
           contentContainerStyle={s.list}
+          // `inverted` alone only explains the FIRST paint (offset 0 = the transformed start =
+          // newest, no scroll call needed) — it does not by itself protect a reader who has
+          // scrolled UP into history. A new DM still arrives as a prepend at index 0 (the visual
+          // bottom under the inversion), and without this prop the native list keeps the same
+          // pixel offset, which now points at different content than before because new content
+          // grew at the exact edge the offset is measured from. minIndexForVisible: 0 anchors on
+          // whatever the reader is actually looking at instead, so a message arriving mid-history-
+          // read never moves their view.
+          maintainVisibleContentPosition={{minIndexForVisible: 0}}
+          // Android's FlatList defaults removeClippedSubviews to true whenever the prop is
+          // omitted (RN's removeClippedSubviewsOrDefault()) — silently pairing native view
+          // clipping with maintainVisibleContentPosition on this exact ScrollView. Clipping
+          // detaches an off-screen child ViewGroup out from under MaintainVisibleScrollPosition-
+          // Helper's index-based anchor tracking mid-update, defeating the position stability
+          // above is here for (see GroupView.tsx / ThreadView.tsx's identical note). Force it off.
+          removeClippedSubviews={false}
           onScroll={jump.onScroll}
           onMomentumScrollEnd={jump.onScroll}
           onScrollEndDrag={jump.onScroll}
@@ -396,7 +415,7 @@ export function ConversationView({
           )}
         />
       )}
-        <JumpButton visible={jump.showJump} direction="down" onPress={scrollToLatest} />
+        <JumpButton visible={jump.showJump} direction="down" onPress={scrollToLatest} count={newWhileAway} />
       </View>
 
       {/* Composer (hidden when blocked). Its draft state lives INSIDE <Composer/> so a keystroke

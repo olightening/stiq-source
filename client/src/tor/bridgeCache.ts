@@ -12,9 +12,9 @@
  */
 import type {SecureStorage} from '../keys/keystore';
 import type {TransportType} from './types';
-// NetworkClass is defined once in nativeBackend.ts (the native binding, T2-S2); import it here so the
-// per-class cache and its callers share the single canonical union — no drift between the two files.
-import type {NetworkClass} from './nativeBackend';
+// NetworkClass is defined once in daemonControl.ts (the native binding, T2-S2); import it here so
+// the per-class cache and its callers share the single canonical union — no drift between files.
+import type {NetworkClass} from './daemonControl';
 
 const CACHE_ITEM = 'stiq.tor.bridges';
 /** Ignore caches older than this — rotated bridges go stale, and warm-fail→cold recovers. */
@@ -165,7 +165,7 @@ export async function clearCachedBridges(storage: SecureStorage): Promise<void> 
  */
 const NETCLASS_ITEM_PREFIX = 'stiq.tor.bridges.net.';
 
-// Re-export the canonical NetworkClass (sourced from ./nativeBackend above) so existing importers of
+// Re-export the canonical NetworkClass (sourced from ./daemonControl above) so existing importers of
 // `bridgeCache`'s NetworkClass keep working while there is a single definition.
 export type {NetworkClass};
 

@@ -22,6 +22,9 @@ buildscript {
 }
 
 // TOR-NATIVE-1 tripwire — DO NOT bump targetSdkVersion to 35+ without reading this comment first.
+// (Name kept from when this guarded StiqTorService too; StiqTorService is gone — C-tor was
+// replaced by Arti, which runs in-process rather than as its own foreground service — but the
+// same budget still applies to StiqSyncService alone, so the guard stays.)
 //
 // Android 15 (API 35) introduces a hard 6h/24h timeout budget on `dataSync`-type foreground
 // services (Service.onTimeout(int,int), the FGS_TIMEOUT mechanism). Critically, that enforcement
@@ -30,38 +33,36 @@ buildscript {
 // but the instant targetSdkVersion is raised to 35+, the budget arms immediately on every device
 // already in the field running 15/16, with no code change anywhere else needed to trigger it.
 //
-// StiqTorService AND StiqSyncService (client/android/app/src/main/java/com/stiq/client/) BOTH
-// declare foregroundServiceType="dataSync" and would SHARE that single 6h/24h budget. Tor is
-// deliberately run dormant/backgrounded for long stretches between foreground interactions
-// (indefinite dormancy is the intended policy — see the Tor stability+speed workstream); the OS
-// force-killing the service after the budget elapses would silently tear down the daemon out from
-// under an idle user with no warning, reintroducing the exact "Tor dies in the background" class
-// of bug this workstream exists to fix — and StiqSyncService's own dataSync usage eats into the
-// SAME shared budget, so the effective ceiling is tighter than 6h once both run.
+// StiqSyncService (client/android/app/src/main/java/com/stiq/client/) declares
+// foregroundServiceType="dataSync" for the jittered background wake/drain/sleep sync cycle
+// (offline-first drain over Tor, PLAN.md Obj. 4). The OS force-killing it after the budget
+// elapses would silently abandon an in-flight drain out from under the user with no warning —
+// StiqSyncService gets no special exemption from the API-35 dataSync timeout just because it
+// isn't the only such service anymore.
 //
 // Before ever raising targetSdkVersion past 34, whoever does it MUST:
-//   1. Implement Service.onTimeout(int,int) in BOTH StiqTorService and StiqSyncService so the
-//      forced stop is handled gracefully (persist state, reschedule via WorkManager, surface a
-//      user-visible notification) instead of the daemon just disappearing mid-circuit.
-//   2. Re-verify foregroundServiceType="dataSync" is still the right type for both services, given
-//      the new timeout — an alternative type without this budget may fit better.
+//   1. Implement Service.onTimeout(int,int) in StiqSyncService so the forced stop is handled
+//      gracefully (persist state, reschedule via WorkManager, surface a user-visible
+//      notification) instead of a drain just disappearing mid-cycle.
+//   2. Re-verify foregroundServiceType="dataSync" is still the right type, given the new
+//      timeout — an alternative type without this budget may fit better.
 //   3. Only then remove or raise this guard.
 //
 // STIQ ships sideloaded per-ABI APKs (no Play Store target-API mandate forcing this), so the ONLY
 // way this bump happens is a deliberate one-line edit to targetSdkVersion below — this check makes
-// that edit fail the build loudly instead of shipping a dormant landmine that only detonates after
-// hours of idle background time on a real user's device.
+// that edit fail the build loudly instead of shipping a landmine that only detonates once a real
+// user's device has run the sync service long enough to hit the budget.
 if (rootProject.ext.targetSdkVersion >= 35) {
     throw new GradleException(
         "targetSdkVersion=${rootProject.ext.targetSdkVersion} is BLOCKED (must stay <= 34). Android 15 (API 35) " +
         "starts enforcing a 6h/24h timeout budget on 'dataSync' foreground services " +
         "(Service.onTimeout), and that enforcement is gated on THIS APP'S targetSdkVersion, not " +
         "the device's OS version — so raising it arms the timeout immediately, even on phones " +
-        "already running Android 15/16 today. StiqTorService and StiqSyncService BOTH declare " +
-        "foregroundServiceType=\"dataSync\" and would share that one budget, which would silently " +
-        "kill the backgrounded (deliberately long-dormant) Tor daemon out from under an idle user. " +
-        "Do not raise targetSdkVersion until StiqTorService/StiqSyncService implement " +
-        "Service.onTimeout(int,int) (or move off dataSync) to handle the forced stop gracefully — " +
+        "already running Android 15/16 today. StiqSyncService declares " +
+        "foregroundServiceType=\"dataSync\" for its background sync cycle and would be silently " +
+        "force-killed mid-drain once that budget elapses. " +
+        "Do not raise targetSdkVersion until StiqSyncService implements " +
+        "Service.onTimeout(int,int) (or moves off dataSync) to handle the forced stop gracefully — " +
         "see the comment directly above this check in client/android/build.gradle for the full " +
         "writeup and the required steps."
     )
@@ -73,7 +74,8 @@ allprojects {
     repositories {
         google()
         mavenCentral()
-        // Guardian Project: IPtProxy (obfs4 + Snowflake) and tor-android
+        // Guardian Project: IPtProxy (obfs4 + Snowflake) and tor-android — ctor flavor only,
+        // but repo declarations are global; the arti flavor simply never resolves from them.
         maven { url "https://raw.githubusercontent.com/guardianproject/gpmaven/master" }
         maven { url "https://guardianproject.info/maven" }
     }

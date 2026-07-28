@@ -40,7 +40,7 @@ describe('tor dormancy wrappers', () => {
   });
 
   it('returns false with the default param when the native module is absent (jest/non-Android)', () => {
-    // NativeModules.StiqTor is undefined under jest, so the default-arg path must be a safe no-op.
+    // NativeModules.StiqArti is undefined under jest, so the default-arg path must be a safe no-op.
     expect(torDormant()).toBe(false);
     expect(torActive()).toBe(false);
   });

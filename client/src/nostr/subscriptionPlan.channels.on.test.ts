@@ -37,6 +37,7 @@ import {
   buildReconcileFilter,
   buildChannelChatFilter,
   buildCoverSetFor,
+  buildOpenChatFilters,
   channelChatSince,
   FIREHOSE_FEED_KINDS,
   TEXT_ONLY_FEED_KINDS,
@@ -425,5 +426,52 @@ describe('channelChatSince (the per-channel on-open sub)', () => {
     const store = new InMemoryEventStore();
     store.save(chatIn(CH(1), 100));
     expect(channelChatSince(store, CH(1), 300)).toBe(0);
+  });
+});
+
+describe('buildOpenChatFilters (the on-open scoped sub — since tail + newest-page backfill)', () => {
+  // The 2026-07-28 field bug these pin: "posts inside channels are not loading for some channels
+  // while loading for others." A channel's on-open sub derived its `since` from "newest cached
+  // message for this channel" — but a newest message does NOT imply the history below it is
+  // contiguous. Three producers cache newest-only strays: the standing `channels` sub's SHARED
+  // limit page (newest-N across the whole cover set — after any offline window it hands each busy
+  // channel a thin newest slice), the retention prune (1311 is count-capped globally, keeping the
+  // newest), and the member's own echoed posts. A since-only resub then never reaches below the
+  // stray, and 1311 is OUTSIDE the NIP-77 reconcile universe (FIREHOSE_FEED_KINDS drops it under
+  // SCOPED_CHANNEL_SYNC), so the hole below never heals — that channel reads "posts not loading"
+  // forever while an untouched channel (since reaches back past the hole, or true-cold limit page)
+  // loads fine. The fix: the on-open sub ALWAYS carries a newest-first bounded page alongside the
+  // since tail, so an opened space heals its newest `limit` messages regardless of how the
+  // watermark got poisoned. Re-delivered events dedupe on store.has(id) BEFORE the schnorr verify
+  // (ingest), so the overlap costs bandwidth only.
+  it('POISONED WATERMARK: a stray newest message must not suppress the backfill page', () => {
+    const store = new InMemoryEventStore();
+    // The standing sub's shared page delivered ONE recent message for this channel; the 200
+    // messages behind it were never fetched (the device was offline while they were published).
+    store.save(chatIn(CH(1), 100_000));
+    const since = channelChatSince(store, CH(1), 300);
+    const filters = buildOpenChatFilters([Kind.LiveChat], '#a', CH(1), since, 50);
+    // The since tail alone would ask only for created_at >= 99_700 — the hole stays invisible.
+    // The second, limit-only filter is what heals it.
+    expect(filters).toHaveLength(2);
+    expect(filters[0]).toEqual({kinds: [Kind.LiveChat], '#a': [CH(1)], since: 99_700});
+    expect(filters[1]).toEqual({kinds: [Kind.LiveChat], '#a': [CH(1)], limit: 50});
+  });
+
+  it('COLD: a channel we hold nothing for gets exactly today\'s single limit-only filter', () => {
+    const filters = buildOpenChatFilters([Kind.LiveChat], '#a', CH(2), undefined, 50);
+    expect(filters).toEqual([{kinds: [Kind.LiveChat], '#a': [CH(2)], limit: 50}]);
+  });
+
+  it('carries the group tag key for a group sub (the #h twin has the identical flaw)', () => {
+    const filters = buildOpenChatFilters([9, 11, 12, 7], '#h', 'grp1', 4_700, 50);
+    expect(filters[0]).toEqual({kinds: [9, 11, 12, 7], '#h': ['grp1'], since: 4_700});
+    expect(filters[1]).toEqual({kinds: [9, 11, 12, 7], '#h': ['grp1'], limit: 50});
+  });
+
+  it('never emits since and limit on the SAME filter (khatru treats that as one bounded page)', () => {
+    for (const f of buildOpenChatFilters([Kind.LiveChat], '#a', CH(1), 1_000, 50)) {
+      expect(f.since !== undefined && f.limit !== undefined).toBe(false);
+    }
   });
 });

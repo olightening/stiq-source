@@ -320,3 +320,22 @@ export function channelMessages(store: EventStore, channelCoordinate: string): E
   }
   return folded.sort((a, b) => a.created_at - b.created_at);
 }
+
+/**
+ * The single-message analogue of the {@link channelMessages} fold: `original` with its author's
+ * latest edit applied in place (same id/position, `['edited', ts]` flag), or null when unedited.
+ * Single events resolved by id (quoted-post embeds via AppRuntime.getEvent) must agree with what
+ * the open channel renders — same author-scoping rule, so a foreign "edit" can never rewrite the
+ * preview either.
+ */
+export function foldChannelEdit(store: EventStore, original: Event): Event | null {
+  if (original.kind !== Kind.LiveChat || editTargetId(original)) return null;
+  let latest: Event | null = null;
+  for (const ev of store.query({kinds: [Kind.LiveChat]})) {
+    if (editTargetId(ev) !== original.id || ev.pubkey !== original.pubkey) continue;
+    if (!latest || ev.created_at > latest.created_at) latest = ev;
+  }
+  return latest
+    ? {...original, content: latest.content, tags: [...original.tags, ['edited', String(latest.created_at)], ...promotedTagFrom(latest)]}
+    : null;
+}

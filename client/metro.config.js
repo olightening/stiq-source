@@ -38,12 +38,24 @@ merged.transformer.minifierConfig = {
   },
 };
 
-// Never crawl or watch compiled native build outputs (android/build, .gradle, .cxx). Metro wires
-// resolver.blockList into the file-map's ignore, so this keeps its crawler/watcher out of those
-// volatile directories. It matters most when node_modules is a junction into a checkout that ALSO
-// builds native libraries there during `assembleDebug` — otherwise Metro's Windows file watcher
-// races on those dirs mid-build (fs.watch ENOENT) and crashes createBundleDebugJsAndAssets.
-const ignoreNativeBuild = /[/\\](?:android[/\\]build|\.gradle|\.cxx)[/\\]/;
+// Never crawl or watch compiled native build outputs (android/build, .gradle, .cxx, and Rust's
+// arti-ffi/target). Metro wires resolver.blockList into the file-map's ignore, so this keeps its
+// crawler/watcher out of those volatile directories. It matters most when node_modules is a junction
+// into a checkout that ALSO builds native libraries there during `assembleDebug` — otherwise Metro's
+// Windows file watcher races on those dirs mid-build (fs.watch ENOENT) and crashes
+// createBundleDebugJsAndAssets.
+//
+// `arti-ffi/target` was added after it took the release build down exactly that way:
+//
+//     Error: ENOENT: no such file or directory, watch
+//       '…/client/arti-ffi/target/aarch64-linux-android/debug/deps/rmetaFEyEHn'
+//     Execution failed for task ':app:createBundleReleaseJsAndAssets'
+//
+// A cargo target directory is the worst possible thing to hand a file watcher: multi-GB, tens of
+// thousands of entries, and a constant churn of temp files that exist for milliseconds. Metro has no
+// reason to look in there — nothing under it is ever imported by JS — and crawling it also cost real
+// time on every bundle.
+const ignoreNativeBuild = /[/\\](?:android[/\\]build|\.gradle|\.cxx|arti-ffi[/\\]target)[/\\]/;
 const existingBlockList = merged.resolver.blockList;
 const blockSources = [];
 if (existingBlockList instanceof RegExp) {

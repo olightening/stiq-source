@@ -14,12 +14,12 @@
  * Cutting off an individual is the job of the read-token meter (content stays sealed) plus key
  * rotation, not of per-member onion auth.
  *
- * Tor reads client auth from a `ClientOnionAuthDir` of `<host>.auth_private` files, each ONE line:
- *
- *     <onion-address-without-.onion>:descriptor:x25519:<BASE32 privkey>
- *
- * This PURE module produces that filename + line and validates the key, so the native Tor module
- * can drop the file in place before boot. No native, no fs, no crypto here.
+ * This PURE module derives + validates the credential (bare onion host + base32 key); the native
+ * Tor module is responsible for installing it before boot in whatever shape ITS engine reads. (The
+ * former C-tor backend read a `ClientOnionAuthDir` of `<host>.auth_private` files — one line,
+ * `<onion-address-without-.onion>:descriptor:x25519:<BASE32 privkey>` — built directly in Kotlin;
+ * Arti reads the same base32 secret into its KeyMgr instead, via onionAuthArti.ts's mapper.) No
+ * native, no fs, no crypto here.
  */
 
 /** An x25519 client-auth key is 32 bytes → 52 chars of unpadded uppercase base32. */
@@ -52,6 +52,51 @@ export function onionHostOf(relayUrl: string): string | null {
   const host = s.slice(0, -'.onion'.length);
   // v3 onion addresses are exactly 56 base32 chars.
   return /^[a-z2-7]{56}$/.test(host) ? host : null;
+}
+
+/**
+ * Normalize anything that names a relay onion into the BARE 56-char v3 host the native start
+ * config's `relayOnion` field wants — accepting all three shapes a caller plausibly holds:
+ *   - a relay URL (`ws://<56>.onion/`, `https://<56>.onion:443`) — the common case,
+ *   - a host with the suffix (`<56>.onion`),
+ *   - the bare host already (`<56>`).
+ * Returns null for anything that is not a v3 onion (a clearnet relay URL, a v2 address, junk), so a
+ * non-onion deployment simply carries no probe target rather than sending the native layer garbage.
+ * Pure string work — no `new URL()`, which throws under Hermes (see url.ts).
+ */
+export function relayOnionHostOf(input: string | null | undefined): string | null {
+  if (typeof input !== 'string') return null;
+  const viaUrl = onionHostOf(input);
+  if (viaUrl) return viaUrl;
+  let s = input.trim().toLowerCase();
+  if (s.endsWith('.onion')) s = s.slice(0, -'.onion'.length);
+  return /^[a-z2-7]{56}$/.test(s) ? s : null;
+}
+
+// In-memory ACTIVE relay onion host — the reachability-probe target (TorStartConfig.relayOnion),
+// published on community (re)activation exactly like _activeOnionAuth below. Deliberately SEPARATE
+// from the auth credential: a PUBLIC community has a relay onion but no auth key, and keying the
+// probe off the credential is precisely the bug that left public communities unprotected against
+// Arti's "bootstrap 100% with no usable guards" lie. null = no known relay onion (nothing to probe).
+let _activeRelayOnion: string | null = null;
+
+/**
+ * Publish the active community's relay onion (or null to clear). Accepts a relay URL, a
+ * `<host>.onion`, or a bare host — normalized through {@link relayOnionHostOf}; anything that is
+ * not a v3 onion clears the value rather than storing an unusable target.
+ */
+export function setActiveRelayOnion(relay: string | null | undefined): void {
+  _activeRelayOnion = relayOnionHostOf(relay);
+}
+
+/**
+ * The active community's relay onion host (bare, no `.onion`), or null when none is known.
+ * Deliberately does NOT fall back to {@link getActiveOnionAuth}'s host — that fallback belongs to
+ * the Tor manager, which also has to consider a per-connect onion-auth OVERRIDE (a pending join's
+ * credential) this module-level value knows nothing about.
+ */
+export function getActiveRelayOnion(): string | null {
+  return _activeRelayOnion;
 }
 
 /** A resolved reach credential for the native Tor start config: bare onion host + base32 key. */
@@ -171,22 +216,4 @@ export function preserveDisplacedActivePrimary(
   if (override && override.onionHost === activePrimary.onionHost) return extras.slice();
   if (extras.some(a => a.onionHost === activePrimary.onionHost)) return extras.slice();
   return [activePrimary, ...extras];
-}
-
-/** The client-auth filename Tor expects inside ClientOnionAuthDir for this onion host. */
-export function authPrivateFileName(onionHost: string): string {
-  return `${onionHost}.auth_private`;
-}
-
-/**
- * The single-line body of the `<host>.auth_private` file. Returns null if the host or key is
- * malformed, so the caller never writes a file that would make Tor refuse to start.
- */
-export function authPrivateFileContent(
-  onionHost: string,
-  privKeyBase32: string,
-): string | null {
-  if (!/^[a-z2-7]{56}$/.test(onionHost)) return null;
-  if (!isValidAuthKeyBase32(privKeyBase32)) return null;
-  return `${onionHost}:descriptor:x25519:${privKeyBase32}\n`;
 }

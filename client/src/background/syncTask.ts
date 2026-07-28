@@ -75,9 +75,9 @@ const WARM_TIMEOUT_MS = 45_000;
 // onSynced / socket-close / the wall-clock timeout (up to `remaining() - 2_000`, i.e. up to ~83s), so
 // once the drain's own `await new Promise` begins there is no checkpoint left at all — a resume
 // landing mid-drain silently drops whatever events hadn't arrived yet (the incremental `since` derives
-// from what actually landed) and leaves the relay dead for up to 10s (waitForBackgroundSyncRelease)
-// while `finally` is still mid-drain. 0 disables the poll entirely, reverting the drain to the pre-fix
-// behavior byte-for-byte — see the `if (ABORT_POLL_MS > 0)` guard at the drain below.
+// from what actually landed) and leaves the relay dead for up to waitForBackgroundSyncRelease's own
+// timeout while `finally` is still mid-drain. 0 disables the poll entirely, reverting the drain to the
+// pre-fix behavior byte-for-byte — see the `if (ABORT_POLL_MS > 0)` guard at the drain below.
 const ABORT_POLL_MS = 500;
 
 function trySecureStorage() {
@@ -215,7 +215,7 @@ export async function runBackgroundSync(): Promise<void> {
   // at function entry) leaked ownership forever on either of the two exits above it — the early
   // `return` when there's no relay to sync, or `createEncryptedEventStore` throwing — leaving
   // `backgroundSyncActive` stuck true for the process lifetime, so every later foreground resume ate
-  // the full `waitForBackgroundSyncRelease(10_000)` stall.
+  // the full `waitForBackgroundSyncRelease` timeout as a stall, every single time.
   setBackgroundSyncOwnsTor(true);
 
   // Adopting the foreground's dormant daemon (T4): wake it (SIGNAL ACTIVE) so its idle circuits come

@@ -40,16 +40,18 @@ jest.mock('react-native', () => {
 import {NativeEventEmitter, NativeModules} from 'react-native';
 import {ArtiTorBackend, getArtiTorModule} from './artiBackend';
 import {TorManager} from './TorManager';
-import type {TorBackendEvent, TorStartConfig} from './types';
+import type {TorBackendEvent, TorReachConfig, TorStartConfig} from './types';
 
 const nm = NativeModules as {StiqArti?: unknown};
 const emitterListeners = (NativeEventEmitter as unknown as {
   listeners: Array<{name: string; cb: (e: TorBackendEvent) => void}>;
 }).listeners;
 
-/** A no-op native module whose start/stop record their calls, mirroring the StiqArti surface. */
+/** A no-op native module whose start/stop/installReach record their calls, mirroring the StiqArti
+ *  surface (StiqArtiNativeModule now REQUIRES installReach — see TorManager.installReach()). */
 function makeFakeNative() {
-  const calls: {startConfig?: TorStartConfig; stopped: number} = {stopped: 0};
+  const calls: {startConfig?: TorStartConfig; stopped: number; installReachConfig?: TorReachConfig} =
+    {stopped: 0};
   return {
     calls,
     startTor(config: TorStartConfig): Promise<void> {
@@ -60,6 +62,10 @@ function makeFakeNative() {
       calls.stopped += 1;
       return Promise.resolve();
     },
+    installReach: jest.fn((config: TorReachConfig): Promise<void> => {
+      calls.installReachConfig = config;
+      return Promise.resolve();
+    }),
   };
 }
 
@@ -107,6 +113,23 @@ describe('ArtiTorBackend', () => {
     const backend = new ArtiTorBackend(native);
     await backend.stop();
     expect(native.calls.stopped).toBe(1);
+  });
+
+  it('installReach forwards the config verbatim to native.installReach and returns its promise', async () => {
+    const native = makeFakeNative();
+    const backend = new ArtiTorBackend(native);
+    const config: TorReachConfig = {
+      onionAuth: {onionHost: 'a'.repeat(56), privKeyBase32: 'A'.repeat(52)},
+      relayOnion: 'b'.repeat(56),
+    };
+
+    const result = backend.installReach(config);
+
+    expect(native.installReach).toHaveBeenCalledTimes(1);
+    expect(native.calls.installReachConfig).toBe(config); // forwarded verbatim, no remap
+    // ArtiTorBackend.installReach returns the native call's OWN promise, not a wrapper around it.
+    expect(result).toBe(native.installReach.mock.results[0]!.value);
+    await expect(result).resolves.toBeUndefined();
   });
 
   it('subscribe() wires the StiqTorStatus emitter, forwards events, and unsubscribe removes it', () => {

@@ -21,7 +21,7 @@ import {
   KIND_VOICE_COMMENT,
   KIND_MEDIA_BLOB,
 } from '../contracts';
-import {D_IDENTITY_PROFILE} from '../profile/identityDoc';
+import {D_IDENTITY_BEACON, D_IDENTITY_PROFILE} from '../profile/identityDoc';
 import {clearRecentLogs, getRecentLogs} from '../util/log';
 
 function postBy(sk: Uint8Array, createdAt: number): Event {
@@ -583,6 +583,40 @@ describe('createFeedAndDmPlan', () => {
     const store = new InMemoryEventStore();
     const subs = createFeedAndDmPlan({store, getMyPubkey: () => undefined})();
     expect(subs.find(s => s.subId === 'self-profile')).toBeUndefined();
+  });
+
+  // ── identity BEACONS (d="identity") — the PUBLIC carrier peers learn name/gradient changes
+  //    from. announceIdentity always published it and ingest always understood it, but no sub ever
+  //    requested the d-tag, so a gradient edit reached peers only via the editor's next post. ────
+
+  it('identity-beacons sub: kind 30078 + #d=identity, author-UNSCOPED, since-less, limit-bounded + paginated', () => {
+    const store = new InMemoryEventStore();
+    const me = getPublicKey(generateSecretKey());
+    const subs = createFeedAndDmPlan({store, getMyPubkey: () => me})();
+    const ib = subs.find(s => s.subId === 'identity-beacons')!;
+    expect(ib).toBeDefined();
+    expect(ib.filter.kinds).toEqual([Kind.AppData]);
+    expect(ib.filter['#d']).toEqual([D_IDENTITY_BEACON]);
+    expect(ib.filter.authors).toBeUndefined(); // every member's beacon; leaks nothing about `me`
+    expect(ib.filter.since).toBeUndefined(); // no since — the since-poisoning trap (30078 is outside reconcile)
+    expect(ib.filter.limit).toBe(50); // COLD_FEED_LIMIT default, same bound as self-profile
+    expect(ib.pagination).toEqual({pageSize: 50, delayMs: 50});
+  });
+
+  it('identity-beacons sub stays author-unscoped even on the WARM path (cover set available)', () => {
+    const store = new InMemoryEventStore();
+    Array.from({length: 6}, () => generateSecretKey()).forEach((sk, i) => store.save(postBy(sk, i + 1)));
+    const me = getPublicKey(generateSecretKey());
+    const subs = createFeedAndDmPlan({store, getMyPubkey: () => me, decoyCount: 4})();
+    const ib = subs.find(s => s.subId === 'identity-beacons')!;
+    expect(ib.filter.authors).toBeUndefined(); // decoy cover would EXCLUDE most members' beacons
+    expect(ib.filter.since).toBeUndefined();
+  });
+
+  it('locked (no pubkey): no identity-beacons sub', () => {
+    const store = new InMemoryEventStore();
+    const subs = createFeedAndDmPlan({store, getMyPubkey: () => undefined})();
+    expect(subs.find(s => s.subId === 'identity-beacons')).toBeUndefined();
   });
 });
 

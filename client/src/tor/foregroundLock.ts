@@ -3,9 +3,26 @@
  *
  * There are two Tor drivers: the FOREGROUND app (App.tsx — the latest connection-modes cascade) and
  * the BACKGROUND WorkManager sync (syncTask.ts — a separate, simpler driver). Both reach the SAME
- * native TorService, which runs tor in-process. If the background sync stops/starts Tor while the
- * foreground app owns a live circuit, the two race on the one daemon and tor's in-process re-init
- * trips the `hs_circuitmap` assertion (an abort), which is exactly what stalls onboarding.
+ * native Arti client handle: StiqArtiModule.kt calls into arti-ffi's single process-wide
+ * `handle_slot` (a `Mutex<Option<Handle>>` — see arti-ffi/src/lib.rs), which holds at most one live
+ * TorClient for the whole app process.
+ *
+ * WHY THIS STILL EXISTS UNDER ARTI — read this before deleting the module believing it obsolete: the
+ * ORIGINAL reason it was written is gone. That was C-tor's in-process `tor_run_main()` reentry
+ * hazard, where a second driver starting Tor while the first still owned it could trip the
+ * `hs_circuitmap` assertion and abort the whole process. Arti has no such hazard, and — unlike
+ * C-tor's separately-isolated `:tor` process — Arti now runs in the app's MAIN process, which makes
+ * daemon-ownership coordination between the two drivers MORE worth keeping, not less:
+ *   - `arti_start()` fails CLOSED on a concurrent start (`handle_slot` already holding a live client
+ *     returns `ERR_ALREADY_RUNNING` — defense-in-depth per lib.rs's own comment), so an uncoordinated
+ *     race no longer aborts the process. But whichever driver loses that race still burns a full
+ *     connect attempt — radio time, battery, a bridge-cache read — on an FFI call that was always
+ *     going to be rejected, and surfaces a confusing failure instead of ever getting a connection.
+ *   - The two drivers also share JS-side state this module does not own (bridgeCache, the
+ *     dormant-daemon slot below); letting them run concurrently invites them to stomp each other's
+ *     reads/writes of it, independent of the native handle.
+ * So this module still exists to keep only one driver ever mid-attempt at a time — now for ordinary
+ * duplicated-work/battery reasons, not to prevent a native abort.
  *
  * This module-level state is the deterministic guard. HeadlessJS shares the app's JS runtime while
  * the process is alive, so the state the foreground sets/tracks here IS visible to runBackgroundSync,
@@ -166,10 +183,43 @@ export function waitForBackgroundSyncRelease(timeoutMs: number): Promise<void> {
 /**
  * Runs `action` immediately if nothing currently owns the shared Tor daemon. If the background sync
  * currently owns it, asks it to abort at its next checkpoint (`requestBackgroundSyncAbort`) and waits
- * (bounded by `timeoutMs`, default 10s — the same bound App.tsx's other callers use) for it to
- * release ownership before running `action` — so a foreground caller (dormancy `enter()`, the
- * `StiqTorNetworkChange` live path, dormancy `exit()`/resume) never starts a second, concurrent Tor
- * operation on top of an in-flight background one and stomps it.
+ * (bounded by `timeoutMs`, default 10s) for it to release ownership before running `action` — so a
+ * foreground caller (dormancy `enter()`, the `StiqTorNetworkChange` live path, dormancy
+ * `exit()`/resume) never starts a second, concurrent Tor operation on top of an in-flight background
+ * one and stomps it.
+ *
+ * SIZING THE DEFAULT — verified against syncTask.ts, not assumed: `shouldBackgroundSyncAbort()` is
+ * only consulted by that module's `ownershipOk()` gate BEFORE each native connect begins (its warm
+ * attempt at ~line 242, its cold cascade at ~line 271) — never DURING one. A background sync actually
+ * inside `manager.connect()` (bounded by WARM_TIMEOUT_MS=45s on the warm path, ~line 246; by
+ * `remaining() - 5_000` — up to ~80s — on the cold cascade, ~line 275) cannot observe an abort request
+ * at all; TorManager.connect() has no knowledge of this module or of `shouldBackgroundSyncAbort()`, so
+ * nothing short-circuits it. It only reaches a checkpoint again once that connect call resolves on its
+ * own. A prior version of this comment claimed syncTask.ts's ABORT_POLL_MS (500ms) checkpoint was "the
+ * dominant latency" — that checkpoint only runs in the DRAIN block, i.e. AFTER a connect has already
+ * succeeded, so it does nothing for a sync that is still bootstrapping — which, since connect is by far
+ * the slowest phase (tens of seconds) next to drain (bounded by EOSE, typically fast for a background
+ * sync's small backlog) or setup (local reads), is where a sync spends most of its lifetime.
+ *
+ * Even the phase this WOULD help — post-connect, in the drain — is not a flat 500ms either: releasing
+ * still has to run `manager.disconnect()`, i.e. native stopTor()/`arti_stop()` (arti-ffi/src/lib.rs),
+ * which gives its own graceful drain up to a 2-second STOP_BUDGET before it aborts tasks outright —
+ * that file's own comment records a 845ms measurement on a clean stop, but also that the graceful wait
+ * is "a best-effort hint, not a promise". So the genuinely observable path alone (poll + native stop +
+ * the store-close/key-scrub/relay-close done in between) can approach ~3s worst case, which a 2s
+ * ceiling does not reliably cover either — even taken entirely on the old comment's own terms.
+ *
+ * None of this closes the gap for a sync genuinely stuck deep in connect() — no value here can, short
+ * of threading an abort signal into TorManager.connect() itself (out of scope for this guard; connect's
+ * own no-progress timeout is the only thing bounding that case). But `waitForBackgroundSyncRelease`
+ * already resolves the instant release actually fires, whichever comes first (see below) — so a longer
+ * ceiling costs nothing in the common case (no sync running, or one that's between phases) and only
+ * spends time in the tail, where it also gives a slow-but-almost-done connect a real chance to land
+ * inside the window instead of guaranteeing a same-process double start of the shared native handle.
+ * 10s was this guard's value under C-tor for a related reason (yielding to a slow-STOPPING daemon —
+ * TorManager.isLive()'s doc comment records C-tor's stop as a bounded ~10s control-channel poll); it
+ * remains a reasonable ceiling now for a different one (yielding to a slow-STARTING daemon whose own
+ * bootstrap this guard cannot interrupt).
  *
  * `isStillValid`, if given, is re-checked right before `action` runs (both on the immediate path and
  * after the wait): if it returns false, `action` is skipped. This matters for the awaited path

@@ -253,6 +253,63 @@ type Config struct {
 	// in the SIGHUP hot-reload set, so changing them requires a relay restart to take effect.
 	PushWatcherOnion string `json:"push_watcher_onion"`
 	PushNtfyOnion    string `json:"push_ntfy_onion"`
+	// WebsocketCompression toggles RFC 7692 permessage-deflate on the relay's WebSocket.
+	//
+	// It is a POINTER so the file can distinguish "not mentioned" (nil ⇒ the shipped default, ON)
+	// from an explicit `"websocket_compression": false`. Read it through
+	// WebsocketCompressionEnabled(), never directly.
+	//
+	// Leaving it ON is safe for an un-updated client fleet by protocol construction: the server only
+	// ever compresses a connection whose client OFFERED the extension in its handshake
+	// (Sec-WebSocket-Extensions). The shipped client's hand-rolled WebSocket sends no such header, so
+	// its handshake response and every frame on it are byte-identical to a relay with this off. The
+	// cost only arrives with a client that asks for it.
+	//
+	// It exists as a kill switch because the cost is MEMORY, and this relay's host is memory-tight:
+	// the underlying library (fasthttp/websocket, a gorilla fork) compresses with a pooled
+	// klauspost/compress flate.Writer, measured at ~810 KB of live heap each, held for the duration
+	// of one outbound message. The pool bounds that by peak CONCURRENT writes rather than by
+	// connection count (no-context-takeover is the only mode the library implements), but a burst of
+	// simultaneous cold-start feed responses still costs ~0.8 MB per concurrently-writing connection.
+	// If the box starts pressuring memory, set this false and SIGHUP will NOT pick it up — it is
+	// restart-only (see relayapp.enableWebsocketCompression).
+	//
+	// RESTART-ONLY. khatru reads the upgrader once per handshake off an unsynchronised struct field;
+	// swapping it under live traffic would be a data race, so it is deliberately not in Reloader.Apply.
+	WebsocketCompression *bool `json:"websocket_compression"`
+}
+
+// DefaultWebsocketCompression is the shipped default for websocket_compression when the config file
+// does not mention it. See Config.WebsocketCompression for why ON is safe for an un-updated fleet.
+const DefaultWebsocketCompression = true
+
+// WebsocketCompressionEnabled resolves the tri-state websocket_compression field: an absent key
+// yields DefaultWebsocketCompression, an explicit true/false yields itself.
+func (c Config) WebsocketCompressionEnabled() bool {
+	if c.WebsocketCompression == nil {
+		return DefaultWebsocketCompression
+	}
+	return *c.WebsocketCompression
+}
+
+// EffectiveMaxEventBytes / EffectiveMaxTagsPerEvent return the weight caps the relay actually
+// enforces, substituting the shipped defaults for an unset (0) value exactly as Load does. Load
+// already performs that substitution for a config read off disk, but Config values are also built
+// directly in tests and by embedders, and the NIP-11 document must advertise the number that is
+// really enforced in BOTH cases — an advertised cap that differs from the enforced one costs a Tor
+// round-trip to discover.
+func (c Config) EffectiveMaxEventBytes() int {
+	if c.MaxEventBytes > 0 {
+		return c.MaxEventBytes
+	}
+	return DefaultMaxEventBytes
+}
+
+func (c Config) EffectiveMaxTagsPerEvent() int {
+	if c.MaxTagsPerEvent > 0 {
+		return c.MaxTagsPerEvent
+	}
+	return DefaultMaxTagsPerEvent
 }
 
 func Load(path string) (Config, error) {

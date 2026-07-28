@@ -1,4 +1,4 @@
-import {calmRejection} from './rejectionMessages';
+import {calmRejection, isTokenFamilyRejection, DRAW_TIMEOUT_TOKEN_REASON} from './rejectionMessages';
 import {isRetryable, parseRejection} from '../nostr/rejection';
 
 /** Guard the acceptance rule: no calm text/next-step may leak a bracket, a bare "blocked:", or a code. */
@@ -42,6 +42,37 @@ describe('calmRejection — token family', () => {
     expect(c.text).toContain('1');
     expect(c.text).toBe('This post needs 3 tokens; you have 1.');
     expect(c.retryable).toBe(false);
+    assertClean(c);
+  });
+});
+
+describe('isTokenFamilyRejection (the runtime\'s draw-timeout substitution gate)', () => {
+  it('recognises every code whose calm copy claims "out of tokens"', () => {
+    for (const raw of [
+      '[token_required] blocked: this community requires a posting token',
+      '[space_token_required] blocked: this community requires a space token for this content',
+      '[token_insufficient] blocked: event needs 3 tokens, has 1',
+      '[token_spent] blocked: token already spent',
+      '[holder_proof_invalid] blocked: too many holder proofs',
+    ]) {
+      expect(isTokenFamilyRejection(raw)).toBe(true);
+    }
+  });
+
+  it('leaves every non-token rejection alone', () => {
+    for (const raw of [
+      '[content_too_long] blocked: post too long',
+      '[not_a_member] blocked: not a member',
+      '[rate_limited] blocked: daily limit',
+      'some relay prose with no code at all',
+    ]) {
+      expect(isTokenFamilyRejection(raw)).toBe(false);
+    }
+  });
+
+  it('the substituted copy renders verbatim through calmRejection (no [code] → raw-prose fallback)', () => {
+    const c = calmRejection(DRAW_TIMEOUT_TOKEN_REASON);
+    expect(c.text).toBe(DRAW_TIMEOUT_TOKEN_REASON);
     assertClean(c);
   });
 });

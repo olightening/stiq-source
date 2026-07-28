@@ -32,7 +32,7 @@ export interface FeedItem {
   /** Locally-resolved display name (relay-blind phonebook, longest-held-wins). Undefined when
    * unknown or when this author is not the rightful owner of the name they claim. */
   authorName?: string;
-  /** The author's crafted gradient identity, if they've published one (relay-blind, first-claim-wins).
+  /** The author's crafted gradient identity, if they've published one (relay-blind, latest-wins).
    * Undefined → the renderer derives a stable gradient from the author's pubkey. */
   authorGradient?: GradientSpec;
   /** Nostr event kind (1 = note, 30023 = NIP-23 article). */
@@ -246,8 +246,9 @@ function prepareFeedItems(
   const {visible, moderationLog, stiqComments} = buildModeratedFeed(store, npubs, autoCfg);
 
   // Pass 1: learn every author's embedded display name + gradient (claim time = event created_at)
-  // BEFORE resolving any item, so longest-held-wins (names) and first-claim-wins (gradients)
-  // ownership is correct regardless of feed order.
+  // BEFORE resolving any item, so longest-held-wins (names) and latest-wins (gradients — see
+  // gradientIdentity.record(): a newer sighting from the same pubkey always replaces) ownership is
+  // correct regardless of feed order.
   if (names || grads) {
     for (const post of visible) {
       // Blind posts carry name/gradient inside the encrypted attestation (keyed on the real

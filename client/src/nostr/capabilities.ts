@@ -453,6 +453,49 @@ export function parseRelayCapabilities(doc: unknown): RelayCapabilities {
   return caps;
 }
 
+/** The relay's hard-enforced protocol switches — the block sticky negotiation is about. */
+export type EnforcedFlags = RelayCapabilities['enforcedFlags'];
+
+/**
+ * The enforcement fields a NIP-11 document EXPLICITLY advertises — present in the stiq block's
+ * `enforced` object with the right type — as a PARTIAL overlay. This is the input to the sticky
+ * per-community enforcement contract (AppRuntime._stickyEnforced):
+ *
+ *   ONLY an explicit advertisement may change what the client believes a community enforces.
+ *   Absence — a failed NIP-11 fetch, a doc with no stiq block, or a block missing a field — is
+ *   NEVER a downgrade signal.
+ *
+ * Why this exists (2026-07-28 field bug, CONFIRMED): the constant fallback sets
+ * `spaceTokensRequired: false`, and both a community switch and a cold start reset to it. In any
+ * window where the relay WS is up but the NIP-11 fetch is failing (its own Tor circuit — the
+ * outage's exact split-brain), a token-enforcing community received token-less space writes BY
+ * DESIGN and rejected every one as "out of tokens". Distinguishing "the doc said false" from "we
+ * couldn't read the doc" is exactly the information {@link parseRelayCapabilities} discards, so
+ * this companion reader recovers it. The inverse hazard (attaching tokens against a non-enforcing
+ * relay, which rejects token-tagged kinds) stays covered because a sticky flag only ever SETS from
+ * an explicit advertisement — never from a guess.
+ */
+export function explicitEnforcedFlags(doc: unknown): Partial<EnforcedFlags> {
+  if (!isObject(doc)) return {};
+  const stiq = doc['stiq-capabilities'] ?? doc['stiq_capabilities'];
+  if (!isObject(stiq) || !isObject(stiq.enforced)) return {};
+  const e = stiq.enforced;
+  const out: Partial<EnforcedFlags> = {};
+  if (typeof e.blind_required === 'boolean') out.blindRequired = e.blind_required;
+  if (typeof e.private_group_read_auth === 'boolean') {
+    out.privateGroupReadAuth = e.private_group_read_auth;
+  }
+  if (typeof e.bytes_per_token === 'number' && Number.isFinite(e.bytes_per_token)) {
+    out.bytesPerToken = e.bytes_per_token;
+  }
+  if (typeof e.content_encryption === 'boolean') out.contentEncryption = e.content_encryption;
+  if (typeof e.read_auth_required === 'boolean') out.readAuthRequired = e.read_auth_required;
+  if (typeof e.space_tokens_required === 'boolean') {
+    out.spaceTokensRequired = e.space_tokens_required;
+  }
+  return out;
+}
+
 /**
  * Fetch + parse the relay's capabilities via an injected NIP-11 getter (the host supplies the
  * HTTP-over-Tor transport — see AppRuntimeDeps.fetchRelayInfo). Any error — offline, non-JSON,

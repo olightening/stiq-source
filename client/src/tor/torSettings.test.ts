@@ -134,6 +134,20 @@ describe('normalizePrefs', () => {
     ).toBe('obfs4');
   });
 
+  // ALL_TRANSPORTS used to be a plain `TransportType[]`, which compiles fine forever even when it
+  // under-lists the union — and the failure mode is invisible: normalizePrefs() drops a persisted
+  // preference for the missing transport as if it were garbage input, no error, the user's pinned
+  // choice just reverts. It is now a `Record<TransportType, true>`, so tsc fails if a future
+  // TransportType member is left out. This test pins the runtime half of that.
+  it('accepts every current TransportType member as a persisted preference', () => {
+    for (const transport of ['direct', 'webtunnel', 'obfs4', 'snowflake'] as const) {
+      expect(
+        normalizePrefs({mode: 'custom', preferredTransport: transport, customBridges: []})
+          .preferredTransport,
+      ).toBe(transport);
+    }
+  });
+
   it('sanitizes and dedupes custom bridges', () => {
     const p = normalizePrefs({mode: 'custom', customBridges: [OBFS4, OBFS4, SNOWFLAKE, VANILLA]});
     expect(p.customBridges).toEqual([OBFS4]);
@@ -216,5 +230,59 @@ describe('TorSettingsStore', () => {
     expect(store.getPrefs()).toEqual(DEFAULT_TOR_PREFS);
     await expect(store.setPrefs({mode: 'fast', customBridges: []})).resolves.toBeUndefined();
     expect(store.getPrefs().mode).toBe('fast');
+  });
+});
+
+/**
+ * WEBTUNNEL end-to-end through the settings layer. It is the transport that still evades the DPI
+ * obfs4 no longer does, so "nominally listed" is not good enough: a user who pins it plus pastes
+ * their own private webtunnel bridges must get exactly that back after a restart, and the real
+ * line shapes BridgeDB hands out (placeholder IPv6 in brackets, `ver=` present or absent) must
+ * survive the paste validator rather than being silently dropped.
+ */
+describe('webtunnel end-to-end through torSettings', () => {
+  // Real published shapes: an RFC 3849 documentation IPv6 in brackets (the NORMAL webtunnel case —
+  // the client dials `url=` and never touches the address), and a line carrying no ver= at all.
+  const WT_V6 =
+    'webtunnel [2001:db8:1b75:cd28:36c7:1347:3eda:a01e]:443 ' +
+    '2852538D49D7D73C1A6694FC492104983A9C4FA2 url=https://example.net/IfuJ9KsjkEk6462QblGNI0pR ver=0.0.3';
+  const WT_NO_VER =
+    'webtunnel 10.0.0.2:443 F76C85011FD8C113AA00960BD9FC7F5B66F726A2 url=https://example.org/vM8i19';
+
+  it('accepts the real published webtunnel line shapes (bracketed IPv6, no ver=)', () => {
+    expect(validateBridgeLine(WT_V6)).toBe('webtunnel');
+    expect(validateBridgeLine(WT_NO_VER)).toBe('webtunnel');
+    expect(parseBridgeLines(`${WT_V6}\n${WT_NO_VER}`)).toEqual([WT_V6, WT_NO_VER]);
+    expect(validateBridgeLines(`${WT_V6}\n${WT_NO_VER}`)).toMatchObject({
+      valid: true,
+      count: 2,
+      kind: 'webtunnel',
+    });
+  });
+
+  it('round-trips a pinned webtunnel transport + pasted webtunnel bridges through storage', async () => {
+    const storage = new InMemorySecureStorage();
+    await new TorSettingsStore(storage).setPrefs({
+      mode: 'custom',
+      preferredTransport: 'webtunnel',
+      customBridges: [WT_V6, WT_NO_VER],
+      bootstrapTimeoutMs: 90_000,
+    });
+
+    const reloaded = new TorSettingsStore(storage);
+    await reloaded.load();
+
+    expect(reloaded.getPrefs()).toEqual({
+      mode: 'custom',
+      preferredTransport: 'webtunnel',
+      customBridges: [WT_V6, WT_NO_VER],
+      bootstrapTimeoutMs: 90_000,
+    });
+    // And the cascade can actually pick those lines back out for the webtunnel rung.
+    expect(customBridgesForTransport(reloaded.getPrefs(), 'webtunnel')).toEqual([
+      WT_V6,
+      WT_NO_VER,
+    ]);
+    expect(inferCustomTransport(reloaded.getPrefs())).toBe('webtunnel');
   });
 });
