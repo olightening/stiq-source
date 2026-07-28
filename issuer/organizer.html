@@ -12,13 +12,35 @@ body{background:var(--bg);color:var(--tx);font:15px/1.6 system-ui,sans-serif;min
 header{background:var(--surf);border-bottom:1px solid var(--bdr);padding:14px 28px;display:flex;align-items:center;gap:10px}
 header h1{font-size:19px;font-weight:800}
 header span{color:var(--mu);font-size:12px}
-nav{display:flex;gap:2px;padding:18px 28px 0;border-bottom:1px solid var(--bdr)}
-nav button{background:none;border:none;color:var(--mu);font-size:14px;padding:9px 16px;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;transition:color .15s}
-nav button.on{color:var(--tx);border-color:var(--acc);font-weight:600}
-nav button:hover:not(.on){color:var(--tx)}
-main{max-width:700px;margin:0 auto;padding:28px}
+.shell{display:flex;align-items:flex-start}
+nav{flex:0 0 200px;position:sticky;top:0;max-height:100vh;overflow-y:auto;padding:20px 12px 40px 20px;border-right:1px solid var(--bdr)}
+.nhead{font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:#585858;margin:20px 10px 6px}
+.ngroup:first-child .nhead{margin-top:0}
+nav button{display:block;width:100%;text-align:left;background:none;border:none;border-left:2px solid transparent;color:var(--mu);font-size:13px;line-height:1.35;padding:7px 10px;border-radius:0 7px 7px 0;cursor:pointer;transition:color .12s,background .12s,border-color .12s}
+nav button:hover:not(.on){color:var(--tx);background:#151515}
+nav button.on{color:var(--tx);background:#141c2c;border-left-color:var(--acc);font-weight:600}
+main{flex:1;min-width:0;max-width:760px;margin:0 auto;padding:30px 28px 60px}
 section{display:none}
-section.on{display:block}
+section.on{display:block;animation:tabfade .16s ease}
+@keyframes tabfade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){section.on{animation:none}}
+h3.blk{font-size:15px;font-weight:700;margin:0 0 4px}
+details.legacy{border:1px solid #2a2317;border-radius:10px;margin-top:30px;background:#141210}
+details.legacy>summary{cursor:pointer;padding:12px 16px;font-size:12px;font-weight:600;color:#9a8a66;list-style:none;display:flex;align-items:center;gap:8px}
+details.legacy>summary::-webkit-details-marker{display:none}
+details.legacy>summary::before{content:'▸';font-size:10px;transition:transform .15s}
+details.legacy[open]>summary::before{transform:rotate(90deg)}
+details.legacy[open]>summary{border-bottom:1px solid #2a2317}
+details.legacy .lbody{padding:16px 16px 20px}
+@media (max-width:840px){
+  .shell{display:block}
+  nav{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:2px;max-height:none;overflow-x:auto;overflow-y:hidden;border-right:none;border-bottom:1px solid var(--bdr);background:var(--bg);padding:8px 14px;white-space:nowrap;-webkit-overflow-scrolling:touch}
+  .ngroup{display:flex;align-items:center;gap:2px}
+  .nhead{margin:0 4px 0 14px}
+  .ngroup:first-child .nhead{margin-left:0}
+  nav button{display:inline-block;width:auto;border-left:none;border-radius:7px;padding:6px 10px}
+  nav button.on{background:#182236}
+}
 h2{font-size:17px;font-weight:700;margin-bottom:4px}
 p.sub{color:var(--mu);font-size:12px;margin-bottom:22px}
 label{display:block;font-size:12px;color:var(--mu);margin:16px 0 5px}
@@ -69,43 +91,58 @@ input.lim:focus{border-color:var(--acc)}
   <span class="badge" id="health-pill" title="GET /health">checking…</span>
 </header>
 
+<div class="shell">
 <nav id="nav">
-  <button class="on" onclick="switchTab('join')">Join Codes</button>
-  <button onclick="switchTab('invites')">Invites</button>
-  <button onclick="switchTab('community')">Community Code</button>
-  <button onclick="switchTab('sign')">Sign Member</button>
-  <button onclick="switchTab('mods')">Moderators</button>
-  <button onclick="switchTab('tags')">Tags</button>
-  <button onclick="switchTab('limits')">Limits</button>
-  <button onclick="switchTab('tokens')">Tokens</button>
-  <button onclick="switchTab('activation')">Activation</button>
-  <button onclick="switchTab('labels')">Labels</button>
-  <button onclick="switchTab('postrules')">Post Rules</button>
-  <button onclick="switchTab('pictures')">Pictures</button>
-  <button onclick="switchTab('audio')">Audio</button>
-  <button onclick="switchTab('readaccess')">Read access</button>
-  <button onclick="switchTab('reasons')">Reasons</button>
-  <button onclick="switchTab('perms')">Permissions</button>
-  <button onclick="switchTab('modlimits')">Mod Limits</button>
-  <button onclick="switchTab('gov')">Governance</button>
-  <button onclick="switchTab('community-cfg')">Community</button>
-  <button onclick="switchTab('logpage')">Log Page</button>
-  <button onclick="switchTab('ranking')">Rising</button>
-  <button onclick="switchTab('storage')">Storage</button>
-  <button onclick="switchTab('safebrowsing')">Safe Browsing</button>
-  <button onclick="switchTab('relays')">Relays</button>
-  <button onclick="switchTab('guidelines')">Guidelines</button>
-  <button onclick="switchTab('maintenance')">Maintenance</button>
+  <div class="ngroup">
+    <div class="nhead">Members</div>
+    <button class="on" data-tab="onboard" onclick="switchTab('onboard')">Onboarding</button>
+  </div>
+  <div class="ngroup">
+    <div class="nhead">Community</div>
+    <button data-tab="community-cfg" onclick="switchTab('community-cfg')">Identity</button>
+    <button data-tab="logpage" onclick="switchTab('logpage')">Log Page</button>
+    <button data-tab="guidelines" onclick="switchTab('guidelines')">Guidelines</button>
+    <button data-tab="gov" onclick="switchTab('gov')">Governance</button>
+  </div>
+  <div class="ngroup">
+    <div class="nhead">Posting</div>
+    <button data-tab="postrules" onclick="switchTab('postrules')">Post Rules</button>
+    <button data-tab="labels" onclick="switchTab('labels')">Labels</button>
+    <button data-tab="tags" onclick="switchTab('tags')">Tags</button>
+    <button data-tab="media" onclick="switchTab('media')">Media</button>
+    <button data-tab="ranking" onclick="switchTab('ranking')">Rising</button>
+  </div>
+  <div class="ngroup">
+    <div class="nhead">Moderation</div>
+    <button data-tab="mods" onclick="switchTab('mods')">Moderators</button>
+    <button data-tab="perms" onclick="switchTab('perms')">Permissions</button>
+    <button data-tab="modlimits" onclick="switchTab('modlimits')">Mod Limits</button>
+    <button data-tab="reasons" onclick="switchTab('reasons')">Reasons</button>
+    <button data-tab="readaccess" onclick="switchTab('readaccess')">Read Access</button>
+  </div>
+  <div class="ngroup">
+    <div class="nhead">Anti-spam</div>
+    <button data-tab="limits" onclick="switchTab('limits')">Rate Limits</button>
+    <button data-tab="tokens" onclick="switchTab('tokens')">Tokens</button>
+    <button data-tab="activation" onclick="switchTab('activation')">Activation</button>
+  </div>
+  <div class="ngroup">
+    <div class="nhead">Server</div>
+    <button data-tab="relays" onclick="switchTab('relays')">Relays</button>
+    <button data-tab="storage" onclick="switchTab('storage')">Storage</button>
+    <button data-tab="safebrowsing" onclick="switchTab('safebrowsing')">Safe Browsing</button>
+    <button data-tab="maintenance" onclick="switchTab('maintenance')">Maintenance</button>
+  </div>
 </nav>
 
 <main>
 
-<!-- JOIN CODES -->
-<section id="tab-join" class="on">
-  <h2>Join Codes</h2>
-  <p class="sub">The recommended way to onboard. One code carries the relay, your issuer key, your
-    organizer mailbox, and a single-use invite. The member pastes or scans it — then the app
-    fetches their credential automatically over Tor. No back-and-forth.</p>
+<!-- ONBOARDING: join codes (the recommended path) + every minted code + legacy manual tools -->
+<section id="tab-onboard" class="on">
+  <h2>Onboarding</h2>
+  <p class="sub">One join code carries the relay, your issuer key, your organizer mailbox, and an
+    invite. The member pastes or scans it — then the app fetches their credential automatically
+    over Tor. No back-and-forth.</p>
   <div class="row" style="gap:22px;flex-wrap:wrap;align-items:flex-start;margin-top:0">
     <div>
       <label style="margin-top:0">Uses</label>
@@ -148,119 +185,125 @@ input.lim:focus{border-color:var(--acc)}
     </div>
   </div>
   <div id="join-err" class="err" style="display:none"></div>
-</section>
 
-<!-- INVITES -->
-<section id="tab-invites">
-  <h2>Member Invites <span class="badge" id="inv-count">—</span></h2>
-  <p class="sub">Generate one code per person (or a multi-use code for a group). They enter it in the app
-    before enrolling.</p>
-  <div class="row" style="gap:22px;flex-wrap:wrap;align-items:flex-start;margin-top:0">
-    <div>
-      <label style="margin-top:0">Uses</label>
-      <div style="display:flex;gap:8px;align-items:center">
-        <input type="number" id="inv-uses" min="1" value="1" style="width:64px;height:34px;padding:0 8px;font-size:13px;background:var(--surf);border:1px solid var(--bdr);color:var(--tx);border-radius:6px;outline:none">
-        <label style="font-size:12px;color:var(--mu);display:flex;gap:5px;align-items:center;cursor:pointer"><input type="checkbox" id="inv-uses-unl" onchange="onUsesUnl('inv-uses','inv-uses-unl')"> unlimited</label>
-      </div>
-    </div>
-    <div>
-      <label style="margin-top:0">Expires</label>
-      <div style="display:flex;gap:8px;align-items:center">
-        <input type="number" id="inv-exp-n" min="1" value="7" style="display:none;width:64px;height:34px;padding:0 8px;font-size:13px;background:var(--surf);border:1px solid var(--bdr);color:var(--tx);border-radius:6px;outline:none">
-        <select id="inv-exp-unit" onchange="onExpUnit('inv-exp-n','inv-exp-unit')" style="height:34px;padding:0 10px;font-size:13px;background:var(--surf);border:1px solid var(--bdr);color:var(--tx);border-radius:6px;outline:none">
-          <option value="">Never</option>
-          <option value="min">Minutes</option>
-          <option value="hour">Hours</option>
-          <option value="day">Days</option>
-        </select>
-      </div>
-    </div>
-  </div>
-  <div class="row" style="margin-top:14px">
-    <button class="btn" onclick="genInvite()">+ Generate invite code</button>
-  </div>
-  <div id="new-inv" style="display:none;margin-top:16px">
-    <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center">
-      <div class="qrbox"><img id="new-inv-qr" width="130" height="130" alt="QR"></div>
-      <div style="flex:1">
-        <div class="bigcode" id="new-inv-code">
-          <button class="cpbtn" onclick="copyEl('new-inv-text')">Copy</button>
-          <span id="new-inv-text"></span>
-        </div>
-        <div class="ok" id="new-inv-note" style="font-size:12px">Single use — share with one person only.</div>
-        <div style="font-size:12px;color:var(--mu);margin-top:4px" id="new-inv-exp"></div>
-      </div>
-    </div>
-  </div>
+  <div class="divider"></div>
+
+  <h3 class="blk">Minted codes <span class="badge" id="inv-count">—</span></h3>
+  <p class="sub">Every code you've generated — join codes and legacy invites alike. Adjust a code's
+    uses or expiry, copy it again, or revoke it.</p>
   <div id="inv-err" class="err" style="display:none"></div>
-  <table style="margin-top:20px">
+  <table style="margin-top:14px">
     <thead><tr><th>Code</th><th>Status</th><th>Uses</th><th>Created</th><th>Expires</th><th></th></tr></thead>
     <tbody id="inv-body"><tr><td colspan="6" style="color:var(--mu);padding:16px 8px">No invites yet.</td></tr></tbody>
   </table>
-</section>
 
-<!-- COMMUNITY CODE -->
-<section id="tab-community">
-  <h2>Community Code</h2>
-  <p class="sub">Share this with members — it encodes the relay address and your issuer public key. No secrets here.</p>
-  <div style="display:flex;gap:28px;flex-wrap:wrap;align-items:flex-start;margin-top:6px">
-    <div>
-      <div class="qrbox"><img id="comm-qr" width="170" height="170" alt="Community QR"></div>
-      <div class="row" style="justify-content:center">
-        <button class="btn ghost sm" onclick="copyText(communityCode)">Copy code text</button>
-      </div>
-    </div>
-    <div style="flex:1;min-width:200px">
-      <label style="margin-top:0">Full community code</label>
-      <div class="code" id="comm-code-box" style="font-size:10px">
-        Loading…
-        <button class="cpbtn" onclick="copyText(communityCode)">Copy</button>
-      </div>
-      <label>Relay onion</label>
-      <div class="code" style="font-size:10px;color:#ccc">ws://stiqexamplerelayonionaddressfortestsonly2345672345672345.onion</div>
-    </div>
-  </div>
-</section>
-
-<!-- SIGN MEMBER -->
-<section id="tab-sign">
-  <h2>Sign Member Enrollment</h2>
-  <p class="sub">Member opens the app, enters invite code, app shows a <strong>Request Code</strong>. Scan it here or paste it, then show the <strong>Response QR</strong> to the member.</p>
-
-  <div style="margin-bottom:16px">
-    <button class="btn ghost" id="cam-btn" onclick="startCam()">&#128247; Scan request QR from phone screen</button>
-    <button class="btn ghost" id="cam-stop" onclick="stopCam()" style="display:none">&#9209; Stop camera</button>
-    <div id="cam-box" style="display:none;margin-top:10px;position:relative">
-      <video id="cam-video" autoplay muted playsinline style="width:100%;max-width:460px;border-radius:8px;background:#000"></video>
-      <canvas id="cam-canvas" style="display:none"></canvas>
-      <div id="cam-overlay" style="position:absolute;top:7px;left:7px;background:rgba(0,0,0,.65);color:#4caf80;font-size:12px;padding:3px 8px;border-radius:4px">Scanning…</div>
-    </div>
-  </div>
-
-  <label>Member request code (paste or scan above)</label>
-  <textarea id="req-in" rows="3" placeholder="stiq:cred-req:1;STIQ-XXXX-XXXX;…" spellcheck="false"></textarea>
-  <div class="row">
-    <button class="btn" id="sign-btn" onclick="doSign()">Sign</button>
-    <button class="btn ghost" onclick="clearSign()">Clear</button>
-  </div>
-  <div id="sign-err" class="err" style="display:none"></div>
-  <div id="sign-res" style="display:none;margin-top:20px">
-    <div class="info" style="margin-top:0">Show this QR to the member — they scan it with their phone camera to complete enrollment.</div>
-    <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start;margin-top:14px">
-      <div style="text-align:center">
-        <div class="qrbox"><img id="resp-qr" width="200" height="200" alt="Response QR"></div>
-        <div style="font-size:11px;color:#4caf80;margin-top:6px">Member scans → app opens</div>
-      </div>
-      <div style="flex:1">
-        <label style="margin-top:0">Response code (manual paste if needed)</label>
-        <div class="code" style="font-size:10px;min-height:54px;position:relative">
-          <span id="resp-text"></span>
-          <button class="cpbtn" onclick="copyEl('resp-text')">Copy</button>
+  <details class="legacy">
+    <summary>Manual &amp; legacy onboarding tools</summary>
+    <div class="lbody">
+      <h3 class="blk">Invite code only</h3>
+      <p class="sub">The pre-join-code flow: a bare invite code the member types in the app before
+        enrolling. Prefer a join code — it carries the invite plus everything else in one string.</p>
+      <div class="row" style="gap:22px;flex-wrap:wrap;align-items:flex-start;margin-top:0">
+        <div>
+          <label style="margin-top:0">Uses</label>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="number" id="inv-uses" min="1" value="1" style="width:64px;height:34px;padding:0 8px;font-size:13px;background:var(--surf);border:1px solid var(--bdr);color:var(--tx);border-radius:6px;outline:none">
+            <label style="font-size:12px;color:var(--mu);display:flex;gap:5px;align-items:center;cursor:pointer"><input type="checkbox" id="inv-uses-unl" onchange="onUsesUnl('inv-uses','inv-uses-unl')"> unlimited</label>
+          </div>
         </div>
-        <div class="ok" style="font-size:12px">Signed. Invite marked used. The member's identity is unknown to you — you only signed a blinded token.</div>
+        <div>
+          <label style="margin-top:0">Expires</label>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="number" id="inv-exp-n" min="1" value="7" style="display:none;width:64px;height:34px;padding:0 8px;font-size:13px;background:var(--surf);border:1px solid var(--bdr);color:var(--tx);border-radius:6px;outline:none">
+            <select id="inv-exp-unit" onchange="onExpUnit('inv-exp-n','inv-exp-unit')" style="height:34px;padding:0 10px;font-size:13px;background:var(--surf);border:1px solid var(--bdr);color:var(--tx);border-radius:6px;outline:none">
+              <option value="">Never</option>
+              <option value="min">Minutes</option>
+              <option value="hour">Hours</option>
+              <option value="day">Days</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <button class="btn" onclick="genInvite()">+ Generate invite code</button>
+      </div>
+      <div id="new-inv" style="display:none;margin-top:16px">
+        <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center">
+          <div class="qrbox"><img id="new-inv-qr" width="130" height="130" alt="QR"></div>
+          <div style="flex:1">
+            <div class="bigcode" id="new-inv-code">
+              <button class="cpbtn" onclick="copyEl('new-inv-text')">Copy</button>
+              <span id="new-inv-text"></span>
+            </div>
+            <div class="ok" id="new-inv-note" style="font-size:12px">Single use — share with one person only.</div>
+            <div style="font-size:12px;color:var(--mu);margin-top:4px" id="new-inv-exp"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <h3 class="blk">Community code</h3>
+      <p class="sub">Share this with members — it encodes the relay address and your issuer public key. No secrets here. A join code already carries all of it.</p>
+      <div style="display:flex;gap:28px;flex-wrap:wrap;align-items:flex-start;margin-top:6px">
+        <div>
+          <div class="qrbox"><img id="comm-qr" width="170" height="170" alt="Community QR"></div>
+          <div class="row" style="justify-content:center">
+            <button class="btn ghost sm" onclick="copyText(communityCode)">Copy code text</button>
+          </div>
+        </div>
+        <div style="flex:1;min-width:200px">
+          <label style="margin-top:0">Full community code</label>
+          <div class="code" id="comm-code-box" style="font-size:10px">
+            Loading…
+            <button class="cpbtn" onclick="copyText(communityCode)">Copy</button>
+          </div>
+          <label>Relay onion</label>
+          <div class="code" style="font-size:10px;color:#ccc">ws://stiqexamplerelayonionaddressfortestsonly2345672345672345.onion</div>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <h3 class="blk">Sign a member enrollment by hand</h3>
+      <p class="sub">The offline fallback. Member opens the app, enters an invite code, and the app shows a <strong>Request Code</strong>. Scan it here or paste it, then show the <strong>Response QR</strong> to the member.</p>
+
+      <div style="margin-bottom:16px">
+        <button class="btn ghost" id="cam-btn" onclick="startCam()">&#128247; Scan request QR from phone screen</button>
+        <button class="btn ghost" id="cam-stop" onclick="stopCam()" style="display:none">&#9209; Stop camera</button>
+        <div id="cam-box" style="display:none;margin-top:10px;position:relative">
+          <video id="cam-video" autoplay muted playsinline style="width:100%;max-width:460px;border-radius:8px;background:#000"></video>
+          <canvas id="cam-canvas" style="display:none"></canvas>
+          <div id="cam-overlay" style="position:absolute;top:7px;left:7px;background:rgba(0,0,0,.65);color:#4caf80;font-size:12px;padding:3px 8px;border-radius:4px">Scanning…</div>
+        </div>
+      </div>
+
+      <label>Member request code (paste or scan above)</label>
+      <textarea id="req-in" rows="3" placeholder="stiq:cred-req:1;STIQ-XXXX-XXXX;…" spellcheck="false"></textarea>
+      <div class="row">
+        <button class="btn" id="sign-btn" onclick="doSign()">Sign</button>
+        <button class="btn ghost" onclick="clearSign()">Clear</button>
+      </div>
+      <div id="sign-err" class="err" style="display:none"></div>
+      <div id="sign-res" style="display:none;margin-top:20px">
+        <div class="info" style="margin-top:0">Show this QR to the member — they scan it with their phone camera to complete enrollment.</div>
+        <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start;margin-top:14px">
+          <div style="text-align:center">
+            <div class="qrbox"><img id="resp-qr" width="200" height="200" alt="Response QR"></div>
+            <div style="font-size:11px;color:#4caf80;margin-top:6px">Member scans → app opens</div>
+          </div>
+          <div style="flex:1">
+            <label style="margin-top:0">Response code (manual paste if needed)</label>
+            <div class="code" style="font-size:10px;min-height:54px;position:relative">
+              <span id="resp-text"></span>
+              <button class="cpbtn" onclick="copyEl('resp-text')">Copy</button>
+            </div>
+            <div class="ok" style="font-size:12px">Signed. Invite marked used. The member's identity is unknown to you — you only signed a blinded token.</div>
+          </div>
+        </div>
       </div>
     </div>
-  </div>
+  </details>
 </section>
 
 <!-- TAGS -->
@@ -327,12 +370,15 @@ input.lim:focus{border-color:var(--acc)}
     <button class="btn" id="pub-roster-btn" onclick="publishRoster()">⇪ Publish roster to relay</button>
   </div>
   <div id="roster-pub" class="ok" style="display:none"></div>
-  <div class="divider"></div>
-  <h3 style="font-size:14px;font-weight:600;margin-bottom:6px">Legacy export for moderators.ts <span style="color:var(--mu);font-weight:400">(build-time fallback only)</span></h3>
-  <div class="ts" id="mod-ts">
-    <button class="cpbtn" onclick="copyEl('mod-ts-inner')">Copy</button>
-    <span id="mod-ts-inner"></span>
-  </div>
+  <details class="legacy">
+    <summary>Legacy export for moderators.ts (build-time fallback only)</summary>
+    <div class="lbody">
+      <div class="ts" id="mod-ts">
+        <button class="cpbtn" onclick="copyEl('mod-ts-inner')">Copy</button>
+        <span id="mod-ts-inner"></span>
+      </div>
+    </div>
+  </details>
 </section>
 
 <!-- LIMITS -->
@@ -493,9 +539,13 @@ input.lim:focus{border-color:var(--acc)}
   <div id="postrules-pub" class="ok" style="display:none"></div>
 </section>
 
-<!-- PICTURES -->
-<section id="tab-pictures">
-  <h2>Pictures</h2>
+<!-- MEDIA: picture + audio limits, one page (two independent publishes) -->
+<section id="tab-media">
+  <h2>Media</h2>
+  <p class="sub">Community-wide limits for pictures and voice notes. Each block publishes its own
+    signed event — save them independently.</p>
+
+  <h3 class="blk">🖼 Pictures</h3>
   <p class="sub">Limits for the Pictures modality (tiny, private, load-on-tap pixel-art posts). The per-period allowance, resolution/colour caps, and on/off are <strong>enforced in the app</strong> as members compose (posts are relay-blind, so a member's cumulative picture bytes can't be attributed at the relay). The per-picture cap is additionally backstopped by the relay's content-neutral event-size limit — keep it ≤ the relay's <code>max_event_bytes</code>. Publishing signs a kind-30078 stiq:picture-limits event.</p>
   <label style="margin-bottom:14px">
     <input type="checkbox" id="pic-allow" style="width:auto"> Allow pictures — when off, the "Add picture" option is hidden in every composer
@@ -520,10 +570,10 @@ input.lim:focus{border-color:var(--acc)}
   </div>
   <div id="pictures-err" class="err" style="display:none"></div>
   <div id="pictures-pub" class="ok" style="display:none"></div>
-</section>
 
-<section id="tab-audio">
-  <h2>Audio</h2>
+  <div class="divider"></div>
+
+  <h3 class="blk">🎙 Audio</h3>
   <p class="sub">Limits for voice messages (NIP-A0 inline audio). Recording <strong>bitrate</strong> and <strong>sample rate</strong> are the compression knobs — lower values shrink every clip community-wide (24&nbsp;kbps mono is plenty for speech, roughly half the size of the old 48&nbsp;kbps). The allowance, size/duration caps, and on/off are <strong>enforced in the app</strong> as members record (posts are relay-blind, so a member's cumulative audio bytes can't be attributed at the relay). The per-clip cap is additionally backstopped by the relay's content-neutral event-size limit. This is separate from the <strong>Allow voice</strong> toggle on the Limits tab (that hard-gates voice at the relay); this tunes size/quality. Publishing signs a kind-30078 stiq:audio-limits event.</p>
   <label style="margin-bottom:14px">
     <input type="checkbox" id="aud-allow" style="width:auto"> Allow voice messages — when off, the mic + upload are hidden in every composer
@@ -680,7 +730,7 @@ input.lim:focus{border-color:var(--acc)}
 
 <!-- COMMUNITY (config) -->
 <section id="tab-community-cfg">
-  <h2>Community</h2>
+  <h2>Identity</h2>
   <p class="sub">Your community's identity and posting settings. Name, description, and icon show in the app shell; the accent tints the UI; the announcement banner appears at the top of the <strong>Log</strong> tab. Publishing signs a kind-30078 stiq:community event your members receive live.</p>
   <label style="margin-top:0">Name</label>
   <input type="text" id="cc-nm" placeholder="My community" style="width:100%;height:36px;padding:0 11px;font-size:13px">
@@ -710,13 +760,16 @@ input.lim:focus{border-color:var(--acc)}
       <span><strong>Allow members to delete their own posts</strong></span>
     </label>
   </div>
-  <div class="divider"></div>
-  <label style="margin-top:0">Announcement banner</label>
-  <span style="display:block;color:var(--mu);font-size:12px;margin-bottom:6px">⚠ Shown only by <strong>older app builds</strong> — the redesigned Log tab replaced this banner with the <strong>Log Page</strong> note (edit the note there; a changed note re-opens itself for every member). Keep this filled only while members are still on old builds. Leave blank for none.</span>
-  <textarea id="cc-ann-t" rows="2" placeholder="e.g. Welcome! Read the guide before posting." style="width:100%;padding:11px;font-size:13px;font-family:inherit;line-height:1.5;resize:vertical"></textarea>
-  <label>Auto-hide the banner (optional)</label>
-  <span style="display:block;color:var(--mu);font-size:12px;margin-bottom:6px">Pick a date &amp; time to hide it automatically, or leave blank to keep it up until you clear the text above.</span>
-  <input type="datetime-local" id="cc-ann-u" style="width:220px;height:34px;padding:0 11px;font-size:13px">
+  <details class="legacy">
+    <summary>Announcement banner (older app builds only)</summary>
+    <div class="lbody">
+      <span style="display:block;color:var(--mu);font-size:12px;margin-bottom:6px">⚠ Shown only by <strong>older app builds</strong> — the redesigned Log tab replaced this banner with the <strong>Log Page</strong> note (edit the note there; a changed note re-opens itself for every member). Keep this filled only while members are still on old builds. Leave blank for none.</span>
+      <textarea id="cc-ann-t" rows="2" placeholder="e.g. Welcome! Read the guide before posting." style="width:100%;padding:11px;font-size:13px;font-family:inherit;line-height:1.5;resize:vertical"></textarea>
+      <label>Auto-hide the banner (optional)</label>
+      <span style="display:block;color:var(--mu);font-size:12px;margin-bottom:6px">Pick a date &amp; time to hide it automatically, or leave blank to keep it up until you clear the text above.</span>
+      <input type="datetime-local" id="cc-ann-u" style="width:220px;height:34px;padding:0 11px;font-size:13px">
+    </div>
+  </details>
   <div class="row">
     <button class="btn" id="pub-community-btn" onclick="publishCommunity()">⇪ Save &amp; publish community</button>
   </div>
@@ -1039,6 +1092,7 @@ input.lim:focus{border-color:var(--acc)}
 </section>
 
 </main>
+</div>
 
 <script src="/organizer-ui.js?v=__ASSET_V_TOKEN__"></script>
 </body>

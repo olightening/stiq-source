@@ -3,7 +3,6 @@ var mods = [];
 var communityTags = [];
 var communityTagScopes = {}; // tag -> 'article' | 'note' (absent ⇒ 'all')
 var mirrors = [];
-var TABS = ['join', 'invites', 'community', 'sign', 'mods', 'tags', 'limits', 'tokens', 'activation', 'labels', 'postrules', 'pictures', 'audio', 'readaccess', 'reasons', 'perms', 'modlimits', 'gov', 'community-cfg', 'logpage', 'ranking', 'storage', 'safebrowsing', 'relays', 'guidelines', 'maintenance'];
 
 // ── Tab-load error guard (2026-07-21 incident) ────────────────────────────────────
 // A transient GET failure (relay hiccup, dashboard restart mid-request, or just a slow box) must
@@ -75,41 +74,32 @@ function reloadTab(name) {
   });
 }
 
+// Buttons are matched by their data-tab attribute (never by index — the grouped sidebar has
+// non-button children, and an index-coupled TABS array once made every nav edit a paired change).
+// Any tab with a registered loader is refreshed on entry; the rest (onboard's generators,
+// maintenance) need no fetch. The hash mirrors the open tab so a reload lands where you were.
 function switchTab(name) {
-  var btns = document.querySelectorAll('#nav button');
-  var secs = document.querySelectorAll('section');
-  for (var i = 0; i < btns.length; i++) btns[i].classList.remove('on');
+  var sec = document.getElementById('tab-' + name);
+  if (!sec) return;
+  var btns = document.querySelectorAll('#nav button[data-tab]');
+  var secs = document.querySelectorAll('main > section');
+  for (var i = 0; i < btns.length; i++) {
+    btns[i].classList.toggle('on', btns[i].getAttribute('data-tab') === name);
+  }
   for (var i = 0; i < secs.length; i++) secs[i].classList.remove('on');
-  btns[TABS.indexOf(name)].classList.add('on');
-  document.getElementById('tab-' + name).classList.add('on');
-  if (name === 'invites') reloadTab('invites');
-  if (name === 'tags') reloadTab('tags');
-  if (name === 'limits') reloadTab('limits');
-  if (name === 'tokens') reloadTab('tokens');
-  if (name === 'activation') reloadTab('activation');
-  if (name === 'labels') reloadTab('labels');
-  if (name === 'postrules') reloadTab('postrules');
-  if (name === 'pictures') reloadTab('pictures');
-  if (name === 'audio') reloadTab('audio');
-  if (name === 'readaccess') reloadTab('readaccess');
-  if (name === 'reasons') reloadTab('reasons');
-  if (name === 'perms') reloadTab('perms');
-  if (name === 'modlimits') reloadTab('modlimits');
-  if (name === 'gov') reloadTab('gov');
-  if (name === 'community-cfg') reloadTab('community-cfg');
-  if (name === 'logpage') reloadTab('logpage');
-  if (name === 'ranking') reloadTab('ranking');
-  if (name === 'storage') reloadTab('storage');
-  if (name === 'safebrowsing') reloadTab('safebrowsing');
-  if (name === 'relays') reloadTab('relays');
-  if (name === 'guidelines') reloadTab('guidelines');
+  sec.classList.add('on');
+  try { history.replaceState(null, '', '#' + name); } catch (e) { /* file:// etc — cosmetic only */ }
+  if (TAB_LOADERS[name]) reloadTab(name);
+  window.scrollTo(0, 0);
 }
 
 // Tab -> {controls, loader} registrations. Kept in one place for a single point of review; the
 // load*() functions themselves are defined further down, in their own sections (function
 // declarations are hoisted, so referencing them here — before their textual definition — is safe).
-registerTabLoad('community', [], loadCommunityCode);
-registerTabLoad('invites', [], loadInvites);
+// 'onboard' is the merged Members page: the invites table + the (legacy-drawer) community code.
+registerTabLoad('onboard', [], function () {
+  return Promise.all([loadInvites(), loadCommunityCode()]);
+});
 registerTabLoad('mods', ['pub-roster-btn'], loadMods);
 registerTabLoad('tags', ['pub-tags-btn'], loadTagPolicy);
 registerTabLoad('limits', ['pub-limits-btn'], loadLimits);
@@ -117,8 +107,10 @@ registerTabLoad('tokens', ['save-tokens-btn', 'save-mbx-btn'], loadTokensTab);
 registerTabLoad('activation', ['act-space', 'act-media', 'act-ce'], loadActivation);
 registerTabLoad('labels', ['pub-labels-btn'], loadLabels);
 registerTabLoad('postrules', ['pub-postrules-btn'], loadPostRules);
-registerTabLoad('pictures', ['pub-pictures-btn'], loadPictureRules);
-registerTabLoad('audio', ['pub-audio-btn'], loadAudioRules);
+// 'media' is the merged Pictures + Audio page — one guard over both publish buttons.
+registerTabLoad('media', ['pub-pictures-btn', 'pub-audio-btn'], function () {
+  return Promise.all([loadPictureRules(), loadAudioRules()]);
+});
 registerTabLoad('readaccess', [], loadReadAccess);
 registerTabLoad('reasons', ['pub-reasons-btn'], loadReasons);
 registerTabLoad('perms', ['pub-perms-btn'], loadPermissions);
@@ -2094,15 +2086,13 @@ function copyText(t) { navigator.clipboard.writeText(t); }
 // run the two slow probes a beat later. The health pill still auto-refreshes every 30 s, so nothing
 // is lost by not blocking first paint on it.
 function hydrateDashboard() {
-  reloadTab('community');
-  reloadTab('invites');
+  reloadTab('onboard');
   reloadTab('limits');
   reloadTab('mods');
   reloadTab('tags');
   reloadTab('labels');
   reloadTab('postrules');
-  reloadTab('pictures');
-  reloadTab('audio');
+  reloadTab('media');
   reloadTab('readaccess');
   reloadTab('reasons');
   reloadTab('modlimits');
@@ -2114,6 +2104,12 @@ function hydrateDashboard() {
   setTimeout(function () { loadHealth(); reloadTab('safebrowsing'); }, 400);
 }
 setInterval(loadHealth, 30000); // periodic refresh so a relay that drops mid-session is noticed
+// Reopen the tab named in the hash (switchTab keeps it current), so a reload — routine over Tor —
+// lands the organizer back on the page they were working in instead of the first tab.
+(function () {
+  var initial = location.hash.replace(/^#/, '');
+  if (initial && initial !== 'onboard' && document.getElementById('tab-' + initial)) switchTab(initial);
+})();
 // Yield once so the already-parsed HTML paints before the fetch fan-out begins.
 setTimeout(hydrateDashboard, 0);
 
