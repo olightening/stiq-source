@@ -96,8 +96,8 @@ android {
         // from Settings → Apps → STIQ, so it is the fleet's version beacon. Every build before
         // 2026-07-23 shipped as 1.0/1 — indistinguishable in the field, which is how the fleet
         // silently drifted onto months-stale APKs.
-        versionCode 6
-        versionName "1.5"
+        versionCode 10
+        versionName "1.6-swipeback"
 
         /* RN developer support (red box, dev menu, HMR, and the Metro dev-server websocket).
          *

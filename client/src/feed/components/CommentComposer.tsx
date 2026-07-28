@@ -4,8 +4,23 @@
  * channels, group chat, and DMs. Commenters get the FULL standard `+`: Embed a post · Add a link ·
  * Add picture · Record voice · Expand to editor — the same set channels/DMs offer (picture and voice
  * appear only when the organizer allows them, exactly as on the other surfaces).
+ *
+ * SWIPE-BACK OPT-OUT lives here rather than at each call site (PLAN_SWIPE_BACK_GESTURE_2026-07-27.md):
+ * every surface that hosts a comment box is now swipe-to-dismiss, and a `TextInput`'s own horizontal
+ * selection drag never joins JS responder negotiation — so without standing the page gesture down, a
+ * sideways drag in this field would dismiss the thread instead of moving the text cursor. Opting out
+ * from inside the composer covers all four hosts at once (the feed thread overlay, the channel post
+ * view, the Log post view, the embed reader) and cannot be forgotten when a fifth appears.
+ *
+ * It works because this is a genuine DESCENDANT of whichever pan layer wraps the host page, so its
+ * `useSwipeOptOut()` resolves to that layer's provider. A host that owns its pan inline instead of
+ * through `SwipeBackView`/`SubScreen` (`LogScreen`, `LogPostView` call `useSwipeBack` directly and
+ * never provide the context) is NOT covered by this and keeps its own local wrapper — the two are
+ * independent and stacking both is harmless.
  */
 import React, {useEffect, useState} from 'react';
+import {View} from 'react-native';
+import {useSwipeOptOut} from '../../ui/swipeOptOut';
 import {
   ensureSavedEmbedsLoaded,
   listSavedEmbeds,
@@ -77,6 +92,9 @@ export function CommentComposer({
   draftStore,
   draftLocation,
 }: CommentComposerProps): React.JSX.Element {
+  // Stands the host page's swipe-to-dismiss down while this field is being touched — see the module
+  // header for why it lives here and not at the call sites.
+  const optOut = useSwipeOptOut();
   const [content, setContent] = useState('');
   const [savedOpen, setSavedOpen] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
@@ -110,17 +128,22 @@ export function CommentComposer({
 
   return (
     <>
-      <MessageComposer
-        value={content}
-        onChangeText={setContent}
-        placeholder={placeholder}
-        onSend={submit}
-        onEmbed={() => setSavedOpen(true)}
-        onExpand={() => setEditorOpen(true)}
-        onAddPicture={pictureRules?.allow ? () => setPictureOpen(true) : undefined}
-        onRecordVoice={allowVoice ? () => setVoiceOpen(true) : undefined}
-        accessibilitySend="submit-comment"
-      />
+      {/* MessageComposer takes a fixed prop set and forwards nothing, so the opt-out handlers go on a
+          plain wrapper View. Unstyled deliberately: the composer's own root carries no layout, so this
+          adds a pass-through node and changes nothing about how it sits in the host's flex column. */}
+      <View {...optOut}>
+        <MessageComposer
+          value={content}
+          onChangeText={setContent}
+          placeholder={placeholder}
+          onSend={submit}
+          onEmbed={() => setSavedOpen(true)}
+          onExpand={() => setEditorOpen(true)}
+          onAddPicture={pictureRules?.allow ? () => setPictureOpen(true) : undefined}
+          onRecordVoice={allowVoice ? () => setVoiceOpen(true) : undefined}
+          accessibilitySend="submit-comment"
+        />
+      </View>
       <SavedEmbedSheet
         visible={savedOpen}
         onClose={() => setSavedOpen(false)}

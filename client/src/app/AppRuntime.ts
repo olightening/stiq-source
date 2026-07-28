@@ -539,6 +539,7 @@ import {
   firstEnteredAt,
   recordEntry,
 } from './communityEntry';
+import {setSpaceJoinedAtSlot, ensureSpaceJoinedAtLoaded, markJoined} from './spaceJoinedAt';
 import {
   ensurePrefsLoaded,
   getPrefs,
@@ -2669,6 +2670,10 @@ export class AppRuntime {
     // flash, presenting as "the app forgot my sort" on a cold, contended start).
     setFeedSortPrefsSlot(slotId);
     await ensureFeedSortPrefsLoaded();
+    // Local join stamps — eager-loaded here so the Spaces list reads them synchronously on its very
+    // first paint (the row builder is a sync useMemo and cannot await storage).
+    setSpaceJoinedAtSlot(slotId);
+    await ensureSpaceJoinedAtLoaded();
     // Per-(account, community) first-entry signal — eager-loaded here so MainScreen's initial tab and
     // getLogPage's welcome window read it synchronously on first paint (Points 1/6/7). The ENTRY
     // itself is recorded only by enroll() (a genuine join), never by a cold start or a switch, so an
@@ -4770,6 +4775,11 @@ export class AppRuntime {
   private async trackGroup(groupId: string): Promise<void> {
     if (!this.joinedGroups.has(groupId)) {
       this.joinedGroups.add(groupId);
+      // Must stay INSIDE this not-yet-joined branch: joinedGroups is rehydrated directly into the
+      // Set on load (~line 2711) and reconnects go through resubscribeGroups (~line 4747), which
+      // calls deps.subscribeGroup directly — neither re-enters this branch. Hoisting the stamp out
+      // of the `if` would make every group jump to the top of Spaces on every app start.
+      markJoined(groupId, AppRuntime.nowSec());
       await saveJoinedGroups([...this.joinedGroups], this.activeSlotId);
     }
     this.deps.subscribeGroup?.(groupId);
@@ -7633,6 +7643,9 @@ export class AppRuntime {
     const current = new Set(subscribedChannelIds(this.deps.store, this.myPubkey));
     if (current.has(channelId)) return;
     current.add(channelId);
+    // Stamp the join moment so the row sorts to the top of Spaces immediately, before its 1311
+    // history streams in over Tor.
+    markJoined(channelId, AppRuntime.nowSec());
     this.deps.subscribeChannelChat?.(channelId);
     const event = await this.identity.sign(buildSubscriptionList([...current]));
     await this.publishOptimistic(event);

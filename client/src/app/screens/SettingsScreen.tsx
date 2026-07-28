@@ -26,6 +26,8 @@ import {
   View,
 } from 'react-native';
 import {Press} from '../../ui/Press';
+import {SwipeBackView} from '../../ui/SwipeBack';
+import {useSwipeOptOut} from '../../ui/swipeOptOut';
 import {colors, fontSerif, radius, space, type as typeScale, weight, type Palette, DENSE_MAX_FONT_SCALE} from '../../ui/theme';
 import {GradientAvatar} from '../../ui/GradientAvatar';
 import type {Profile} from '../../profile/profile';
@@ -201,6 +203,10 @@ export function SettingsScreen({
   tokenStatus,
   onRefreshTokenStatus,
 }: SettingsScreenProps): React.JSX.Element {
+  // Stands this page's own swipe-back down for touches beginning on the Blossom URL field below (a
+  // TextInput's own selection drag doesn't join JS responder negotiation) — spread onto that
+  // TextInput; see the opt-out there for what it protects.
+  const optOut = useSwipeOptOut();
   const [clearing, setClearing] = useState(false);
   // Fine-grained "Manage cached data" sub-sheet (type toggles + date-range presets).
   const [manageDataOpen, setManageDataOpen] = useState(false);
@@ -498,426 +504,441 @@ export function SettingsScreen({
       {/* SafeAreaView (not View): a Modal renders outside the app's root SafeAreaView, so it
           re-applies the top inset — otherwise the header flanks the Dynamic Island. */}
       <SafeAreaView style={[s.page, {backgroundColor: c.bg}]}>
-        {/* Page header */}
-        <View style={[s.pageHeader, {borderBottomColor: c.border}]}>
-          <Press onPress={onClose} hitSlop={10} style={s.backBtn}>
-            <Text style={[s.backText, {color: c.accent}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>‹</Text>
-          </Press>
-          <Text style={[s.sheetTitle, {color: c.textPrimary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>Settings</Text>
-          <View style={s.backBtn} />
-        </View>
+        {/* SwipeBackView wraps the SafeAreaView's children, not the SafeAreaView itself, so that
+            opaque c.bg-colored root stays put as the backdrop while just the page header and scroll
+            content slide away — see PLAN_SWIPE_BACK_GESTURE_2026-07-27.md's "Modal-hosted pages"
+            note. The sheets rendered as this SafeAreaView's own SIBLINGS below (identity switcher,
+            connection/relays/reliability/browser/manage-data sheets, the PIN dialog, …) are
+            deliberately OUTSIDE this wrap: each is its own separate (transparent) Modal stacked on
+            top, not part of the page that slides. `onBack` is `onClose`, the exact function the
+            header ‹ already calls, so the button, the hardware key and the swipe can never drift
+            apart. */}
+        <SwipeBackView onBack={onClose}>
+          {/* Page header */}
+          <View style={[s.pageHeader, {borderBottomColor: c.border}]}>
+            <Press onPress={onClose} hitSlop={10} style={s.backBtn}>
+              <Text style={[s.backText, {color: c.accent}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>‹</Text>
+            </Press>
+            <Text style={[s.sheetTitle, {color: c.textPrimary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>Settings</Text>
+            <View style={s.backBtn} />
+          </View>
 
-        <ScrollView
-          showsVerticalScrollIndicator={false}
-          style={s.scroll}
-          automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}>
+          <ScrollView
+            showsVerticalScrollIndicator={false}
+            style={s.scroll}
+            automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}>
 
-          {/* ── Account hero card ─────────────────────── */}
-          <Press
-            variant="row"
-            style={[s.heroCard, {backgroundColor: c.surface, borderColor: c.border}]}
-            onPress={() => { onOpenProfile?.(); onClose(); }}>
-            <GradientAvatar
-              gradient={profile?.gradient}
-              seed={profile?.npub ?? ''}
-              size={54}
-              ring
-            />
-            <View style={s.heroText}>
-              <Text style={[s.heroName, {color: c.textPrimary}]} numberOfLines={1} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>{displayName}</Text>
-              {npubShort ? (
-                <Text style={[s.heroNpub, {color: c.link}]} numberOfLines={1} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>{npubShort}</Text>
-              ) : null}
-            </View>
-            <Text style={[s.heroChevron, {color: c.textMuted}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>›</Text>
-          </Press>
+            {/* ── Account hero card ─────────────────────── */}
+            <Press
+              variant="row"
+              style={[s.heroCard, {backgroundColor: c.surface, borderColor: c.border}]}
+              onPress={() => { onOpenProfile?.(); onClose(); }}>
+              <GradientAvatar
+                gradient={profile?.gradient}
+                seed={profile?.npub ?? ''}
+                size={54}
+                ring
+              />
+              <View style={s.heroText}>
+                <Text style={[s.heroName, {color: c.textPrimary}]} numberOfLines={1} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>{displayName}</Text>
+                {npubShort ? (
+                  <Text style={[s.heroNpub, {color: c.link}]} numberOfLines={1} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>{npubShort}</Text>
+                ) : null}
+              </View>
+              <Text style={[s.heroChevron, {color: c.textMuted}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>›</Text>
+            </Press>
 
-          {/* ── Communities ──────────────────────────────────────────────────────────────
-              Shows the community you're CURRENTLY in as one relaxed card. Tapping it opens the
-              switcher sheet — the list of all your identities/communities (tap one to switch) plus
-              "Join another community". Leaving a community is the red button in the footer. */}
-          {activeSlot && (
-            <>
-              <SectionHeader label="COMMUNITIES" color={c.textMuted} />
-              <Press
-                variant="row"
-                style={[s.communityCard, {backgroundColor: c.surface, borderColor: c.border}]}
-                onPress={() => setSwitcherOpen(true)}>
-                <GradientAvatar seed={activeSlot.npub} size={44} ring />
-                <View style={s.communityBody}>
-                  <Text
-                    style={[s.communityName, {color: c.textPrimary}]}
-                    numberOfLines={1}
-                    maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                    {communityNameOf(activeSlot)}
-                  </Text>
-                  <Text style={[s.communitySub, {color: c.textSecondary}]} numberOfLines={1} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                    {shortenNpub(activeSlot.npub, {lead: 22, tail: 0})}
-                  </Text>
-                </View>
-                <Text style={[s.communityChevron, {color: c.textMuted}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>›</Text>
-              </Press>
-              <Text style={[s.communityHint, {color: c.textMuted}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                {slots.length > 1
-                  ? `Tap to switch between your ${slots.length} identities — or join another community`
-                  : 'Tap to switch identity or join another community'}
-              </Text>
-            </>
-          )}
+            {/* ── Communities ──────────────────────────────────────────────────────────────
+                Shows the community you're CURRENTLY in as one relaxed card. Tapping it opens the
+                switcher sheet — the list of all your identities/communities (tap one to switch) plus
+                "Join another community". Leaving a community is the red button in the footer. */}
+            {activeSlot && (
+              <>
+                <SectionHeader label="COMMUNITIES" color={c.textMuted} />
+                <Press
+                  variant="row"
+                  style={[s.communityCard, {backgroundColor: c.surface, borderColor: c.border}]}
+                  onPress={() => setSwitcherOpen(true)}>
+                  <GradientAvatar seed={activeSlot.npub} size={44} ring />
+                  <View style={s.communityBody}>
+                    <Text
+                      style={[s.communityName, {color: c.textPrimary}]}
+                      numberOfLines={1}
+                      maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                      {communityNameOf(activeSlot)}
+                    </Text>
+                    <Text style={[s.communitySub, {color: c.textSecondary}]} numberOfLines={1} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                      {shortenNpub(activeSlot.npub, {lead: 22, tail: 0})}
+                    </Text>
+                  </View>
+                  <Text style={[s.communityChevron, {color: c.textMuted}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>›</Text>
+                </Press>
+                <Text style={[s.communityHint, {color: c.textMuted}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                  {slots.length > 1
+                    ? `Tap to switch between your ${slots.length} identities — or join another community`
+                    : 'Tap to switch identity or join another community'}
+                </Text>
+              </>
+            )}
 
-          {/* ── Identity & account ──────────────────────── */}
-          <SectionHeader label="IDENTITY & ACCOUNT" color={c.textMuted} />
-          <NavRow label="Edit profile" onPress={() => { onOpenProfile?.(); onClose(); }} c={c} />
-          <NavRow
-            label="Drafts"
-            onPress={() => { onOpenDrafts?.(); onClose(); }}
-            c={c}
-          />
-          {onOpenYourEvents !== undefined && (
+            {/* ── Identity & account ──────────────────────── */}
+            <SectionHeader label="IDENTITY & ACCOUNT" color={c.textMuted} />
+            <NavRow label="Edit profile" onPress={() => { onOpenProfile?.(); onClose(); }} c={c} />
             <NavRow
-              label="Your events"
-              onPress={() => { onOpenYourEvents(); onClose(); }}
+              label="Drafts"
+              onPress={() => { onOpenDrafts?.(); onClose(); }}
               c={c}
             />
-          )}
-          <NavRow
-            label="Your npub"
-            value={profile ? shortenNpub(profile.npub, {lead: 16, tail: 0}) : '—'}
-            onPress={() => { onOpenProfile?.(); onClose(); }}
-            c={c}
-          />
-
-          {/* ── Media / uploads ─────────────────────────── */}
-          {onSetBlossomEndpoint !== undefined && (
-            <>
-              <SectionHeader label="MEDIA" color={c.textMuted} />
-              <View style={[s.mediaBlock, {backgroundColor: c.surfaceAlt}]}>
-                <Text style={[s.rowLabel, {color: c.textPrimary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                  Image upload server
-                </Text>
-                <Text
-                  style={[s.rowSub, {color: c.textSecondary, marginBottom: space.sm}]}
-                  maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                  Stiq hosts no images. To attach photos, point this at a Blossom server — an
-                  .onion host keeps uploads inside Tor. Leave empty to disable uploads.
-                </Text>
-                <TextInput
-                  style={[s.mediaInput, {color: c.textPrimary, borderColor: blossomValidation.valid ? c.border : c.danger, backgroundColor: c.bg}]}
-                  value={blossomInput}
-                  onChangeText={v => { setBlossomInput(v); setBlossomSaved(false); }}
-                  placeholder="https://…  or  http://…onion"
-                  placeholderTextColor={c.textMuted}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  keyboardType="url"
-                  spellCheck={false}
-                  maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}
-                />
-                <Text style={[s.mediaHint, {color: blossomHintColor}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                  {blossomValidation.message}
-                </Text>
-                <Press
-                  style={[s.mediaSaveBtn, {backgroundColor: blossomValidation.valid ? c.accent : c.surface}]}
-                  onPress={handleSaveBlossom}
-                  disabled={!blossomValidation.valid}>
-                  <Text
-                    style={[s.mediaSaveText, {color: blossomValidation.valid ? c.onAccent : c.textMuted}]}
-                    maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                    {blossomSaved ? 'Saved ✓' : 'Save'}
-                  </Text>
-                </Press>
-              </View>
-            </>
-          )}
-
-          {/* ── Browser (external hand-off default) ─────── */}
-          {onSetPreferredBrowser !== undefined && (
-            <>
-              <SectionHeader label="BROWSER" color={c.textMuted} />
+            {onOpenYourEvents !== undefined && (
               <NavRow
-                label="Default browser"
-                value={
-                  preferredBrowser
-                    ? browsers.find(b => b.id === preferredBrowser)?.label ?? preferredBrowser
-                    : 'Not set'
-                }
-                onPress={() => setBrowserSheetOpen(true)}
+                label="Your events"
+                onPress={() => { onOpenYourEvents(); onClose(); }}
                 c={c}
               />
-            </>
-          )}
-
-          {/* ── Storage ─────────────────────────────────── */}
-          <SectionHeader label="STORAGE" color={c.textMuted} />
-          <NavRow
-            label="Delete rendered media"
-            value="Free up cache"
-            onPress={handleClearMedia}
-            c={c}
-            disabled={clearing}
-          />
-          <NavRow
-            label="Clear old cache"
-            value="30+ day events"
-            onPress={handleClearCache}
-            c={c}
-          />
-          {(onDeleteCachedData !== undefined || onCountCachedEvents !== undefined) && (
+            )}
             <NavRow
-              label="Manage data…"
-              value="By type & date"
-              onPress={() => setManageDataOpen(true)}
+              label="Your npub"
+              value={profile ? shortenNpub(profile.npub, {lead: 16, tail: 0}) : '—'}
+              onPress={() => { onOpenProfile?.(); onClose(); }}
               c={c}
             />
-          )}
 
-          {/* ── Connection / Tor ────────────────────────── */}
-          {onApplyConnectionPrefs !== undefined && (
-            <>
-              <SectionHeader label="CONNECTION" color={c.textMuted} />
-              <Press
-                variant="row"
-                style={[s.row, {backgroundColor: c.surfaceAlt}]}
-                onPress={() => setConnectionSheetOpen(true)}>
-                <Text style={{color: connDot, fontSize: 11}} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>●</Text>
-                <View style={s.rowBody}>
+            {/* ── Media / uploads ─────────────────────────── */}
+            {onSetBlossomEndpoint !== undefined && (
+              <>
+                <SectionHeader label="MEDIA" color={c.textMuted} />
+                <View style={[s.mediaBlock, {backgroundColor: c.surfaceAlt}]}>
                   <Text style={[s.rowLabel, {color: c.textPrimary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                    {MODE_LABEL[connectionPrefs.mode]}
+                    Image upload server
                   </Text>
-                  <Text style={[s.rowSub, {color: c.textSecondary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                    {describeConnection(connState)}
-                  </Text>
-                </View>
-                <Text style={[s.rowChevron, {color: c.textMuted}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>›</Text>
-              </Press>
-              {/* RELAYS: which relays this device receives the community from (add / mute your own). */}
-              {onGetRelaySnapshot !== undefined && (() => {
-                const relaySnap = onGetRelaySnapshot();
-                const relaySub = relaySnap
-                  ? `${relaySnap.active.length} receiving${relaySnap.muted.length ? ` · ${relaySnap.muted.length} muted` : ''}`
-                  : 'Manage community relays';
-                return (
-                  <Press
-                    variant="row"
-                    style={[s.row, {backgroundColor: c.surfaceAlt}]}
-                    onPress={() => setRelaysSheetOpen(true)}>
-                    <View style={s.rowBody}>
-                      <Text style={[s.rowLabel, {color: c.textPrimary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                        Relays
-                      </Text>
-                      <Text style={[s.rowSub, {color: c.textSecondary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                        {relaySub}
-                      </Text>
-                    </View>
-                    <Text style={[s.rowChevron, {color: c.textMuted}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>›</Text>
-                  </Press>
-                );
-              })()}
-              {/* RELIABILITY: battery-optimization exemption + OEM background-kill guidance (W3) —
-                  keeping Tor alive while Stiq is backgrounded. Reads device state directly via
-                  power/reliability.ts (no App.tsx callback needed); lives in the same CONNECTION
-                  section gate as the rest of this block for a consistent section boundary. */}
-              <Press
-                variant="row"
-                style={[s.row, {backgroundColor: c.surfaceAlt}]}
-                onPress={() => setReliabilitySheetOpen(true)}>
-                <View style={s.rowBody}>
-                  <Text style={[s.rowLabel, {color: c.textPrimary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                    Reliability
-                  </Text>
-                  <Text style={[s.rowSub, {color: c.textSecondary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                    Keep Tor connected in the background
-                  </Text>
-                </View>
-                <View
-                  style={[
-                    s.reliabilityPill,
-                    {
-                      backgroundColor:
-                        reliabilityExempt === null ? c.surface : reliabilityExempt ? c.successBg : c.warningBg,
-                    },
-                  ]}>
                   <Text
-                    style={[
-                      s.reliabilityPillText,
-                      {
-                        color:
-                          reliabilityExempt === null ? c.textMuted : reliabilityExempt ? c.success : c.warning,
-                      },
-                    ]}
+                    style={[s.rowSub, {color: c.textSecondary, marginBottom: space.sm}]}
                     maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                    {reliabilityExempt === null ? '…' : reliabilityExempt ? 'OK' : 'Action needed'}
+                    Stiq hosts no images. To attach photos, point this at a Blossom server — an
+                    .onion host keeps uploads inside Tor. Leave empty to disable uploads.
                   </Text>
-                </View>
-                <Text style={[s.rowChevron, {color: c.textMuted}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>›</Text>
-              </Press>
-            </>
-          )}
-
-          {/* ── App updates (T9, APK_UPDATES — hidden unless the flag is on AND the community
-                 ships a signed repo) ─────────────────────────── */}
-          {showUpdates && (
-            <>
-              <SectionHeader label="APP UPDATES" color={c.textMuted} />
-              <View style={[s.row, {backgroundColor: c.surfaceAlt}]}>
-                <View style={s.rowBody}>
-                  <Text style={[s.rowLabel, {color: c.textPrimary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                    Current version
+                  {/* A TextInput's own selection-handle drag doesn't join JS PanResponder
+                      negotiation, so without this opt-out the page-level swipe-back above would win
+                      a rightward drag started inside the field instead of moving the cursor. */}
+                  <TextInput
+                    style={[s.mediaInput, {color: c.textPrimary, borderColor: blossomValidation.valid ? c.border : c.danger, backgroundColor: c.bg}]}
+                    value={blossomInput}
+                    onChangeText={v => { setBlossomInput(v); setBlossomSaved(false); }}
+                    placeholder="https://…  or  http://…onion"
+                    placeholderTextColor={c.textMuted}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    keyboardType="url"
+                    spellCheck={false}
+                    maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}
+                    {...optOut}
+                  />
+                  <Text style={[s.mediaHint, {color: blossomHintColor}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                    {blossomValidation.message}
                   </Text>
-                  <Text style={[s.rowSub, {color: c.textSecondary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                    Signed updates over Tor · no app store
-                  </Text>
-                </View>
-                <Text
-                  style={[s.rowValue, {color: c.textSecondary}]}
-                  numberOfLines={1}
-                  maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                  v{version || '—'}
-                </Text>
-              </View>
-              <Press
-                variant="row"
-                style={[s.row, {backgroundColor: c.surfaceAlt}]}
-                onPress={handleCheckForUpdate}
-                disabled={updateChecking}>
-                <View style={s.rowBody}>
-                  <Text style={[s.rowLabel, {color: c.textPrimary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                    {updateChecking ? 'Checking…' : 'Check for updates'}
-                  </Text>
-                </View>
-                <Text style={[s.rowChevron, {color: c.textMuted}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>›</Text>
-              </Press>
-
-              {/* Inline error (check or install) — never crashes the sheet. */}
-              {updateError !== null && (
-                <Text style={[s.updateStatusNote, {color: c.danger}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                  {updateError}
-                </Text>
-              )}
-
-              {/* Up-to-date confirmation, only after a real check that found nothing. */}
-              {updateChecked && updateInfo === null && updateError === null && (
-                <Text
-                  style={[s.updateStatusNote, {color: c.textSecondary}]}
-                  maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                  You’re up to date.
-                </Text>
-              )}
-
-              {/* Update-available card: what-changed note + Install. */}
-              {updateInfo !== null && (
-                <View style={[s.updateCard, {backgroundColor: c.surface, borderColor: c.accent}]}>
-                  <Text style={[s.updateCardTitle, {color: c.textPrimary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                    Update available · v{updateInfo.versionName}
-                  </Text>
-                  {updateInfo.whatChanged ? (
-                    <ScrollView style={s.updateWhatsNewBox} nestedScrollEnabled>
-                      <Text
-                        style={[s.updateWhatsNew, {color: c.textSecondary}]}
-                        maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                        {updateInfo.whatChanged}
-                      </Text>
-                    </ScrollView>
-                  ) : null}
                   <Press
-                    style={[s.updateInstallBtn, {backgroundColor: c.accentSoft, borderColor: c.accent}]}
-                    onPress={handleInstallUpdate}
-                    disabled={installing}>
-                    <Text style={[s.updateInstallText, {color: c.accent}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                      {installing ? 'Downloading over Tor…' : 'Install'}
+                    style={[s.mediaSaveBtn, {backgroundColor: blossomValidation.valid ? c.accent : c.surface}]}
+                    onPress={handleSaveBlossom}
+                    disabled={!blossomValidation.valid}>
+                    <Text
+                      style={[s.mediaSaveText, {color: blossomValidation.valid ? c.onAccent : c.textMuted}]}
+                      maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                      {blossomSaved ? 'Saved ✓' : 'Save'}
                     </Text>
                   </Press>
                 </View>
-              )}
-            </>
-          )}
+              </>
+            )}
 
-          {/* ── Diagnostics (dev builds only — never shipped to members) ── */}
-          {__DEV__ && (
-            <>
-              <SectionHeader label="DIAGNOSTICS" color={c.textMuted} />
-              <NavRow
-                label="Sync diagnostics 🔧"
-                value="Reconcile stats"
-                onPress={() => setSyncDebugOpen(true)}
-                c={c}
-              />
-              <NavRow
-                label="Token status 🔧"
-                value="Wallets · drift · failures"
-                onPress={() => setTokenStatusOpen(true)}
-                c={c}
-              />
-            </>
-          )}
-
-          {/* ── Security ──────────────────────────────────
-              The PIN-lock switch is this section's ONLY row, so PIN_LOCK_UI (config.ts, ship-dark —
-              bugs 5+6) gates the SECTION HEADER with it: hiding just the row would leave a bare
-              "SECURITY" heading over nothing. Sections here are plain ScrollView children with no
-              separators of their own, so the whole block conditionally rendering away leaves no
-              divider, gap or dead spacing — the danger footer simply follows Diagnostics, exactly as
-              if the section had never been written. Flip PIN_LOCK_UI true to restore it verbatim. */}
-          {PIN_LOCK_UI && onSetPinEnabled !== undefined && (
-            <>
-              <SectionHeader label="SECURITY" color={c.textMuted} />
-              <View style={[s.row, {backgroundColor: c.surfaceAlt}]}>
-                <View style={s.rowBody}>
-                  <Text style={[s.rowLabel, {color: c.textPrimary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                    PIN lock
-                  </Text>
-                  <Text style={[s.rowSub, {color: c.textSecondary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                    {pinEnabled ? 'App locks when idle' : 'Lock screen disabled'}
-                  </Text>
-                </View>
-                <Switch
-                  value={pinEnabled ?? true}
-                  onValueChange={handlePinToggle}
-                  trackColor={{false: c.border, true: c.accent}}
-                  thumbColor={c.onAccent}
+            {/* ── Browser (external hand-off default) ─────── */}
+            {onSetPreferredBrowser !== undefined && (
+              <>
+                <SectionHeader label="BROWSER" color={c.textMuted} />
+                <NavRow
+                  label="Default browser"
+                  value={
+                    preferredBrowser
+                      ? browsers.find(b => b.id === preferredBrowser)?.label ?? preferredBrowser
+                      : 'Not set'
+                  }
+                  onPress={() => setBrowserSheetOpen(true)}
+                  c={c}
                 />
-              </View>
-            </>
-          )}
+              </>
+            )}
 
-          {/* ── Danger footer ───────────────────────────── */}
-          {(onSignOut !== undefined || (onRemoveIdentity !== undefined && activeSlot)) && (
-            <View style={s.dangerSection}>
-              {onSignOut !== undefined && (
+            {/* ── Storage ─────────────────────────────────── */}
+            <SectionHeader label="STORAGE" color={c.textMuted} />
+            <NavRow
+              label="Delete rendered media"
+              value="Free up cache"
+              onPress={handleClearMedia}
+              c={c}
+              disabled={clearing}
+            />
+            <NavRow
+              label="Clear old cache"
+              value="30+ day events"
+              onPress={handleClearCache}
+              c={c}
+            />
+            {(onDeleteCachedData !== undefined || onCountCachedEvents !== undefined) && (
+              <NavRow
+                label="Manage data…"
+                value="By type & date"
+                onPress={() => setManageDataOpen(true)}
+                c={c}
+              />
+            )}
+
+            {/* ── Connection / Tor ────────────────────────── */}
+            {onApplyConnectionPrefs !== undefined && (
+              <>
+                <SectionHeader label="CONNECTION" color={c.textMuted} />
                 <Press
-                  style={[s.dangerBtn, {backgroundColor: c.surface, borderColor: c.border}]}
-                  onPress={onSignOut}>
-                  <Text style={[s.dangerBtnText, {color: c.accent}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                    Sign out
-                  </Text>
+                  variant="row"
+                  style={[s.row, {backgroundColor: c.surfaceAlt}]}
+                  onPress={() => setConnectionSheetOpen(true)}>
+                  <Text style={{color: connDot, fontSize: 11}} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>●</Text>
+                  <View style={s.rowBody}>
+                    <Text style={[s.rowLabel, {color: c.textPrimary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                      {MODE_LABEL[connectionPrefs.mode]}
+                    </Text>
+                    <Text style={[s.rowSub, {color: c.textSecondary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                      {describeConnection(connState)}
+                    </Text>
+                  </View>
+                  <Text style={[s.rowChevron, {color: c.textMuted}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>›</Text>
                 </Press>
-              )}
-              {/* Per-community leave: wipes the community you're currently in (its identity + cached
-                  data). If you hold another identity in the same community, that one stays. */}
-              {onRemoveIdentity !== undefined && activeSlot && (
+                {/* RELAYS: which relays this device receives the community from (add / mute your own). */}
+                {onGetRelaySnapshot !== undefined && (() => {
+                  const relaySnap = onGetRelaySnapshot();
+                  const relaySub = relaySnap
+                    ? `${relaySnap.active.length} receiving${relaySnap.muted.length ? ` · ${relaySnap.muted.length} muted` : ''}`
+                    : 'Manage community relays';
+                  return (
+                    <Press
+                      variant="row"
+                      style={[s.row, {backgroundColor: c.surfaceAlt}]}
+                      onPress={() => setRelaysSheetOpen(true)}>
+                      <View style={s.rowBody}>
+                        <Text style={[s.rowLabel, {color: c.textPrimary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                          Relays
+                        </Text>
+                        <Text style={[s.rowSub, {color: c.textSecondary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                          {relaySub}
+                        </Text>
+                      </View>
+                      <Text style={[s.rowChevron, {color: c.textMuted}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>›</Text>
+                    </Press>
+                  );
+                })()}
+                {/* RELIABILITY: battery-optimization exemption + OEM background-kill guidance (W3) —
+                    keeping Tor alive while Stiq is backgrounded. Reads device state directly via
+                    power/reliability.ts (no App.tsx callback needed); lives in the same CONNECTION
+                    section gate as the rest of this block for a consistent section boundary. */}
                 <Press
-                  style={[s.dangerBtn, {backgroundColor: c.dangerBg, borderColor: c.danger}]}
-                  onPress={() => handleLeaveIdentity(activeSlot)}>
+                  variant="row"
+                  style={[s.row, {backgroundColor: c.surfaceAlt}]}
+                  onPress={() => setReliabilitySheetOpen(true)}>
+                  <View style={s.rowBody}>
+                    <Text style={[s.rowLabel, {color: c.textPrimary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                      Reliability
+                    </Text>
+                    <Text style={[s.rowSub, {color: c.textSecondary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                      Keep Tor connected in the background
+                    </Text>
+                  </View>
+                  <View
+                    style={[
+                      s.reliabilityPill,
+                      {
+                        backgroundColor:
+                          reliabilityExempt === null ? c.surface : reliabilityExempt ? c.successBg : c.warningBg,
+                      },
+                    ]}>
+                    <Text
+                      style={[
+                        s.reliabilityPillText,
+                        {
+                          color:
+                            reliabilityExempt === null ? c.textMuted : reliabilityExempt ? c.success : c.warning,
+                        },
+                      ]}
+                      maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                      {reliabilityExempt === null ? '…' : reliabilityExempt ? 'OK' : 'Action needed'}
+                    </Text>
+                  </View>
+                  <Text style={[s.rowChevron, {color: c.textMuted}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>›</Text>
+                </Press>
+              </>
+            )}
+
+            {/* ── App updates (T9, APK_UPDATES — hidden unless the flag is on AND the community
+                   ships a signed repo) ─────────────────────────── */}
+            {showUpdates && (
+              <>
+                <SectionHeader label="APP UPDATES" color={c.textMuted} />
+                <View style={[s.row, {backgroundColor: c.surfaceAlt}]}>
+                  <View style={s.rowBody}>
+                    <Text style={[s.rowLabel, {color: c.textPrimary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                      Current version
+                    </Text>
+                    <Text style={[s.rowSub, {color: c.textSecondary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                      Signed updates over Tor · no app store
+                    </Text>
+                  </View>
                   <Text
-                    style={[s.dangerBtnText, {color: c.danger}]}
+                    style={[s.rowValue, {color: c.textSecondary}]}
                     numberOfLines={1}
                     maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                    Leave {communityNameOf(activeSlot)}
+                    v{version || '—'}
                   </Text>
+                </View>
+                <Press
+                  variant="row"
+                  style={[s.row, {backgroundColor: c.surfaceAlt}]}
+                  onPress={handleCheckForUpdate}
+                  disabled={updateChecking}>
+                  <View style={s.rowBody}>
+                    <Text style={[s.rowLabel, {color: c.textPrimary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                      {updateChecking ? 'Checking…' : 'Check for updates'}
+                    </Text>
+                  </View>
+                  <Text style={[s.rowChevron, {color: c.textMuted}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>›</Text>
                 </Press>
-              )}
-            </View>
-          )}
 
-          {/* ── Version footer ──────────────────────────── */}
-          <Text style={[s.versionText, {color: c.textMuted}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-            <Text style={{fontFamily: fontSerif}} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>Stiq.</Text>
-            {version ? ` · v${version}` : ''}
-            {'\nNostr over Tor v3 hidden services'}
-          </Text>
+                {/* Inline error (check or install) — never crashes the sheet. */}
+                {updateError !== null && (
+                  <Text style={[s.updateStatusNote, {color: c.danger}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                    {updateError}
+                  </Text>
+                )}
 
-          <View style={s.bottomPad} />
-        </ScrollView>
+                {/* Up-to-date confirmation, only after a real check that found nothing. */}
+                {updateChecked && updateInfo === null && updateError === null && (
+                  <Text
+                    style={[s.updateStatusNote, {color: c.textSecondary}]}
+                    maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                    You’re up to date.
+                  </Text>
+                )}
+
+                {/* Update-available card: what-changed note + Install. */}
+                {updateInfo !== null && (
+                  <View style={[s.updateCard, {backgroundColor: c.surface, borderColor: c.accent}]}>
+                    <Text style={[s.updateCardTitle, {color: c.textPrimary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                      Update available · v{updateInfo.versionName}
+                    </Text>
+                    {updateInfo.whatChanged ? (
+                      <ScrollView style={s.updateWhatsNewBox} nestedScrollEnabled>
+                        <Text
+                          style={[s.updateWhatsNew, {color: c.textSecondary}]}
+                          maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                          {updateInfo.whatChanged}
+                        </Text>
+                      </ScrollView>
+                    ) : null}
+                    <Press
+                      style={[s.updateInstallBtn, {backgroundColor: c.accentSoft, borderColor: c.accent}]}
+                      onPress={handleInstallUpdate}
+                      disabled={installing}>
+                      <Text style={[s.updateInstallText, {color: c.accent}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                        {installing ? 'Downloading over Tor…' : 'Install'}
+                      </Text>
+                    </Press>
+                  </View>
+                )}
+              </>
+            )}
+
+            {/* ── Diagnostics (dev builds only — never shipped to members) ── */}
+            {__DEV__ && (
+              <>
+                <SectionHeader label="DIAGNOSTICS" color={c.textMuted} />
+                <NavRow
+                  label="Sync diagnostics 🔧"
+                  value="Reconcile stats"
+                  onPress={() => setSyncDebugOpen(true)}
+                  c={c}
+                />
+                <NavRow
+                  label="Token status 🔧"
+                  value="Wallets · drift · failures"
+                  onPress={() => setTokenStatusOpen(true)}
+                  c={c}
+                />
+              </>
+            )}
+
+            {/* ── Security ──────────────────────────────────
+                The PIN-lock switch is this section's ONLY row, so PIN_LOCK_UI (config.ts, ship-dark —
+                bugs 5+6) gates the SECTION HEADER with it: hiding just the row would leave a bare
+                "SECURITY" heading over nothing. Sections here are plain ScrollView children with no
+                separators of their own, so the whole block conditionally rendering away leaves no
+                divider, gap or dead spacing — the danger footer simply follows Diagnostics, exactly as
+                if the section had never been written. Flip PIN_LOCK_UI true to restore it verbatim. */}
+            {PIN_LOCK_UI && onSetPinEnabled !== undefined && (
+              <>
+                <SectionHeader label="SECURITY" color={c.textMuted} />
+                <View style={[s.row, {backgroundColor: c.surfaceAlt}]}>
+                  <View style={s.rowBody}>
+                    <Text style={[s.rowLabel, {color: c.textPrimary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                      PIN lock
+                    </Text>
+                    <Text style={[s.rowSub, {color: c.textSecondary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                      {pinEnabled ? 'App locks when idle' : 'Lock screen disabled'}
+                    </Text>
+                  </View>
+                  <Switch
+                    value={pinEnabled ?? true}
+                    onValueChange={handlePinToggle}
+                    trackColor={{false: c.border, true: c.accent}}
+                    thumbColor={c.onAccent}
+                  />
+                </View>
+              </>
+            )}
+
+            {/* ── Danger footer ───────────────────────────── */}
+            {(onSignOut !== undefined || (onRemoveIdentity !== undefined && activeSlot)) && (
+              <View style={s.dangerSection}>
+                {onSignOut !== undefined && (
+                  <Press
+                    style={[s.dangerBtn, {backgroundColor: c.surface, borderColor: c.border}]}
+                    onPress={onSignOut}>
+                    <Text style={[s.dangerBtnText, {color: c.accent}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                      Sign out
+                    </Text>
+                  </Press>
+                )}
+                {/* Per-community leave: wipes the community you're currently in (its identity + cached
+                    data). If you hold another identity in the same community, that one stays. */}
+                {onRemoveIdentity !== undefined && activeSlot && (
+                  <Press
+                    style={[s.dangerBtn, {backgroundColor: c.dangerBg, borderColor: c.danger}]}
+                    onPress={() => handleLeaveIdentity(activeSlot)}>
+                    <Text
+                      style={[s.dangerBtnText, {color: c.danger}]}
+                      numberOfLines={1}
+                      maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                      Leave {communityNameOf(activeSlot)}
+                    </Text>
+                  </Press>
+                )}
+              </View>
+            )}
+
+            {/* ── Version footer ──────────────────────────── */}
+            <Text style={[s.versionText, {color: c.textMuted}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+              <Text style={{fontFamily: fontSerif}} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>Stiq.</Text>
+              {version ? ` · v${version}` : ''}
+              {'\nNostr over Tor v3 hidden services'}
+            </Text>
+
+            <View style={s.bottomPad} />
+          </ScrollView>
+        </SwipeBackView>
       </SafeAreaView>
 
       {/* Identity/community switcher — opened by tapping the active community. Lists every identity

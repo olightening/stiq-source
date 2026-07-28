@@ -24,6 +24,7 @@
 import React, {useEffect, useMemo, useState} from 'react';
 import {Modal, SafeAreaView, ScrollView, StyleSheet, Text, View} from 'react-native';
 import {Press} from '../../ui/Press';
+import {SwipeBackView} from '../../ui/SwipeBack';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {safeNpubEncode, shortenNpub} from '../../util/npub';
 import {GradientDot} from '../../ui/GradientDot';
@@ -207,218 +208,227 @@ export function ModeratorConsole({
       {/* SafeAreaView (not View): a Modal renders outside the app's root SafeAreaView, so it
           re-applies the top inset — otherwise the header flanks the Dynamic Island. */}
       <SafeAreaView style={s.root}>
-        {/* header */}
-        <View style={s.topbar}>
-          <Text style={s.topTitle}>Moderator</Text>
-          <View style={s.flex1} />
-          <Press onPress={onClose} hitSlop={10} accessibilityLabel="Close moderator console">
-            <Text style={s.done}>Done</Text>
-          </Press>
-        </View>
+        {/* SwipeBackView wraps the SafeAreaView's children so the opaque page background stays put
+            as the backdrop while the content slides away — see
+            PLAN_SWIPE_BACK_GESTURE_2026-07-27.md's "Modal-hosted pages" note. `onBack` is `onClose`,
+            the same function the header's Done button already calls; `enabled` stays the default
+            true — `tab` (reports/logged) is a plain segmented control, and this Modal's own
+            onRequestClose already calls `onClose` directly rather than routing through `tab`, so
+            there is no inner level for the swipe to peel first. */}
+        <SwipeBackView onBack={onClose}>
+          {/* header */}
+          <View style={s.topbar}>
+            <Text style={s.topTitle}>Moderator</Text>
+            <View style={s.flex1} />
+            <Press onPress={onClose} hitSlop={10} accessibilityLabel="Close moderator console">
+              <Text style={s.done}>Done</Text>
+            </Press>
+          </View>
 
-        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={s.scroll}>
-          {/* access — reinforces that authority is organizer-granted */}
-          <View style={s.accessCard}>
-            <View style={s.accessHeadRow}>
-              <Text style={s.accessGlyph}>🛡️</Text>
-              <View style={s.flex1}>
-                <Text style={s.accessTitle}>You are a moderator</Text>
-                <Text style={s.accessSub}>Assigned by the organizer · {grantedScopes.length} permission{grantedScopes.length === 1 ? '' : 's'}</Text>
+          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={s.scroll}>
+            {/* access — reinforces that authority is organizer-granted */}
+            <View style={s.accessCard}>
+              <View style={s.accessHeadRow}>
+                <Text style={s.accessGlyph}>🛡️</Text>
+                <View style={s.flex1}>
+                  <Text style={s.accessTitle}>You are a moderator</Text>
+                  <Text style={s.accessSub}>Assigned by the organizer · {grantedScopes.length} permission{grantedScopes.length === 1 ? '' : 's'}</Text>
+                </View>
               </View>
+              {grantedScopes.length > 0 ? (
+                <View style={s.scopeRow}>
+                  {grantedScopes.map(sc => (
+                    <View key={sc} style={s.scopePill}>
+                      <Text style={s.scopePillText}>{SCOPE_LABELS[sc]}</Text>
+                    </View>
+                  ))}
+                </View>
+              ) : (
+                <Text style={s.accessNone}>The organizer hasn’t granted you any actions yet.</Text>
+              )}
             </View>
-            {grantedScopes.length > 0 ? (
-              <View style={s.scopeRow}>
-                {grantedScopes.map(sc => (
-                  <View key={sc} style={s.scopePill}>
-                    <Text style={s.scopePillText}>{SCOPE_LABELS[sc]}</Text>
-                  </View>
-                ))}
-              </View>
-            ) : (
-              <Text style={s.accessNone}>The organizer hasn’t granted you any actions yet.</Text>
-            )}
-          </View>
 
-          {/* segmented tabs */}
-          <View style={s.segment}>
-            <Press
-              onPress={() => setTab('reports')}
-              style={[s.segBtn, tab === 'reports' ? s.segActive : s.segInactive]}
-              accessibilityState={{selected: tab === 'reports'}}>
-              <Text style={[s.segText, tab === 'reports' ? s.segTextActive : s.segTextInactive]}>
-                Reports{visibleReports.length ? ` · ${visibleReports.length}` : ''}
-              </Text>
-            </Press>
-            <Press
-              onPress={() => setTab('logged')}
-              style={[s.segBtn, tab === 'logged' ? s.segActive : s.segInactive]}
-              accessibilityState={{selected: tab === 'logged'}}>
-              <Text style={[s.segText, tab === 'logged' ? s.segTextActive : s.segTextInactive]}>
-                Logged{loggedRows.length ? ` · ${loggedRows.length}` : ''}
-              </Text>
-            </Press>
-          </View>
+            {/* segmented tabs */}
+            <View style={s.segment}>
+              <Press
+                onPress={() => setTab('reports')}
+                style={[s.segBtn, tab === 'reports' ? s.segActive : s.segInactive]}
+                accessibilityState={{selected: tab === 'reports'}}>
+                <Text style={[s.segText, tab === 'reports' ? s.segTextActive : s.segTextInactive]}>
+                  Reports{visibleReports.length ? ` · ${visibleReports.length}` : ''}
+                </Text>
+              </Press>
+              <Press
+                onPress={() => setTab('logged')}
+                style={[s.segBtn, tab === 'logged' ? s.segActive : s.segInactive]}
+                accessibilityState={{selected: tab === 'logged'}}>
+                <Text style={[s.segText, tab === 'logged' ? s.segTextActive : s.segTextInactive]}>
+                  Logged{loggedRows.length ? ` · ${loggedRows.length}` : ''}
+                </Text>
+              </Press>
+            </View>
 
-          {tab === 'reports' ? (
-            visibleReports.length === 0 ? (
-              <Text style={s.empty}>No reports awaiting review.</Text>
-            ) : (
-              <View style={s.list}>
-                {visibleReports.map(r => {
-                  const hideScope: ModScope = r.targetType === 'comment' ? 'hide-comment' : 'hide-post';
-                  const canLogPost = can(hideScope);
-                  const canLogAuthor = can('ban') && !!r.authorPubkey;
-                  // Rate-limit keys match the emitted stiq-action so an organizer's caps count them.
-                  const logPostLimit = canLogPost ? limitFor('log') : null;
-                  const logAuthorLimit = canLogAuthor ? limitFor('log-user') : null;
-                  const pastOn = !!includePast[r.targetId];
-                  return (
-                    <View key={r.targetId} style={s.card}>
-                      <View style={s.cardTop}>
-                        <GradientDot size={22} gradient={getProfile?.(r.authorPubkey ?? '')?.gradient} seed={safeNpubEncode(r.authorPubkey ?? r.targetId)} />
-                        <Text style={s.cardName} numberOfLines={1}>{nameFor(r.authorPubkey)}</Text>
-                        <View style={s.flex1} />
-                        {r.thresholdReached && (
-                          <View style={s.threshPill}>
-                            <Text style={s.threshText}>THRESHOLD</Text>
-                          </View>
-                        )}
-                        <Text style={s.cardAt}>{relTime(r.latestAt, nowMs)}</Text>
-                      </View>
-
-                      <View style={s.countRow}>
-                        <Text style={s.countText}>
-                          {r.reporterCount} report{r.reporterCount === 1 ? '' : 's'} · {r.targetType}
-                        </Text>
-                      </View>
-
-                      <Text style={s.snippet} numberOfLines={3}>
-                        {r.snippet || 'Reported content isn’t cached on this device.'}
-                      </Text>
-
-                      {r.reasons.length > 0 && (
-                        <View style={s.reasonRow}>
-                          {r.reasons.map(rc => (
-                            <View key={rc.id} style={s.reasonChip}>
-                              <View style={[s.reasonDot, {backgroundColor: rc.color}]} />
-                              <Text style={s.reasonText}>{rc.name}</Text>
+            {tab === 'reports' ? (
+              visibleReports.length === 0 ? (
+                <Text style={s.empty}>No reports awaiting review.</Text>
+              ) : (
+                <View style={s.list}>
+                  {visibleReports.map(r => {
+                    const hideScope: ModScope = r.targetType === 'comment' ? 'hide-comment' : 'hide-post';
+                    const canLogPost = can(hideScope);
+                    const canLogAuthor = can('ban') && !!r.authorPubkey;
+                    // Rate-limit keys match the emitted stiq-action so an organizer's caps count them.
+                    const logPostLimit = canLogPost ? limitFor('log') : null;
+                    const logAuthorLimit = canLogAuthor ? limitFor('log-user') : null;
+                    const pastOn = !!includePast[r.targetId];
+                    return (
+                      <View key={r.targetId} style={s.card}>
+                        <View style={s.cardTop}>
+                          <GradientDot size={22} gradient={getProfile?.(r.authorPubkey ?? '')?.gradient} seed={safeNpubEncode(r.authorPubkey ?? r.targetId)} />
+                          <Text style={s.cardName} numberOfLines={1}>{nameFor(r.authorPubkey)}</Text>
+                          <View style={s.flex1} />
+                          {r.thresholdReached && (
+                            <View style={s.threshPill}>
+                              <Text style={s.threshText}>THRESHOLD</Text>
                             </View>
-                          ))}
+                          )}
+                          <Text style={s.cardAt}>{relTime(r.latestAt, nowMs)}</Text>
                         </View>
-                      )}
 
-                      {r.notes.length > 0 && (
-                        <Text style={s.note} numberOfLines={2}>“{r.notes[0]}”</Text>
-                      )}
+                        <View style={s.countRow}>
+                          <Text style={s.countText}>
+                            {r.reporterCount} report{r.reporterCount === 1 ? '' : 's'} · {r.targetType}
+                          </Text>
+                        </View>
 
-                      {/* "＋ their past posts" — only meaningful with the standing-rule action. */}
-                      {canLogAuthor && (
-                        <Press
-                          style={s.checkRow}
-                          onPress={() => togglePast(r.targetId)}
-                          accessibilityRole="checkbox"
-                          accessibilityState={{checked: pastOn}}>
-                          <View style={[s.checkBox, pastOn && s.checkBoxOn]}>
-                            {pastOn && <Text style={s.checkMark}>✓</Text>}
+                        <Text style={s.snippet} numberOfLines={3}>
+                          {r.snippet || 'Reported content isn’t cached on this device.'}
+                        </Text>
+
+                        {r.reasons.length > 0 && (
+                          <View style={s.reasonRow}>
+                            {r.reasons.map(rc => (
+                              <View key={rc.id} style={s.reasonChip}>
+                                <View style={[s.reasonDot, {backgroundColor: rc.color}]} />
+                                <Text style={s.reasonText}>{rc.name}</Text>
+                              </View>
+                            ))}
                           </View>
-                          <Text style={s.checkLabel}>Also move their past posts to the log</Text>
-                        </Press>
-                      )}
+                        )}
 
-                      <View style={s.actionRow}>
-                        {!!r.snippet && onViewPost && (
-                          <Press style={s.ghostBtn} onPress={() => onViewPost(r.targetId)}>
-                            <Text style={s.ghostText}>View</Text>
-                          </Press>
+                        {r.notes.length > 0 && (
+                          <Text style={s.note} numberOfLines={2}>“{r.notes[0]}”</Text>
                         )}
-                        <Press style={s.ghostBtn} onPress={() => dismiss(r.targetId)}>
-                          <Text style={s.ghostText}>Dismiss</Text>
-                        </Press>
-                        <View style={s.flex1} />
-                        {canLogPost && (
-                          <Press
-                            style={s.warnBtn}
-                            disabled={!!logPostLimit}
-                            onPress={() => logPost(r)}>
-                            <Text style={s.warnText}>Log post</Text>
-                          </Press>
-                        )}
+
+                        {/* "＋ their past posts" — only meaningful with the standing-rule action. */}
                         {canLogAuthor && (
                           <Press
-                            style={s.dangerBtn}
-                            disabled={!!logAuthorLimit}
-                            onPress={() => logAuthor(r.authorPubkey as string, r.targetId)}>
-                            <Text style={s.dangerText}>Send to log</Text>
+                            style={s.checkRow}
+                            onPress={() => togglePast(r.targetId)}
+                            accessibilityRole="checkbox"
+                            accessibilityState={{checked: pastOn}}>
+                            <View style={[s.checkBox, pastOn && s.checkBoxOn]}>
+                              {pastOn && <Text style={s.checkMark}>✓</Text>}
+                            </View>
+                            <Text style={s.checkLabel}>Also move their past posts to the log</Text>
                           </Press>
                         )}
+
+                        <View style={s.actionRow}>
+                          {!!r.snippet && onViewPost && (
+                            <Press style={s.ghostBtn} onPress={() => onViewPost(r.targetId)}>
+                              <Text style={s.ghostText}>View</Text>
+                            </Press>
+                          )}
+                          <Press style={s.ghostBtn} onPress={() => dismiss(r.targetId)}>
+                            <Text style={s.ghostText}>Dismiss</Text>
+                          </Press>
+                          <View style={s.flex1} />
+                          {canLogPost && (
+                            <Press
+                              style={s.warnBtn}
+                              disabled={!!logPostLimit}
+                              onPress={() => logPost(r)}>
+                              <Text style={s.warnText}>Log post</Text>
+                            </Press>
+                          )}
+                          {canLogAuthor && (
+                            <Press
+                              style={s.dangerBtn}
+                              disabled={!!logAuthorLimit}
+                              onPress={() => logAuthor(r.authorPubkey as string, r.targetId)}>
+                              <Text style={s.dangerText}>Send to log</Text>
+                            </Press>
+                          )}
+                        </View>
+                        {(logPostLimit || logAuthorLimit) && (
+                          <Text style={s.limitNote}>{logPostLimit || logAuthorLimit}</Text>
+                        )}
+                        {!canLogPost && !canLogAuthor && (
+                          <Text style={s.limitNote}>Logging this needs a permission you don’t have. You can still dismiss it.</Text>
+                        )}
                       </View>
-                      {(logPostLimit || logAuthorLimit) && (
-                        <Text style={s.limitNote}>{logPostLimit || logAuthorLimit}</Text>
+                    );
+                  })}
+                </View>
+              )
+            ) : loggedRows.length === 0 ? (
+              <Text style={s.empty}>No authors are in the moderation log.</Text>
+            ) : (
+              <View style={s.list}>
+                {loggedRows.map(row => {
+                  const restoreLimit = can('ban')
+                    ? limitFor(row.advisory ? 'unlog-user' : 'unban')
+                    : null;
+                  return (
+                    <View key={row.pubkey} style={s.card}>
+                      <View style={s.cardTop}>
+                        <GradientDot size={22} gradient={getProfile?.(row.pubkey)?.gradient} seed={safeNpubEncode(row.pubkey)} />
+                        <Text style={s.cardName} numberOfLines={1}>{nameFor(row.pubkey)}</Text>
+                        <View style={s.flex1} />
+                        <Text style={s.cardAt}>{relTime(row.since, nowMs)}</Text>
+                      </View>
+                      <Text style={s.banMeta}>
+                        {row.advisory
+                          ? 'Standing rule · posts render in the log'
+                          : 'Legacy ban'}
+                        {row.ban
+                          ? row.ban.until
+                            ? ` · lifts ${relTime(row.ban.until, nowMs)} from now`
+                            : row.advisory
+                              ? ' · also legacy-banned'
+                              : ' · permanent'
+                          : ''}
+                      </Text>
+                      {!!row.ban?.message && (
+                        <Text style={s.snippet} numberOfLines={3}>“{row.ban.message}”</Text>
                       )}
-                      {!canLogPost && !canLogAuthor && (
-                        <Text style={s.limitNote}>Logging this needs a permission you don’t have. You can still dismiss it.</Text>
-                      )}
+                      <View style={s.actionRow}>
+                        <View style={s.flex1} />
+                        {can('ban') ? (
+                          <Press
+                            style={s.ghostBtn}
+                            disabled={!!restoreLimit}
+                            onPress={() => restoreRow(row)}>
+                            <Text style={s.ghostText}>Restore to feed</Text>
+                          </Press>
+                        ) : (
+                          <Text style={s.limitNote}>Restoring isn’t in your permissions.</Text>
+                        )}
+                      </View>
+                      {restoreLimit && <Text style={s.limitNote}>{restoreLimit}</Text>}
                     </View>
                   );
                 })}
               </View>
-            )
-          ) : loggedRows.length === 0 ? (
-            <Text style={s.empty}>No authors are in the moderation log.</Text>
-          ) : (
-            <View style={s.list}>
-              {loggedRows.map(row => {
-                const restoreLimit = can('ban')
-                  ? limitFor(row.advisory ? 'unlog-user' : 'unban')
-                  : null;
-                return (
-                  <View key={row.pubkey} style={s.card}>
-                    <View style={s.cardTop}>
-                      <GradientDot size={22} gradient={getProfile?.(row.pubkey)?.gradient} seed={safeNpubEncode(row.pubkey)} />
-                      <Text style={s.cardName} numberOfLines={1}>{nameFor(row.pubkey)}</Text>
-                      <View style={s.flex1} />
-                      <Text style={s.cardAt}>{relTime(row.since, nowMs)}</Text>
-                    </View>
-                    <Text style={s.banMeta}>
-                      {row.advisory
-                        ? 'Standing rule · posts render in the log'
-                        : 'Legacy ban'}
-                      {row.ban
-                        ? row.ban.until
-                          ? ` · lifts ${relTime(row.ban.until, nowMs)} from now`
-                          : row.advisory
-                            ? ' · also legacy-banned'
-                            : ' · permanent'
-                        : ''}
-                    </Text>
-                    {!!row.ban?.message && (
-                      <Text style={s.snippet} numberOfLines={3}>“{row.ban.message}”</Text>
-                    )}
-                    <View style={s.actionRow}>
-                      <View style={s.flex1} />
-                      {can('ban') ? (
-                        <Press
-                          style={s.ghostBtn}
-                          disabled={!!restoreLimit}
-                          onPress={() => restoreRow(row)}>
-                          <Text style={s.ghostText}>Restore to feed</Text>
-                        </Press>
-                      ) : (
-                        <Text style={s.limitNote}>Restoring isn’t in your permissions.</Text>
-                      )}
-                    </View>
-                    {restoreLimit && <Text style={s.limitNote}>{restoreLimit}</Text>}
-                  </View>
-                );
-              })}
-            </View>
-          )}
+            )}
 
-          <Text style={s.footer}>
-            🔒 Moderation removes nothing — every action publishes a signed, reversible directive that
-            routes content to this log. Open the Moderation Log to review the full history.
-          </Text>
-        </ScrollView>
+            <Text style={s.footer}>
+              🔒 Moderation removes nothing — every action publishes a signed, reversible directive that
+              routes content to this log. Open the Moderation Log to review the full history.
+            </Text>
+          </ScrollView>
+        </SwipeBackView>
       </SafeAreaView>
     </Modal>
   );

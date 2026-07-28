@@ -10,6 +10,7 @@ import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {View, StyleSheet} from 'react-native';
 import {colors} from '../../ui/theme';
 import {BackModal} from '../../ui/back';
+import {SwipeBackView} from '../../ui/SwipeBack';
 import type {PictureRules} from '../../feed/pictureRules';
 import {saveEventEmbed} from '../../channels/savedEmbeds';
 import type {EventsApi} from '../api';
@@ -259,77 +260,85 @@ export function EventsOrganizerHost({
     <BackModal visible={visible} animationType="slide" onClose={onClose} onBack={handleBack}>
       {mounted.current && (
         <View style={s.root}>
-          {screen === 'list' && (
-            <YourEventsScreen
-              upcoming={upcoming}
-              drafts={drafts}
-              past={past}
-              onNew={() => openEditor(null)}
-              onOpenManage={id => void openManage(id)}
-              onEditDraft={id => {
-                const entry = entries.find(e => e.id === id);
-                if (entry) openEditor(entry);
-              }}
-              onBack={onClose}
-            />
-          )}
-          {screen === 'create' && (
-            <EventEditorScreen
-              // Remount per target so field state re-seeds when switching drafts.
-              key={editing?.id ?? 'new'}
-              mode={editorMode}
-              initial={editorInitial}
-              channels={api.channelsIRun()}
-              hostName={api.viewerIdentity().name}
-              hostGrad={api.viewerIdentity().grad}
-              pictureRules={pictureRules}
-              picturesSpentBytes={picturesSpentBytes}
-              allowVoice={allowVoice}
-              postRules={postRules}
-              savedPosts={savedPosts}
-              savedEmbedTokens={savedEmbedTokens}
-              onPublish={draft => void publish(draft)}
-              onSaveDraft={draft => void saveDraft(draft)}
-              onAddToEmbeds={draft => void addToEmbeds(draft)}
-              onBack={() => setScreen(managing && editorMode === 'edit' ? 'manage' : 'list')}
-            />
-          )}
-          {screen === 'manage' && manageVm && managing && (
-            <ManageScreen
-              vm={manageVm}
-              cb={{
-                onApprove: pk => {
-                  void api.approve(coordFor(managing), pk).then(bump);
-                },
-                onDecline: pk => {
-                  void api.decline(coordFor(managing), pk).then(bump);
-                },
-                onUndo: pk => {
-                  void api.undoDecision(coordFor(managing), pk).then(bump);
-                },
-                onOfferSpot: npub => {
-                  void api.offerSpot(coordFor(managing), npub).then(bump);
-                },
-                onEdit: () => openEditor(managing),
-                onPreview: () => onPreview(coordFor(managing)),
-                onMessageAll: message => {
-                  void api.messageAll(coordFor(managing), message).then(bump);
-                },
-                onExportCsv: exportCsv,
-                onCancelEvent: () => {
-                  void api.cancel(coordFor(managing)).then(() => {
-                    bump();
+          <SwipeBackView
+            // Wired to `onClose` (BackModal's own close), never `handleBack` — so this must only be
+            // live on `list`: on `manage`, `onClose` would skip the one-level peel back to `list` that
+            // `handleBack` gives the header ‹ / hardware BACK (back.tsx contract rule 1, one press one
+            // level); `create` is the event editor, excluded from swipe-back outright by design.
+            enabled={screen === 'list'}
+            onBack={onClose}>
+            {screen === 'list' && (
+              <YourEventsScreen
+                upcoming={upcoming}
+                drafts={drafts}
+                past={past}
+                onNew={() => openEditor(null)}
+                onOpenManage={id => void openManage(id)}
+                onEditDraft={id => {
+                  const entry = entries.find(e => e.id === id);
+                  if (entry) openEditor(entry);
+                }}
+                onBack={onClose}
+              />
+            )}
+            {screen === 'create' && (
+              <EventEditorScreen
+                // Remount per target so field state re-seeds when switching drafts.
+                key={editing?.id ?? 'new'}
+                mode={editorMode}
+                initial={editorInitial}
+                channels={api.channelsIRun()}
+                hostName={api.viewerIdentity().name}
+                hostGrad={api.viewerIdentity().grad}
+                pictureRules={pictureRules}
+                picturesSpentBytes={picturesSpentBytes}
+                allowVoice={allowVoice}
+                postRules={postRules}
+                savedPosts={savedPosts}
+                savedEmbedTokens={savedEmbedTokens}
+                onPublish={draft => void publish(draft)}
+                onSaveDraft={draft => void saveDraft(draft)}
+                onAddToEmbeds={draft => void addToEmbeds(draft)}
+                onBack={() => setScreen(managing && editorMode === 'edit' ? 'manage' : 'list')}
+              />
+            )}
+            {screen === 'manage' && manageVm && managing && (
+              <ManageScreen
+                vm={manageVm}
+                cb={{
+                  onApprove: pk => {
+                    void api.approve(coordFor(managing), pk).then(bump);
+                  },
+                  onDecline: pk => {
+                    void api.decline(coordFor(managing), pk).then(bump);
+                  },
+                  onUndo: pk => {
+                    void api.undoDecision(coordFor(managing), pk).then(bump);
+                  },
+                  onOfferSpot: npub => {
+                    void api.offerSpot(coordFor(managing), npub).then(bump);
+                  },
+                  onEdit: () => openEditor(managing),
+                  onPreview: () => onPreview(coordFor(managing)),
+                  onMessageAll: message => {
+                    void api.messageAll(coordFor(managing), message).then(bump);
+                  },
+                  onExportCsv: exportCsv,
+                  onCancelEvent: () => {
+                    void api.cancel(coordFor(managing)).then(() => {
+                      bump();
+                      void refresh();
+                    });
+                  },
+                  onBack: () => {
+                    setManaging(null);
+                    setScreen('list');
                     void refresh();
-                  });
-                },
-                onBack: () => {
-                  setManaging(null);
-                  setScreen('list');
-                  void refresh();
-                },
-              }}
-            />
-          )}
+                  },
+                }}
+              />
+            )}
+          </SwipeBackView>
         </View>
       )}
     </BackModal>

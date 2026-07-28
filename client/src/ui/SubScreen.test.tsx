@@ -12,7 +12,7 @@
  * layout-animation prop. On iOS an `entering` animation on a position:absolute overlay silently
  * breaks the whole subtree's touch handling — a channel opened from the Updates tab rendered fine
  * but was completely tap-dead (the back button did nothing). The slide now runs through
- * `useSubScreenSlideIn` (a useAnimatedStyle transform on a normal, fully-interactive Animated.View),
+ * `useSubScreenTransition` (a useAnimatedStyle transform on a normal, fully-interactive Animated.View),
  * which reproduces the exact same opaque-from-frame-one motion while staying touchable. This file
  * pins the geometry contract that keeps the flicker fixed.
  */

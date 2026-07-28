@@ -21,6 +21,7 @@
  */
 import React, {useEffect, useState} from 'react';
 import {Alert, Modal, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View} from 'react-native';
+import {SwipeBackView} from '../../ui/SwipeBack';
 import {colors, type as typeScale, weight} from '../../ui/theme';
 import {GradientAvatar} from '../../ui/GradientAvatar';
 import {npubFor, shortNpub} from '../../channels/components/primitives';
@@ -150,57 +151,64 @@ export function DraftAccessScreen({
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
       <SafeAreaView style={s.page}>
-        <View style={s.header}>
-          <Pressable onPress={onClose} hitSlop={10} style={s.headerSide}>
-            <Text style={s.headerLeft}>‹ Back</Text>
-          </Pressable>
-          <Text style={s.headerTitle} numberOfLines={1}>Manage access</Text>
-          <View style={[s.headerSide, s.headerRight]} />
-        </View>
-
-        <ScrollView style={s.flex} contentContainerStyle={s.scroll}>
-          {!!draftTitle && <Text style={s.draftTitle} numberOfLines={2}>{draftTitle}</Text>}
-
-          <View style={s.labelRow}>
-            <Text style={s.label}>PENDING</Text>
-            {pendingCount > 0 && (
-              <View style={s.badge}><Text style={s.badgeText}>{pendingCount}</Text></View>
-            )}
+        {/* SwipeBackView wraps the SafeAreaView's children so the opaque page background stays put
+            as the backdrop while the content slides away — see
+            PLAN_SWIPE_BACK_GESTURE_2026-07-27.md's "Modal-hosted pages" note. `onBack` is `onClose`,
+            the same function the header ‹ Back already calls, so the button, the hardware key and
+            the swipe can never drift apart. */}
+        <SwipeBackView onBack={onClose}>
+          <View style={s.header}>
+            <Pressable onPress={onClose} hitSlop={10} style={s.headerSide}>
+              <Text style={s.headerLeft}>‹ Back</Text>
+            </Pressable>
+            <Text style={s.headerTitle} numberOfLines={1}>Manage access</Text>
+            <View style={[s.headerSide, s.headerRight]} />
           </View>
-          {liveQueue.length === 0 && resolvedCards.length === 0 ? (
-            <View style={s.empty}><Text style={s.emptyText}>No pending requests.</Text></View>
-          ) : (
-            <>
-              {liveQueue.map(rq => requestCard(rq))}
-              {resolvedCards.map(rq => requestCard(rq, rq.state))}
-              <Text style={s.footer}>
-                Declining is silent — the requester is never told; their request just stays "pending" forever.
-              </Text>
-            </>
-          )}
 
-          <View style={s.labelRow}>
-            <Text style={s.label}>APPROVED · {approved.length}</Text>
-          </View>
-          {approved.length === 0 ? (
-            <View style={s.empty}><Text style={s.emptyText}>No one has access yet.</Text></View>
-          ) : (
-            <View style={s.apprCard}>
-              {approved.map(g => (
-                <View key={g.pubkey} style={s.apprRow}>
-                  <GradientAvatar seed={npubFor(g.pubkey)} size={32} radius={16} />
-                  <View style={s.apprText}>
-                    <Text style={s.apprName} numberOfLines={1}>{identityName(g.pubkey, g.name)}</Text>
-                    <Text style={s.apprNpub} numberOfLines={1}>{shortNpub(npubFor(g.pubkey), 11, 3)}</Text>
-                  </View>
-                  <Pressable onPress={() => confirmRevoke(g.pubkey, g.name)} hitSlop={8} accessibilityLabel={`revoke-${g.pubkey}`}>
-                    <Text style={s.apprRevoke}>✕</Text>
-                  </Pressable>
-                </View>
-              ))}
+          <ScrollView style={s.flex} contentContainerStyle={s.scroll}>
+            {!!draftTitle && <Text style={s.draftTitle} numberOfLines={2}>{draftTitle}</Text>}
+
+            <View style={s.labelRow}>
+              <Text style={s.label}>PENDING</Text>
+              {pendingCount > 0 && (
+                <View style={s.badge}><Text style={s.badgeText}>{pendingCount}</Text></View>
+              )}
             </View>
-          )}
-        </ScrollView>
+            {liveQueue.length === 0 && resolvedCards.length === 0 ? (
+              <View style={s.empty}><Text style={s.emptyText}>No pending requests.</Text></View>
+            ) : (
+              <>
+                {liveQueue.map(rq => requestCard(rq))}
+                {resolvedCards.map(rq => requestCard(rq, rq.state))}
+                <Text style={s.footer}>
+                  Declining is silent — the requester is never told; their request just stays "pending" forever.
+                </Text>
+              </>
+            )}
+
+            <View style={s.labelRow}>
+              <Text style={s.label}>APPROVED · {approved.length}</Text>
+            </View>
+            {approved.length === 0 ? (
+              <View style={s.empty}><Text style={s.emptyText}>No one has access yet.</Text></View>
+            ) : (
+              <View style={s.apprCard}>
+                {approved.map(g => (
+                  <View key={g.pubkey} style={s.apprRow}>
+                    <GradientAvatar seed={npubFor(g.pubkey)} size={32} radius={16} />
+                    <View style={s.apprText}>
+                      <Text style={s.apprName} numberOfLines={1}>{identityName(g.pubkey, g.name)}</Text>
+                      <Text style={s.apprNpub} numberOfLines={1}>{shortNpub(npubFor(g.pubkey), 11, 3)}</Text>
+                    </View>
+                    <Pressable onPress={() => confirmRevoke(g.pubkey, g.name)} hitSlop={8} accessibilityLabel={`revoke-${g.pubkey}`}>
+                      <Text style={s.apprRevoke}>✕</Text>
+                    </Pressable>
+                  </View>
+                ))}
+              </View>
+            )}
+          </ScrollView>
+        </SwipeBackView>
       </SafeAreaView>
     </Modal>
   );

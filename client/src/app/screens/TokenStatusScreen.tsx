@@ -17,6 +17,7 @@
 import React from 'react';
 import {Modal, SafeAreaView, ScrollView, StyleSheet, Text, View} from 'react-native';
 import {Press} from '../../ui/Press';
+import {SwipeBackView} from '../../ui/SwipeBack';
 import {radius, space, type as typeScale, weight, type Palette} from '../../ui/theme';
 import {
   EMPTY_TOKEN_STATUS,
@@ -87,88 +88,94 @@ export function TokenStatusScreen({
       {/* SafeAreaView (not View): a Modal renders outside the app's root SafeAreaView, so it
           re-applies the top inset — otherwise the header flanks the Dynamic Island. */}
       <SafeAreaView style={[s.root, {backgroundColor: c.bg}]}>
-        <View style={[s.header, {borderBottomColor: c.border}]}>
-          <Press onPress={onClose} hitSlop={10} style={s.back}>
-            <Text style={[s.backText, {color: c.textSecondary}]}>‹</Text>
-          </Press>
-          <Text style={[s.title, {color: c.textPrimary}]}>Token status</Text>
-          <Press onPress={() => onRefresh?.()} hitSlop={10} style={s.refreshBtn} disabled={!onRefresh}>
-            <Text style={[s.refreshText, {color: onRefresh ? c.accent : c.textMuted}]}>Refresh</Text>
-          </Press>
-        </View>
+        {/* Opaque Modal: this SafeAreaView (c.bg) is the backdrop and stays put; SwipeBackView wraps
+            its children so the drag translates the actual content, revealing this same bg beneath —
+            no window transparency surgery needed. `onBack` is `onClose`, the SAME identifier the
+            header ‹ below already calls. */}
+        <SwipeBackView onBack={onClose}>
+          <View style={[s.header, {borderBottomColor: c.border}]}>
+            <Press onPress={onClose} hitSlop={10} style={s.back}>
+              <Text style={[s.backText, {color: c.textSecondary}]}>‹</Text>
+            </Press>
+            <Text style={[s.title, {color: c.textPrimary}]}>Token status</Text>
+            <Press onPress={() => onRefresh?.()} hitSlop={10} style={s.refreshBtn} disabled={!onRefresh}>
+              <Text style={[s.refreshText, {color: onRefresh ? c.accent : c.textMuted}]}>Refresh</Text>
+            </Press>
+          </View>
 
-        <ScrollView contentContainerStyle={s.listPad} showsVerticalScrollIndicator={false}>
-          {status.communityKeyError && (
-            <View style={[s.banner, {backgroundColor: c.dangerBg, borderColor: c.danger}]}>
-              <Text style={[s.bannerText, {color: c.danger}]}>{status.communityKeyError}</Text>
-            </View>
-          )}
-
-          <Text style={[s.sectionLabel, {color: c.textMuted}]}>WALLETS</Text>
-          {status.walletRows.length === 0 ? (
-            <Text style={[s.empty, {color: c.textMuted}]}>No wallet counts yet — tap Refresh</Text>
-          ) : (
-            status.walletRows.map(row => (
-              <View key={row.purpose} style={[s.row, {backgroundColor: c.surface, borderColor: c.border}]}>
-                <Text style={[s.rowLabel, {color: c.textPrimary}]}>{WALLET_LABELS[row.purpose]}</Text>
-                <View style={s.rowRight}>
-                  {!row.active && (
-                    <Text style={[s.inactiveTag, {color: c.textMuted}]}>inactive</Text>
-                  )}
-                  <Text style={[s.count, {color: row.active ? c.textPrimary : c.textMuted}]}>{row.count}</Text>
-                </View>
+          <ScrollView contentContainerStyle={s.listPad} showsVerticalScrollIndicator={false}>
+            {status.communityKeyError && (
+              <View style={[s.banner, {backgroundColor: c.dangerBg, borderColor: c.danger}]}>
+                <Text style={[s.bannerText, {color: c.danger}]}>{status.communityKeyError}</Text>
               </View>
-            ))
-          )}
+            )}
 
-          <Text style={[s.sectionLabel, {color: c.textMuted, marginTop: space.lg}]}>PROVISIONING</Text>
-          {status.domains.length === 0 ? (
-            <Text style={[s.empty, {color: c.textMuted}]}>No domains negotiated yet</Text>
-          ) : (
-            status.domains.map(d => {
-              const v = verdictStyle(d.verdict, c);
-              return (
-                <View key={d.domain} style={[s.row, s.domainRow, {backgroundColor: c.surface, borderColor: c.border}]}>
-                  <View style={s.domainTop}>
-                    <Text style={[s.rowLabel, {color: c.textPrimary}]}>
-                      {DOMAIN_LABELS[d.domain] ?? d.domain}
-                    </Text>
-                    <Text style={[s.badge, {color: v.fg, backgroundColor: v.bg}]}>{v.label}</Text>
+            <Text style={[s.sectionLabel, {color: c.textMuted}]}>WALLETS</Text>
+            {status.walletRows.length === 0 ? (
+              <Text style={[s.empty, {color: c.textMuted}]}>No wallet counts yet — tap Refresh</Text>
+            ) : (
+              status.walletRows.map(row => (
+                <View key={row.purpose} style={[s.row, {backgroundColor: c.surface, borderColor: c.border}]}>
+                  <Text style={[s.rowLabel, {color: c.textPrimary}]}>{WALLET_LABELS[row.purpose]}</Text>
+                  <View style={s.rowRight}>
+                    {!row.active && (
+                      <Text style={[s.inactiveTag, {color: c.textMuted}]}>inactive</Text>
+                    )}
+                    <Text style={[s.count, {color: row.active ? c.textPrimary : c.textMuted}]}>{row.count}</Text>
                   </View>
-                  <Text style={[s.rowMeta, {color: c.textSecondary}]}>
-                    {d.advertised
-                      ? `relay: ${d.relayKeyCount} key${d.relayKeyCount === 1 ? '' : 's'}`
-                      : 'relay: not advertised'}
-                    {d.walletFingerprint ? ` · wallet: ${d.walletFingerprint}` : ' · wallet: none'}
-                  </Text>
                 </View>
-              );
-            })
-          )}
+              ))
+            )}
 
-          <Text style={[s.sectionLabel, {color: c.textMuted, marginTop: space.lg}]}>RECENT FAILURES</Text>
-          {status.recentFailures.length === 0 ? (
-            <Text style={[s.empty, {color: c.textMuted}]}>No recent token failures</Text>
-          ) : (
-            status.recentFailures.map((f, i) => (
-              <View key={`${f.ts}-${i}`} style={[s.row, s.domainRow, {backgroundColor: c.surface, borderColor: c.border}]}>
-                <View style={s.domainTop}>
-                  <Text style={[s.rowWhen, {color: c.textSecondary}]}>{formatClock(f.ts)}</Text>
-                  <Text
-                    style={[
-                      s.badge,
-                      f.level === 'error'
-                        ? {color: c.danger, backgroundColor: c.dangerBg}
-                        : {color: c.warning, backgroundColor: c.warningBg},
-                    ]}>
-                    {f.scope}
-                  </Text>
+            <Text style={[s.sectionLabel, {color: c.textMuted, marginTop: space.lg}]}>PROVISIONING</Text>
+            {status.domains.length === 0 ? (
+              <Text style={[s.empty, {color: c.textMuted}]}>No domains negotiated yet</Text>
+            ) : (
+              status.domains.map(d => {
+                const v = verdictStyle(d.verdict, c);
+                return (
+                  <View key={d.domain} style={[s.row, s.domainRow, {backgroundColor: c.surface, borderColor: c.border}]}>
+                    <View style={s.domainTop}>
+                      <Text style={[s.rowLabel, {color: c.textPrimary}]}>
+                        {DOMAIN_LABELS[d.domain] ?? d.domain}
+                      </Text>
+                      <Text style={[s.badge, {color: v.fg, backgroundColor: v.bg}]}>{v.label}</Text>
+                    </View>
+                    <Text style={[s.rowMeta, {color: c.textSecondary}]}>
+                      {d.advertised
+                        ? `relay: ${d.relayKeyCount} key${d.relayKeyCount === 1 ? '' : 's'}`
+                        : 'relay: not advertised'}
+                      {d.walletFingerprint ? ` · wallet: ${d.walletFingerprint}` : ' · wallet: none'}
+                    </Text>
+                  </View>
+                );
+              })
+            )}
+
+            <Text style={[s.sectionLabel, {color: c.textMuted, marginTop: space.lg}]}>RECENT FAILURES</Text>
+            {status.recentFailures.length === 0 ? (
+              <Text style={[s.empty, {color: c.textMuted}]}>No recent token failures</Text>
+            ) : (
+              status.recentFailures.map((f, i) => (
+                <View key={`${f.ts}-${i}`} style={[s.row, s.domainRow, {backgroundColor: c.surface, borderColor: c.border}]}>
+                  <View style={s.domainTop}>
+                    <Text style={[s.rowWhen, {color: c.textSecondary}]}>{formatClock(f.ts)}</Text>
+                    <Text
+                      style={[
+                        s.badge,
+                        f.level === 'error'
+                          ? {color: c.danger, backgroundColor: c.dangerBg}
+                          : {color: c.warning, backgroundColor: c.warningBg},
+                      ]}>
+                      {f.scope}
+                    </Text>
+                  </View>
+                  <Text style={[s.rowMeta, {color: c.textSecondary}]}>{f.message}</Text>
                 </View>
-                <Text style={[s.rowMeta, {color: c.textSecondary}]}>{f.message}</Text>
-              </View>
-            ))
-          )}
-        </ScrollView>
+              ))
+            )}
+          </ScrollView>
+        </SwipeBackView>
       </SafeAreaView>
     </Modal>
   );

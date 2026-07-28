@@ -30,6 +30,8 @@ import {Modal, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View} from
 import {Press} from '../../ui/Press';
 import {colors, radius} from '../../ui/theme';
 import {GradientAvatar} from '../../ui/GradientAvatar';
+import {SwipeBackView} from '../../ui/SwipeBack';
+import {useSwipeOptOut} from '../../ui/swipeOptOut';
 import {RichText} from './RichText';
 import {ThreadView} from './ThreadView';
 import {CommentComposer} from './CommentComposer';
@@ -155,56 +157,61 @@ export function EmbedReader({
   return (
     <Modal visible={!!target} animationType="slide" onRequestClose={onClose}>
       <SafeAreaView style={s.page}>
-        <View style={s.header}>
-          <Press onPress={onClose} hitSlop={10} style={s.headerSide}>
-            <Text style={s.headerLeft}>‹ Back</Text>
-          </Press>
-          <Text style={s.headerEyebrow}>{msg ? 'PRIVATE POST' : 'DRAFT'}</Text>
-          {/* Drafts deliberately have NO save-onward path — forking is their only onward action
-              (Phase 5§E's locked decision), so this stays gated on `msg`. */}
-          {msg && onSaveEmbed && target ? (
-            <Press
-              onPress={() => { if (!saved) onSaveEmbed(target); }}
-              hitSlop={10}
-              disabled={saved}
-              style={[s.headerSide, s.headerRight]}
-              accessibilityLabel="save this embed">
-              <Text style={[s.headerSave, saved && s.headerSaved]}>{saved ? 'Saved ✓' : 'Save to embed'}</Text>
+        {/* SafeAreaView stays put as the opaque backdrop (s.page: colors.bg, flex:1) — only its
+            children slide via SwipeBackView, so a swipe-back drag reveals real app background
+            instead of a transparent hole onto this Modal's bare Dialog window. */}
+        <SwipeBackView onBack={onClose}>
+          <View style={s.header}>
+            <Press onPress={onClose} hitSlop={10} style={s.headerSide}>
+              <Text style={s.headerLeft}>‹ Back</Text>
             </Press>
-          ) : (
-            <View style={[s.headerSide, s.headerRight]} />
-          )}
-        </View>
+            <Text style={s.headerEyebrow}>{msg ? 'PRIVATE POST' : 'DRAFT'}</Text>
+            {/* Drafts deliberately have NO save-onward path — forking is their only onward action
+                (Phase 5§E's locked decision), so this stays gated on `msg`. */}
+            {msg && onSaveEmbed && target ? (
+              <Press
+                onPress={() => { if (!saved) onSaveEmbed(target); }}
+                hitSlop={10}
+                disabled={saved}
+                style={[s.headerSide, s.headerRight]}
+                accessibilityLabel="save this embed">
+                <Text style={[s.headerSave, saved && s.headerSaved]}>{saved ? 'Saved ✓' : 'Save to embed'}</Text>
+              </Press>
+            ) : (
+              <View style={[s.headerSide, s.headerRight]} />
+            )}
+          </View>
 
-        {msg ? (
-          <MsgReaderBody msg={msg} />
-        ) : draftTarget === 'legacy' ? (
-          <LegacyDraftBody />
-        ) : draftTarget ? (
-          <DraftReaderBody
-            // Remount fresh per token — every hook below (access state, fetched snapshot, CW reveal,
-            // reply target) is scoped to ONE draft; reusing the instance across a different token
-            // opened in the same session would otherwise leak the previous draft's resolved state.
-            key={target?.token}
-            draft={draftTarget}
-            onAuthorPress={onAuthorPress}
-            onGetDraftAccessState={onGetDraftAccessState}
-            onGetMyDraftDelivery={onGetMyDraftDelivery}
-            onRequestDraftAccess={onRequestDraftAccess}
-            accessVersion={accessVersion}
-            onGetOwnerDraftSnapshot={onGetOwnerDraftSnapshot}
-            onForkDraft={onForkDraft}
-            onGetDraftThread={onGetDraftThread}
-            onGetDraftCommentCount={onGetDraftCommentCount}
-            onComment={onComment}
-            onGetProfile={onGetProfile}
-            allowVoice={allowVoice}
-            pictureRules={pictureRules}
-            picturesSpentBytes={picturesSpentBytes}
-            myGradient={myGradient}
-            myPubkey={myPubkey}
-          />
-        ) : null}
+          {msg ? (
+            <MsgReaderBody msg={msg} />
+          ) : draftTarget === 'legacy' ? (
+            <LegacyDraftBody />
+          ) : draftTarget ? (
+            <DraftReaderBody
+              // Remount fresh per token — every hook below (access state, fetched snapshot, CW reveal,
+              // reply target) is scoped to ONE draft; reusing the instance across a different token
+              // opened in the same session would otherwise leak the previous draft's resolved state.
+              key={target?.token}
+              draft={draftTarget}
+              onAuthorPress={onAuthorPress}
+              onGetDraftAccessState={onGetDraftAccessState}
+              onGetMyDraftDelivery={onGetMyDraftDelivery}
+              onRequestDraftAccess={onRequestDraftAccess}
+              accessVersion={accessVersion}
+              onGetOwnerDraftSnapshot={onGetOwnerDraftSnapshot}
+              onForkDraft={onForkDraft}
+              onGetDraftThread={onGetDraftThread}
+              onGetDraftCommentCount={onGetDraftCommentCount}
+              onComment={onComment}
+              onGetProfile={onGetProfile}
+              allowVoice={allowVoice}
+              pictureRules={pictureRules}
+              picturesSpentBytes={picturesSpentBytes}
+              myGradient={myGradient}
+              myPubkey={myPubkey}
+            />
+          ) : null}
+        </SwipeBackView>
       </SafeAreaView>
     </Modal>
   );
@@ -331,6 +338,7 @@ function DraftReaderBody({
   // Content-warning reveal gate on the delivered snapshot — matches the app's standing CW posture.
   const [revealed, setRevealed] = useState(false);
   const [replyTarget, setReplyTarget] = useState<CommentNode | null>(null);
+  const optOut = useSwipeOptOut();
 
   const refreshAccess = useCallback((): void => {
     if (!onGetDraftAccessState) { setAccess('none'); return; }
@@ -467,23 +475,29 @@ function DraftReaderBody({
         listHeader={header}
       />
       {onComment && (
-        <CommentComposer
-          placeholder={replyTarget ? 'Reply to comment…' : 'Add a comment…'}
-          submitLabel={replyTarget ? 'Reply' : 'Comment'}
-          allowVoice={allowVoice}
-          pictureRules={pictureRules}
-          picturesSpentBytes={picturesSpentBytes}
-          myGradient={myGradient}
-          myPubkey={myPubkey}
-          rootTitle={bodyTitle || undefined}
-          onSubmit={text => {
-            const parent = replyTarget
-              ? {id: replyTarget.event.id, pubkey: replyTarget.event.pubkey, kind: replyTarget.event.kind}
-              : {id: shareId, pubkey: draftRootPubkey, kind: DRAFT_COMMENT_ROOT_KIND};
-            onComment(text, shareId, draftRootPubkey, DRAFT_COMMENT_ROOT_KIND, parent.id, parent.pubkey, parent.kind);
-            setReplyTarget(null);
-          }}
-        />
+        // Wrapped in a plain View (CommentComposer's own props don't forward touch handlers) so the
+        // swipe-back drag stands down for any touch landing on it: the composer's TextInput does its
+        // own selection-handle drag, which never joins JS responder negotiation, so without this the
+        // page swipe would win that drag instead.
+        <View {...optOut}>
+          <CommentComposer
+            placeholder={replyTarget ? 'Reply to comment…' : 'Add a comment…'}
+            submitLabel={replyTarget ? 'Reply' : 'Comment'}
+            allowVoice={allowVoice}
+            pictureRules={pictureRules}
+            picturesSpentBytes={picturesSpentBytes}
+            myGradient={myGradient}
+            myPubkey={myPubkey}
+            rootTitle={bodyTitle || undefined}
+            onSubmit={text => {
+              const parent = replyTarget
+                ? {id: replyTarget.event.id, pubkey: replyTarget.event.pubkey, kind: replyTarget.event.kind}
+                : {id: shareId, pubkey: draftRootPubkey, kind: DRAFT_COMMENT_ROOT_KIND};
+              onComment(text, shareId, draftRootPubkey, DRAFT_COMMENT_ROOT_KIND, parent.id, parent.pubkey, parent.kind);
+              setReplyTarget(null);
+            }}
+          />
+        </View>
       )}
     </>
   );

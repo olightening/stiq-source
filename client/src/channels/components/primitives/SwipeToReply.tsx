@@ -1,8 +1,10 @@
 /**
  * SwipeToReply — wrap a message row to make it swipe-to-reply, Telegram-style.
  *
- * Dragging anywhere in the row to the RIGHT past a small threshold reveals a ↩ glyph in the left
- * gutter and, on release, fires `onReply()`. The row springs back either way. Built on the RN
+ * Dragging anywhere in the row to the LEFT past a small threshold reveals a ↩ glyph in the right
+ * gutter and, on release, fires `onReply()`. The row springs back either way. Leftward, not
+ * rightward: a rightward drag anywhere on a page is the app-wide "go back" gesture, so this
+ * primitive has to vacate that direction rather than fight it for the same swipe. Built on the RN
  * `PanResponder` (no gesture-handler dependency). The whole row is the hit target (full width,
  * including the empty space beside the bubble), and a clearly-horizontal drag is claimed even in
  * the capture phase — so a swipe that starts ON the bubble (over the ⋯/reaction chips) still
@@ -18,8 +20,9 @@ const MAX_PULL = 88; // px the row can travel
 // A drag is "clearly horizontal" once it moves this many px sideways while staying dominantly
 // horizontal. Used both to start the pan in the empty gutter and to CAPTURE it over child
 // Pressables (the bubble's ⋯ / reaction chips) so a swipe-on-the-bubble isn't swallowed by them.
+// Tests LEFTWARD travel (negative dx) — see the module header for why this primitive claims left.
 const isHorizontal = (dx: number, dy: number, min: number): boolean =>
-  dx > min && dx > Math.abs(dy) * 1.2;
+  -dx > min && -dx > Math.abs(dy) * 1.2;
 
 export function SwipeToReply({
   onReply,
@@ -43,13 +46,13 @@ export function SwipeToReply({
       // The slightly higher threshold keeps taps and vertical scrolls with their normal targets.
       onMoveShouldSetPanResponderCapture: (_e, g) => enabled && isHorizontal(g.dx, g.dy, 10),
       onPanResponderMove: (_e, g) => {
-        const dx = Math.max(0, Math.min(g.dx, MAX_PULL));
+        const dx = Math.min(0, Math.max(g.dx, -MAX_PULL));
         translateX.setValue(dx);
-        armed.current = dx >= TRIGGER;
+        armed.current = dx <= -TRIGGER;
       },
       // Once a clearly-horizontal drag has been claimed (above), don't let an ancestor (the
       // transcript FlatList) steal it back mid-gesture — a vertical wobble partway through a
-      // deliberate right-swipe must not cancel the reply. Vertical scrolling is unaffected: the
+      // deliberate left-swipe must not cancel the reply. Vertical scrolling is unaffected: the
       // FlatList only ever gets a scroll gesture in the first place when ITS OWN capture check
       // (dominant vertical movement) wins before this responder is granted.
       onPanResponderTerminationRequest: () => false,
@@ -72,9 +75,11 @@ export function SwipeToReply({
 
   if (!enabled) return <>{children}</>;
 
-  // ↩ glyph fades/scales in as the row is pulled; it sits in the left gutter, behind the row.
-  const iconOpacity = translateX.interpolate({inputRange: [0, TRIGGER], outputRange: [0, 1], extrapolate: 'clamp'});
-  const iconScale = translateX.interpolate({inputRange: [0, TRIGGER], outputRange: [0.6, 1], extrapolate: 'clamp'});
+  // ↩ glyph fades/scales in as the row is pulled; it sits in the right gutter, behind the row.
+  // translateX travels NEGATIVE (leftward pull), so inputRange must still read low→high — [-TRIGGER,
+  // 0] — with the output pairs reversed to keep the glyph fading/scaling IN as the pull deepens.
+  const iconOpacity = translateX.interpolate({inputRange: [-TRIGGER, 0], outputRange: [1, 0], extrapolate: 'clamp'});
+  const iconScale = translateX.interpolate({inputRange: [-TRIGGER, 0], outputRange: [1, 0.6], extrapolate: 'clamp'});
 
   return (
     <View style={s.root}>
@@ -92,7 +97,7 @@ export function SwipeToReply({
 const s = StyleSheet.create({
   root: {width: '100%'},
   pan: {width: '100%'},
-  gutter: {position: 'absolute', left: 14, top: 0, bottom: 0, justifyContent: 'center'},
+  gutter: {position: 'absolute', right: 14, top: 0, bottom: 0, justifyContent: 'center'},
   iconCircle: {
     width: 30,
     height: 30,

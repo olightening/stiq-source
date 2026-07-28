@@ -15,6 +15,7 @@
 import React, {useEffect, useState} from 'react';
 import {Modal, SafeAreaView, ScrollView, StyleSheet, Text, View} from 'react-native';
 import {Press} from '../../ui/Press';
+import {SwipeBackView} from '../../ui/SwipeBack';
 import {radius, space, type as typeScale, weight, type Palette} from '../../ui/theme';
 import {clearSyncStats, getSyncStats, subscribeSyncStats} from '../../nostr/syncStats';
 
@@ -54,50 +55,56 @@ export function SyncDebugScreen({visible, onClose, c}: SyncDebugScreenProps): Re
       {/* SafeAreaView (not View): a Modal renders outside the app's root SafeAreaView, so it
           re-applies the top inset — otherwise the header flanks the Dynamic Island. */}
       <SafeAreaView style={[s.root, {backgroundColor: c.bg}]}>
-        <View style={[s.header, {borderBottomColor: c.border}]}>
-          <Press onPress={onClose} hitSlop={10} style={s.back}>
-            <Text style={[s.backText, {color: c.textSecondary}]}>‹</Text>
-          </Press>
-          <Text style={[s.title, {color: c.textPrimary}]}>Sync diagnostics</Text>
-          <Press
-            onPress={() => {
-              clearSyncStats();
-              setTick(t => t + 1);
-            }}
-            hitSlop={10}
-            style={s.clearBtn}>
-            <Text style={[s.clearText, {color: c.accent}]}>Clear</Text>
-          </Press>
-        </View>
-
-        {rows.length === 0 ? (
-          <View style={s.center}>
-            <Text style={[s.empty, {color: c.textMuted}]}>No reconciliations yet</Text>
+        {/* Opaque Modal: this SafeAreaView (c.bg) is the backdrop and stays put; SwipeBackView wraps
+            its children so the drag translates the actual content, revealing this same bg beneath —
+            no window transparency surgery needed. `onBack` is `onClose`, the SAME identifier the
+            header ‹ below already calls. */}
+        <SwipeBackView onBack={onClose}>
+          <View style={[s.header, {borderBottomColor: c.border}]}>
+            <Press onPress={onClose} hitSlop={10} style={s.back}>
+              <Text style={[s.backText, {color: c.textSecondary}]}>‹</Text>
+            </Press>
+            <Text style={[s.title, {color: c.textPrimary}]}>Sync diagnostics</Text>
+            <Press
+              onPress={() => {
+                clearSyncStats();
+                setTick(t => t + 1);
+              }}
+              hitSlop={10}
+              style={s.clearBtn}>
+              <Text style={[s.clearText, {color: c.accent}]}>Clear</Text>
+            </Press>
           </View>
-        ) : (
-          <ScrollView contentContainerStyle={s.listPad} showsVerticalScrollIndicator={false}>
-            {rows.map((st, i) => (
-              <View
-                key={`${st.at}-${i}`}
-                style={[s.row, {backgroundColor: c.surface, borderColor: c.border}]}>
-                <View style={s.rowTop}>
-                  <Text style={[s.rowWhen, {color: c.textPrimary}]}>{formatClock(st.at)}</Text>
-                  {st.fellBack ? (
-                    <Text style={[s.badge, {color: c.warning, backgroundColor: c.warningBg}]}>
-                      FALLBACK
-                    </Text>
-                  ) : null}
+
+          {rows.length === 0 ? (
+            <View style={s.center}>
+              <Text style={[s.empty, {color: c.textMuted}]}>No reconciliations yet</Text>
+            </View>
+          ) : (
+            <ScrollView contentContainerStyle={s.listPad} showsVerticalScrollIndicator={false}>
+              {rows.map((st, i) => (
+                <View
+                  key={`${st.at}-${i}`}
+                  style={[s.row, {backgroundColor: c.surface, borderColor: c.border}]}>
+                  <View style={s.rowTop}>
+                    <Text style={[s.rowWhen, {color: c.textPrimary}]}>{formatClock(st.at)}</Text>
+                    {st.fellBack ? (
+                      <Text style={[s.badge, {color: c.warning, backgroundColor: c.warningBg}]}>
+                        FALLBACK
+                      </Text>
+                    ) : null}
+                  </View>
+                  <Text style={[s.rowMeta, {color: c.textSecondary}]}>
+                    {st.rounds} round{st.rounds === 1 ? '' : 's'} · {st.wallMs} ms
+                  </Text>
+                  <Text style={[s.rowMeta, {color: c.textSecondary}]}>
+                    need {st.need} · have {st.have} · {formatKiB(st.frameBytesOut)}
+                  </Text>
                 </View>
-                <Text style={[s.rowMeta, {color: c.textSecondary}]}>
-                  {st.rounds} round{st.rounds === 1 ? '' : 's'} · {st.wallMs} ms
-                </Text>
-                <Text style={[s.rowMeta, {color: c.textSecondary}]}>
-                  need {st.need} · have {st.have} · {formatKiB(st.frameBytesOut)}
-                </Text>
-              </View>
-            ))}
-          </ScrollView>
-        )}
+              ))}
+            </ScrollView>
+          )}
+        </SwipeBackView>
       </SafeAreaView>
     </Modal>
   );

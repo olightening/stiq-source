@@ -43,6 +43,7 @@ import {useInProgressDraft} from '../../feed/useInProgressDraft';
 import type {PostInteractions} from '../interactions';
 import {colors, space, radius, type as typeScale, weight, DENSE_MAX_FONT_SCALE} from '../../ui/theme';
 import {EmptyState} from '../../ui/EmptyState';
+import {useSwipeOptOut} from '../../ui/swipeOptOut';
 import {tallyEmojiReactions, type EmojiTally} from '../reactions';
 import {
   ensureSavedEmbedsLoaded,
@@ -217,6 +218,9 @@ export function ChannelView({
   const [editingId, setEditingId] = useState<string | null>(null);
   const listRef = useRef<FlatList<Event>>(null);
   const [showJump, setShowJump] = useState(false);
+  // Stands this page's own swipe-back down for touches beginning on the message composer below —
+  // spread onto its wrapper View; see the opt-out there for what it protects.
+  const optOut = useSwipeOptOut();
 
   // In-progress broadcast autosave (No.7): an unsent draft persists per channel and is restored on
   // reopen. The slot holds only the NEW broadcast — never an edit-in-progress (gated on !editingId).
@@ -686,17 +690,23 @@ export function ChannelView({
               </Press>
             </View>
           )}
-          <ChannelComposer
-            value={draft}
-            onChangeText={v => { setDraft(v); if (!editingId) slot.persist(v); }}
-            placeholder={editingId ? 'Edit your broadcast…' : 'Broadcast a message…'}
-            onSend={send}
-            onEmbed={() => setSavedSheetOpen(true)}
-            onExpand={() => setEditorOpen(true)}
-            onRecordVoice={allowVoice ? () => setVoiceOpen(true) : undefined}
-            onAddPicture={pictureRules?.allow ? () => setPictureOpen(true) : undefined}
-            accessibilitySend="broadcast"
-          />
+          {/* Wrapped in a plain View (ChannelComposer's own props don't forward touch handlers) so
+              the swipe-back drag stands down for any touch landing on it: the composer's TextInput
+              does its own selection-handle drag, which never joins JS responder negotiation, so
+              without this the page swipe would win that drag instead. */}
+          <View {...optOut}>
+            <ChannelComposer
+              value={draft}
+              onChangeText={v => { setDraft(v); if (!editingId) slot.persist(v); }}
+              placeholder={editingId ? 'Edit your broadcast…' : 'Broadcast a message…'}
+              onSend={send}
+              onEmbed={() => setSavedSheetOpen(true)}
+              onExpand={() => setEditorOpen(true)}
+              onRecordVoice={allowVoice ? () => setVoiceOpen(true) : undefined}
+              onAddPicture={pictureRules?.allow ? () => setPictureOpen(true) : undefined}
+              accessibilitySend="broadcast"
+            />
+          </View>
           {allowVoice && (
             <VoiceComposer
               visible={voiceOpen}

@@ -168,6 +168,7 @@ describe('parseChannel', () => {
     expect(ch.gradient).toBeDefined();
     expect(ch.gradient!.type).toBe(SAMPLE_GRADIENT.type);
     expect(ch.gradient!.stops).toEqual(SAMPLE_GRADIENT.stops);
+    expect(ch.metaAt).toBe(ev.created_at);
   });
 
   it('returns null for wrong kind', () => {

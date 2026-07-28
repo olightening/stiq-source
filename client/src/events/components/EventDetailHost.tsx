@@ -14,6 +14,7 @@ import Clipboard from '@react-native-clipboard/clipboard';
 import {Press} from '../../ui/Press';
 import {colors, radius, weight} from '../../ui/theme';
 import {GradientDot} from '../../ui/GradientDot';
+import {SwipeBackView} from '../../ui/SwipeBack';
 import type {GradientSpec} from '../../media/gradient';
 import {openLinkDialog} from '../../ui/openLink';
 import {saveEventEmbed} from '../../channels/savedEmbeds';
@@ -175,148 +176,155 @@ export function EventDetailHost({
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
       {mounted.current && (
         <View style={s.root}>
-          {vm ? (
-            <EventDetailScreen
-              vm={vm}
-              banner={degraded ? 'Fetching full details…' : undefined}
-              cb={{
-                onToggleInterested: () => {
-                  if (coordinate) void api.toggleInterested(coordinate).then(bump);
-                },
-                onApplyPress: () => setApplyOpen(true),
-                onSharePress: () => setShareOpen(true),
-                onApply: note => {
-                  if (coordinate) void api.apply(coordinate, note).then(bump);
-                  setApplyOpen(false);
-                },
-                onWithdraw: () => {
-                  if (coordinate) {
-                    void api.withdraw(coordinate).then(bump);
-                    void cancelEventReminder(coordinate);
-                    setReminder({set: false, n: 2, unit: 'hours'});
-                  }
-                },
-                onJoinWaitlist: () => {
-                  if (coordinate) void api.joinWaitlist(coordinate).then(bump);
-                },
-                onLeaveWaitlist: () => {
-                  if (coordinate) void api.leaveWaitlist(coordinate).then(bump);
-                },
-                onSetReminder: (n, unit) => {
-                  void setReminderFor(n, unit);
-                },
-                onAddToCalendar: addToCalendar,
-                onAddToEmbeds: addToEmbeds,
-                onForward: () => {
-                  setShareOpen(false);
-                  setForwardOpen(true);
-                },
-                onOpenSource: vm.event.externalLink
-                  ? () => openLinkDialog({url: vm!.event.externalLink!, title: vm!.event.title})
-                  : undefined,
-                onOpenMap: () => {
-                  const addr = rsvp?.reveal?.exactAddress;
-                  if (!addr) return;
-                  const q = encodeURIComponent(addr);
-                  // `geo:` is Android-only — iOS has no handler for it, so route to Apple Maps there.
-                  // Swallow rejection so an unresolvable handler never surfaces as an unhandled rejection.
-                  const url = Platform.OS === 'ios' ? `http://maps.apple.com/?q=${q}` : `geo:0,0?q=${q}`;
-                  void Linking.openURL(url).catch(() => {});
-                },
-                onCopyAddress: () => {
-                  const addr = rsvp?.reveal?.exactAddress;
-                  if (addr) Clipboard.setString(addr);
-                },
-                onMessageHost: () => {
-                  const host = doc?.addr.pubkey ?? ref?.addr.pubkey;
-                  onClose();
-                  if (host) onOpenPeer(host);
-                },
-                onBack: onClose,
+          {/* Opaque Modal: this View (colors.bg) is the backdrop and stays put; SwipeBackView wraps
+              its children so the drag translates the actual content, revealing this same bg beneath
+              — no window transparency surgery needed. `onBack` is `onClose`, the SAME identifier the
+              header ‹ (EventDetailScreen's `cb.onBack`) and the loading-state back Press both already
+              call, so button, hardware BACK and swipe can never drift apart. */}
+          <SwipeBackView onBack={onClose}>
+            {vm ? (
+              <EventDetailScreen
+                vm={vm}
+                banner={degraded ? 'Fetching full details…' : undefined}
+                cb={{
+                  onToggleInterested: () => {
+                    if (coordinate) void api.toggleInterested(coordinate).then(bump);
+                  },
+                  onApplyPress: () => setApplyOpen(true),
+                  onSharePress: () => setShareOpen(true),
+                  onApply: note => {
+                    if (coordinate) void api.apply(coordinate, note).then(bump);
+                    setApplyOpen(false);
+                  },
+                  onWithdraw: () => {
+                    if (coordinate) {
+                      void api.withdraw(coordinate).then(bump);
+                      void cancelEventReminder(coordinate);
+                      setReminder({set: false, n: 2, unit: 'hours'});
+                    }
+                  },
+                  onJoinWaitlist: () => {
+                    if (coordinate) void api.joinWaitlist(coordinate).then(bump);
+                  },
+                  onLeaveWaitlist: () => {
+                    if (coordinate) void api.leaveWaitlist(coordinate).then(bump);
+                  },
+                  onSetReminder: (n, unit) => {
+                    void setReminderFor(n, unit);
+                  },
+                  onAddToCalendar: addToCalendar,
+                  onAddToEmbeds: addToEmbeds,
+                  onForward: () => {
+                    setShareOpen(false);
+                    setForwardOpen(true);
+                  },
+                  onOpenSource: vm.event.externalLink
+                    ? () => openLinkDialog({url: vm!.event.externalLink!, title: vm!.event.title})
+                    : undefined,
+                  onOpenMap: () => {
+                    const addr = rsvp?.reveal?.exactAddress;
+                    if (!addr) return;
+                    const q = encodeURIComponent(addr);
+                    // `geo:` is Android-only — iOS has no handler for it, so route to Apple Maps there.
+                    // Swallow rejection so an unresolvable handler never surfaces as an unhandled rejection.
+                    const url = Platform.OS === 'ios' ? `http://maps.apple.com/?q=${q}` : `geo:0,0?q=${q}`;
+                    void Linking.openURL(url).catch(() => {});
+                  },
+                  onCopyAddress: () => {
+                    const addr = rsvp?.reveal?.exactAddress;
+                    if (addr) Clipboard.setString(addr);
+                  },
+                  onMessageHost: () => {
+                    const host = doc?.addr.pubkey ?? ref?.addr.pubkey;
+                    onClose();
+                    if (host) onOpenPeer(host);
+                  },
+                  onBack: onClose,
+                }}
+              />
+            ) : (
+              // The doc hasn't resolved yet (opened from a bare embed) — api.doc() already issued the
+              // lazy by-coordinate fetch; render the skeleton until the store snapshot lands.
+              <View style={s.loading}>
+                <Press onPress={onClose} hitSlop={10} accessibilityLabel="Back">
+                  <Text style={s.loadingBack}>‹</Text>
+                </Press>
+                <View style={s.loadingBody}>
+                  <Text style={s.loadingGlyph}>📅</Text>
+                  <Text style={s.loadingText}>Fetching event…</Text>
+                </View>
+              </View>
+            )}
+
+            <ApplySheet
+              visible={applyOpen}
+              onClose={() => setApplyOpen(false)}
+              onSend={note => {
+                if (coordinate) void api.apply(coordinate, note).then(bump);
+                setApplyOpen(false);
+              }}
+              hostName={vm?.event.host.name}
+              autoAddLabel={vm?.event.autoAdd?.label}
+            />
+            <ShareSheet
+              visible={shareOpen}
+              onClose={() => setShareOpen(false)}
+              onAddToEmbeds={addToEmbeds}
+              onForward={() => {
+                setShareOpen(false);
+                setForwardOpen(true);
               }}
             />
-          ) : (
-            // The doc hasn't resolved yet (opened from a bare embed) — api.doc() already issued the
-            // lazy by-coordinate fetch; render the skeleton until the store snapshot lands.
-            <View style={s.loading}>
-              <Press onPress={onClose} hitSlop={10} accessibilityLabel="Back">
-                <Text style={s.loadingBack}>‹</Text>
-              </Press>
-              <View style={s.loadingBody}>
-                <Text style={s.loadingGlyph}>📅</Text>
-                <Text style={s.loadingText}>Fetching event…</Text>
-              </View>
-            </View>
-          )}
 
-          <ApplySheet
-            visible={applyOpen}
-            onClose={() => setApplyOpen(false)}
-            onSend={note => {
-              if (coordinate) void api.apply(coordinate, note).then(bump);
-              setApplyOpen(false);
-            }}
-            hostName={vm?.event.host.name}
-            autoAddLabel={vm?.event.autoAdd?.label}
-          />
-          <ShareSheet
-            visible={shareOpen}
-            onClose={() => setShareOpen(false)}
-            onAddToEmbeds={addToEmbeds}
-            onForward={() => {
-              setShareOpen(false);
-              setForwardOpen(true);
-            }}
-          />
-
-          {/* Forward — a REAL send: one tap posts the card into a channel or DM (inline ✓). */}
-          <Modal visible={forwardOpen} transparent animationType="fade" onRequestClose={() => setForwardOpen(false)}>
-            <Press variant="bare" style={s.scrim} onPress={() => setForwardOpen(false)} accessibilityRole="none">
-              <Press variant="bare" style={s.fwdCard} onPress={() => {}} accessibilityRole="none">
-                <View style={s.grab} />
-                <Text style={s.fwdTitle}>Forward event</Text>
-                <Text style={s.fwdSub}>Sends the public card — never the guest list or exact address.</Text>
-                <ScrollView style={s.fwdList}>
-                  {targets.channels.length > 0 && <Text style={s.fwdEyebrow}>CHANNELS</Text>}
-                  {targets.channels.map(c => (
-                    <Press key={c.id} variant="row" style={s.fwdRow} onPress={() => void forward({kind: 'channel', id: c.id})}>
-                      <Text style={s.fwdRowGlyph}>#</Text>
-                      <Text style={s.fwdRowLabel} numberOfLines={1}>
-                        {c.label}
-                      </Text>
-                      {sentTo === c.id ? <Text style={s.fwdSent}>✓ Sent</Text> : <Text style={s.fwdGo}>➦</Text>}
-                    </Press>
-                  ))}
-                  {targets.groups.length > 0 && <Text style={s.fwdEyebrow}>GROUPS</Text>}
-                  {targets.groups.map(g => (
-                    <Press key={g.id} variant="row" style={s.fwdRow} onPress={() => void forward({kind: 'group', id: g.id})}>
-                      <Text style={s.fwdRowGlyph}>⬡</Text>
-                      <Text style={s.fwdRowLabel} numberOfLines={1}>
-                        {g.label}
-                      </Text>
-                      {sentTo === g.id ? <Text style={s.fwdSent}>✓ Sent</Text> : <Text style={s.fwdGo}>➦</Text>}
-                    </Press>
-                  ))}
-                  {targets.peers.length > 0 && <Text style={s.fwdEyebrow}>MESSAGES</Text>}
-                  {targets.peers.map(p => (
-                    <Press key={p.pubkey} variant="row" style={s.fwdRow} onPress={() => void forward({kind: 'dm', pubkey: p.pubkey})}>
-                      <GradientDot gradient={p.grad as GradientSpec | undefined} seed={p.pubkey} size={22} />
-                      <Text style={s.fwdRowLabel} numberOfLines={1}>
-                        {p.name}
-                      </Text>
-                      {sentTo === p.pubkey ? <Text style={s.fwdSent}>✓ Sent</Text> : <Text style={s.fwdGo}>➦</Text>}
-                    </Press>
-                  ))}
-                  {targets.channels.length === 0 && targets.groups.length === 0 && targets.peers.length === 0 && (
-                    <Text style={s.fwdEmpty}>No channels or conversations yet.</Text>
-                  )}
-                </ScrollView>
-                <Press style={s.fwdDone} onPress={() => setForwardOpen(false)}>
-                  <Text style={s.fwdDoneText}>Done</Text>
+            {/* Forward — a REAL send: one tap posts the card into a channel or DM (inline ✓). */}
+            <Modal visible={forwardOpen} transparent animationType="fade" onRequestClose={() => setForwardOpen(false)}>
+              <Press variant="bare" style={s.scrim} onPress={() => setForwardOpen(false)} accessibilityRole="none">
+                <Press variant="bare" style={s.fwdCard} onPress={() => {}} accessibilityRole="none">
+                  <View style={s.grab} />
+                  <Text style={s.fwdTitle}>Forward event</Text>
+                  <Text style={s.fwdSub}>Sends the public card — never the guest list or exact address.</Text>
+                  <ScrollView style={s.fwdList}>
+                    {targets.channels.length > 0 && <Text style={s.fwdEyebrow}>CHANNELS</Text>}
+                    {targets.channels.map(c => (
+                      <Press key={c.id} variant="row" style={s.fwdRow} onPress={() => void forward({kind: 'channel', id: c.id})}>
+                        <Text style={s.fwdRowGlyph}>#</Text>
+                        <Text style={s.fwdRowLabel} numberOfLines={1}>
+                          {c.label}
+                        </Text>
+                        {sentTo === c.id ? <Text style={s.fwdSent}>✓ Sent</Text> : <Text style={s.fwdGo}>➦</Text>}
+                      </Press>
+                    ))}
+                    {targets.groups.length > 0 && <Text style={s.fwdEyebrow}>GROUPS</Text>}
+                    {targets.groups.map(g => (
+                      <Press key={g.id} variant="row" style={s.fwdRow} onPress={() => void forward({kind: 'group', id: g.id})}>
+                        <Text style={s.fwdRowGlyph}>⬡</Text>
+                        <Text style={s.fwdRowLabel} numberOfLines={1}>
+                          {g.label}
+                        </Text>
+                        {sentTo === g.id ? <Text style={s.fwdSent}>✓ Sent</Text> : <Text style={s.fwdGo}>➦</Text>}
+                      </Press>
+                    ))}
+                    {targets.peers.length > 0 && <Text style={s.fwdEyebrow}>MESSAGES</Text>}
+                    {targets.peers.map(p => (
+                      <Press key={p.pubkey} variant="row" style={s.fwdRow} onPress={() => void forward({kind: 'dm', pubkey: p.pubkey})}>
+                        <GradientDot gradient={p.grad as GradientSpec | undefined} seed={p.pubkey} size={22} />
+                        <Text style={s.fwdRowLabel} numberOfLines={1}>
+                          {p.name}
+                        </Text>
+                        {sentTo === p.pubkey ? <Text style={s.fwdSent}>✓ Sent</Text> : <Text style={s.fwdGo}>➦</Text>}
+                      </Press>
+                    ))}
+                    {targets.channels.length === 0 && targets.groups.length === 0 && targets.peers.length === 0 && (
+                      <Text style={s.fwdEmpty}>No channels or conversations yet.</Text>
+                    )}
+                  </ScrollView>
+                  <Press style={s.fwdDone} onPress={() => setForwardOpen(false)}>
+                    <Text style={s.fwdDoneText}>Done</Text>
+                  </Press>
                 </Press>
               </Press>
-            </Press>
-          </Modal>
+            </Modal>
+          </SwipeBackView>
         </View>
       )}
     </Modal>

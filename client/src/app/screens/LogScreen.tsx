@@ -34,8 +34,10 @@ import {
   View,
 } from 'react-native';
 import Svg, {Defs, LinearGradient, RadialGradient, Rect, Stop} from 'react-native-svg';
+import Reanimated from 'react-native-reanimated';
 import {Press} from '../../ui/Press';
 import {TabRailTouchContext} from '../../ui/useTabSwipe';
+import {useSwipeBack} from '../../ui/SwipeBack';
 import {safeNpubEncode, shortenNpub} from '../../util/npub';
 import {
   type ModLogEntry,
@@ -1156,6 +1158,20 @@ export function LogScreen({
     return () => anim.stop();
   }, [logOpen, reduceMotion, slide]);
 
+  // Swipe-back for the community-log overlay (the transparent Modal below, wraps `logView` itself —
+  // see the comment there for why). Called directly via `useSwipeBack`, not the `<SwipeBackView>`
+  // wrapper, because this same component also needs `optOut` in hand below for its own search
+  // TextInput: a component can never consume a context Provider it renders itself (only a genuine
+  // descendant component can), and that TextInput is a plain sibling constructed right here, not a
+  // separate component. `closeLog` is hoisted so the header ‹, the hardware BACK (this Modal's
+  // `onRequestClose`) and the swipe can never drift apart (SwipeBack.tsx's ownership rule). Always
+  // enabled: the row detail sheet and the full-post view that can sit above this overlay are each
+  // their OWN separate `<Modal>` (own Android Dialog window — see BackModal's docstring in back.tsx),
+  // so whichever is open already owns every touch here; unlike EventsOrganizerHost's `create`/
+  // `manage`, there is no in-window inner level of the log overlay itself to gate off.
+  const closeLog = useCallback(() => onSetLogOpen(false), [onSetLogOpen]);
+  const swipe = useSwipeBack({enabled: true, onBack: closeLog});
+
   // ── Render ──────────────────────────────────────────────────────────────────
 
   const hearthBody = (
@@ -1256,7 +1272,7 @@ export function LogScreen({
       ]}>
       {/* header: ‹ back · centered title · right spacer */}
       <View style={s.logHeaderBar}>
-        <Press onPress={() => onSetLogOpen(false)} hitSlop={12} style={s.logBackBtn} accessibilityLabel="Back">
+        <Press onPress={closeLog} hitSlop={12} style={s.logBackBtn} accessibilityLabel="Back">
           <Text style={s.logBackChevron}>‹</Text>
         </Press>
         <Text style={s.logViewTitle}>Community log</Text>
@@ -1293,6 +1309,10 @@ export function LogScreen({
                   autoCapitalize="none"
                   autoCorrect={false}
                   accessibilityLabel="Search the moderation log"
+                  // Stands the swipe-back drag down for this touch — a TextInput's own selection-handle
+                  // drag never joins JS responder negotiation, so without this the page-level swipe
+                  // would win the drag and the field could never be selected/caret-dragged one-handed.
+                  {...swipe.optOut}
                 />
               </View>
             </View>
@@ -1341,8 +1361,16 @@ export function LogScreen({
         visible={logOpen}
         transparent
         animationType="none"
-        onRequestClose={() => onSetLogOpen(false)}>
-        <SafeAreaView style={s.logModalSafe}>{logView}</SafeAreaView>
+        onRequestClose={closeLog}>
+        <SafeAreaView style={s.logModalSafe}>
+          {/* Wraps `logView` itself, not just its children: `logView` (s.logView) is the one opaque
+              layer inside this otherwise-transparent Modal, so sliding the whole thing away is what
+              uncovers the real hearth still mounted behind it — wrapping only its insides would leave
+              `logView`'s own flat background covering the screen instead. */}
+          <Reanimated.View style={[s.flex1, swipe.style]} {...swipe.panHandlers}>
+            {logView}
+          </Reanimated.View>
+        </SafeAreaView>
       </Modal>
 
       {/* Always mounted — Android only reliably shows a Modal when `visible` toggles false→true,

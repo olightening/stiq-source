@@ -26,6 +26,7 @@
 
 import React, {useMemo} from 'react';
 import {KeyboardAvoidingView, Platform, StyleSheet, Text, View} from 'react-native';
+import Reanimated from 'react-native-reanimated';
 import type {Event} from 'nostr-tools/pure';
 
 import type {CommentNode} from '../../feed/thread';
@@ -36,6 +37,7 @@ import {labelMetaFor, DEFAULT_LABELS, type PostLabel, type LabelConfig} from '..
 import {GradientDot} from '../../ui/GradientDot';
 import {Press} from '../../ui/Press';
 import {colors} from '../../ui/theme';
+import {useSwipeBack} from '../../ui/SwipeBack';
 import {ThreadView} from '../../feed/components/ThreadView';
 import {RichText} from '../../feed/components/RichText';
 import {CommentComposer} from '../../feed/components/CommentComposer';
@@ -146,6 +148,15 @@ export function LogPostView({
   saved,
   onToggleSave,
 }: LogPostViewProps): React.JSX.Element {
+  // Swipe-back — `onBack` is `onClose`, the SAME identifier the header ‹ below already calls (the
+  // ownership rule in SwipeBack.tsx), so button, hardware BACK and swipe can never drift apart.
+  // Called directly via `useSwipeBack`, not the `<SwipeBackView>` wrapper, because this component
+  // also needs `optOut` in hand below to stand the drag down for its own CommentComposer — a
+  // component can never consume a context Provider it renders itself (only a genuine descendant
+  // component can), and the composer is a plain sibling constructed right here, not one. Always
+  // enabled: this overlay has no inner level of its own to gate off.
+  const swipe = useSwipeBack({enabled: true, onBack: onClose});
+
   // ── Build the static "above the fold" content that goes into ThreadView's
   //    listHeader so the entire page scrolls as a single FlatList, not two
   //    nested scroll containers.
@@ -238,60 +249,70 @@ export function LogPostView({
       style={s.root}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : undefined}>
-      {/* ── Header bar ────────────────────────────────────────────────────── */}
-      <View style={s.header}>
-        {/* ‹ back button — accent, 24px */}
-        <Press onPress={onClose} style={s.backBtn} accessibilityLabel="Back">
-          <Text style={s.backChevron}>‹</Text>
-        </Press>
-        {/* Centred kindLabel */}
-        <Text style={s.headerTitle} numberOfLines={1}>
-          {kindLabel}
-        </Text>
-        {/* Save toggle — a saved log post can be inserted as an embed like any other post. Falls
-            back to a 34px spacer (to keep the title centred) when saving isn't available. */}
-        {onToggleSave ? (
-          <Press
-            onPress={onToggleSave}
-            style={s.saveBtn}
-            accessibilityLabel={saved ? 'Remove from saved' : 'Save post to embed later'}
-            accessibilityState={{selected: !!saved}}>
-            <Text style={[s.saveIcon, saved && s.saveIconOn]}>{saved ? '🔖' : '📑'}</Text>
+      {/* This KeyboardAvoidingView is LogPostView's own root — an in-tree absolute-fill view hosted
+          in a Modal owned elsewhere, so the swipe wraps its children here rather than adding a layer
+          outside it (there is no outside to add one to). */}
+      <Reanimated.View style={[s.flex1, swipe.style]} {...swipe.panHandlers}>
+        {/* ── Header bar ────────────────────────────────────────────────────── */}
+        <View style={s.header}>
+          {/* ‹ back button — accent, 24px */}
+          <Press onPress={onClose} style={s.backBtn} accessibilityLabel="Back">
+            <Text style={s.backChevron}>‹</Text>
           </Press>
-        ) : (
-          <View style={s.headerSpacer} />
-        )}
-      </View>
-
-      {/* ── Scrollable body: ThreadView owns the scroll; static content lives
-           in its listHeader so we never nest FlatList inside ScrollView. ── */}
-      <View style={s.flex1}>
-        <ThreadView
-          nodes={threadNodes}
-          getAuthorName={getAuthorName}
-          getAuthorGradient={getAuthorGradient}
-          onAuthorPress={onAuthorPress}
-          listHeader={listHeader}
-        />
-      </View>
-
-      {/* ── Composer footer ───────────────────────────────────────────────── */}
-      {composer.mode === 'closed' ? (
-        /* Muted locked bar — removed/banned content. */
-        <View style={s.composerClosed}>
-          <Text style={s.composerClosedText}>🔒 {composer.text}</Text>
+          {/* Centred kindLabel */}
+          <Text style={s.headerTitle} numberOfLines={1}>
+            {kindLabel}
+          </Text>
+          {/* Save toggle — a saved log post can be inserted as an embed like any other post. Falls
+              back to a 34px spacer (to keep the title centred) when saving isn't available. */}
+          {onToggleSave ? (
+            <Press
+              onPress={onToggleSave}
+              style={s.saveBtn}
+              accessibilityLabel={saved ? 'Remove from saved' : 'Save post to embed later'}
+              accessibilityState={{selected: !!saved}}>
+              <Text style={[s.saveIcon, saved && s.saveIconOn]}>{saved ? '🔖' : '📑'}</Text>
+            </Press>
+          ) : (
+            <View style={s.headerSpacer} />
+          )}
         </View>
-      ) : (
-        /* Live CommentComposer — intact content. */
-        <CommentComposer
-          onSubmit={composer.onSubmit}
-          placeholder="Add a comment…"
-          submitLabel="Comment"
-          allowVoice={composer.allowVoice}
-          pictureRules={composer.pictureRules}
-          picturesSpentBytes={composer.picturesSpentBytes}
-        />
-      )}
+
+        {/* ── Scrollable body: ThreadView owns the scroll; static content lives
+             in its listHeader so we never nest FlatList inside ScrollView. ── */}
+        <View style={s.flex1}>
+          <ThreadView
+            nodes={threadNodes}
+            getAuthorName={getAuthorName}
+            getAuthorGradient={getAuthorGradient}
+            onAuthorPress={onAuthorPress}
+            listHeader={listHeader}
+          />
+        </View>
+
+        {/* ── Composer footer ───────────────────────────────────────────────── */}
+        {composer.mode === 'closed' ? (
+          /* Muted locked bar — removed/banned content. */
+          <View style={s.composerClosed}>
+            <Text style={s.composerClosedText}>🔒 {composer.text}</Text>
+          </View>
+        ) : (
+          // Live CommentComposer — intact content. Wrapped in a plain View (CommentComposer's own
+          // props don't forward touch handlers) so the swipe-back drag stands down for any touch
+          // landing on it: the composer's TextInput does its own selection-handle drag, which never
+          // joins JS responder negotiation, so without this the page swipe would win that drag instead.
+          <View {...swipe.optOut}>
+            <CommentComposer
+              onSubmit={composer.onSubmit}
+              placeholder="Add a comment…"
+              submitLabel="Comment"
+              allowVoice={composer.allowVoice}
+              pictureRules={composer.pictureRules}
+              picturesSpentBytes={composer.picturesSpentBytes}
+            />
+          </View>
+        )}
+      </Reanimated.View>
     </KeyboardAvoidingView>
   );
 }

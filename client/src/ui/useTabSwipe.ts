@@ -56,9 +56,12 @@
  *    would switch instead of the rail scrubbing. Each rail spreads TabRailTouchContext's handlers
  *    onto its scroller, flipping a shared flag while the rail is touched; `isExcluded` then makes the
  *    stage stand down for that one touch, so the rail scrolls under the finger and only non-rail
- *    drags switch tab. Chips stay tappable either way (a tap never claims).
+ *    drags switch tab. Chips stay tappable either way (a tap never claims). (TabRailTouchContext is
+ *    now a re-export of the canonical `SwipeOptOutContext` in `./swipeOptOut` — promoted there
+ *    2026-07-27 so `SwipeBack.tsx`'s swipe-back gesture can share this exact stand-down mechanism
+ *    under an honest, gesture-agnostic name; see that file for the mechanism itself.)
  */
-import {createContext, useRef} from 'react';
+import {useRef} from 'react';
 import {PanResponder, type GestureResponderHandlers, type PanResponderGestureState} from 'react-native';
 
 /** activeOffsetX — sideways travel (px) at which the stage CLAIMS the drag as a tab swipe. Kept low
@@ -91,17 +94,14 @@ const COMMIT_DOMINANCE = 0.75;
 export type SwipeDirection = 1 | -1;
 
 /**
- * Handlers a horizontal chip rail spreads onto its scroller so a sideways drag scrolls the rail
- * instead of switching tab. The rail flips a shared flag while it is being touched; the stage's
- * swipe reads that flag (via `isExcluded`) and stands down. Empty outside a provider — a safe no-op,
- * so a rail that spreads these without a provider above it simply behaves as before.
+ * `RailTouchHandlers` / `TabRailTouchContext` — re-exported under their original names so every
+ * shipped chip rail (feed sort/tag row, Spaces filter, the hearth's people rail, …) keeps compiling
+ * and behaving exactly as it did before 2026-07-27. The canonical definition — and the full WHY —
+ * now lives in `./swipeOptOut`, under the honest, gesture-agnostic name `SwipeOptOutHandlers` /
+ * `SwipeOptOutContext`. New call sites should import from there directly; this re-export exists only
+ * so nothing already shipped had to change.
  */
-export type RailTouchHandlers = {
-  onTouchStart?: () => void;
-  onTouchEnd?: () => void;
-  onTouchCancel?: () => void;
-};
-export const TabRailTouchContext = createContext<RailTouchHandlers>({});
+export {SwipeOptOutContext as TabRailTouchContext, type SwipeOptOutHandlers as RailTouchHandlers} from './swipeOptOut';
 
 /**
  * Which axis a single touch has committed to. A gesture starts `pending` and locks to the FIRST axis

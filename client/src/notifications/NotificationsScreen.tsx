@@ -25,6 +25,8 @@
 import React, {useCallback, useEffect, useState} from 'react';
 import {Modal, SafeAreaView, ScrollView, SectionList, StyleSheet, Switch, Text, View} from 'react-native';
 import {Press} from '../ui/Press';
+import {SwipeBackView} from '../ui/SwipeBack';
+import {useSwipeOptOut} from '../ui/swipeOptOut';
 import {colors, radius, space, type as typeScale, weight, type Palette, DENSE_MAX_FONT_SCALE} from '../ui/theme';
 import {relTimeShort} from '../ui/relTime';
 import {safeNpubEncode, shortenNpub} from '../util/npub';
@@ -173,6 +175,9 @@ export function NotificationsScreen({
   // ✓✓ flips everything. The runtime persists in parallel (onMarkRead/onMarkAllRead).
   const [readIds, setReadIds] = useState<ReadonlySet<string>>(new Set());
   const [allRead, setAllRead] = useState(false);
+  // Stands this page's own swipe-back down for touches beginning on the horizontal filter-chip
+  // rail below — spread onto that ScrollView; see the opt-out there for what it protects.
+  const optOut = useSwipeOptOut();
 
   // Reset to the list pane and reseed the draft from the latest persisted prefs each time the
   // modal opens — mirrors the open-time seed pattern used across the app's other settings sheets.
@@ -256,169 +261,187 @@ export function NotificationsScreen({
           app's root SafeAreaView, so it must re-apply the top inset itself. Without this the header
           sits up in the status-bar row, flanking the Dynamic Island instead of below it. */}
       <SafeAreaView style={[s.page, {backgroundColor: c.bg}]}>
-        <View style={[s.header, {borderBottomColor: c.border}]}>
-          <Press
-            accessibilityLabel="Back"
-            onPress={goBack}
-            hitSlop={12}
-            style={s.backBtn}>
-            <Text style={[s.backText, {color: c.accent}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>‹</Text>
-          </Press>
-          <Text
-            style={[s.title, {color: c.textPrimary}]}
-            numberOfLines={1}
-            maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-            {pane === 'settings' ? 'Notification settings' : 'Notifications'}
-          </Text>
+        {/* SwipeBackView wraps the SafeAreaView's children, not the SafeAreaView itself, so that
+            opaque c.bg-colored root stays put as the backdrop while just the content slides away —
+            see PLAN_SWIPE_BACK_GESTURE_2026-07-27.md's "Modal-hosted pages" note. `onBack` is
+            `goBack`, the exact function the header ‹ and the Modal's own onRequestClose both call
+            above, so the button, the hardware key and the swipe can never resolve to different
+            panes. `enabled` stands down on the settings pane: `goBack` PEELS settings → list first
+            rather than closing the modal, so a committed swipe there would slide this whole view
+            off-screen while `goBack` only took it back to the list underneath — the page would be
+            stranded mid-exit, not dismissed. */}
+        <SwipeBackView onBack={goBack} enabled={pane === 'list'}>
+          <View style={[s.header, {borderBottomColor: c.border}]}>
+            <Press
+              accessibilityLabel="Back"
+              onPress={goBack}
+              hitSlop={12}
+              style={s.backBtn}>
+              <Text style={[s.backText, {color: c.accent}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>‹</Text>
+            </Press>
+            <Text
+              style={[s.title, {color: c.textPrimary}]}
+              numberOfLines={1}
+              maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+              {pane === 'settings' ? 'Notification settings' : 'Notifications'}
+            </Text>
+            {pane === 'list' ? (
+              <>
+                <Press
+                  accessibilityLabel="Mark all read"
+                  onPress={markAll}
+                  disabled={!hasUnread}
+                  style={s.headerBtn}>
+                  {/* Nested double checkmark — negative tracking pulls the checks together. */}
+                  <Text
+                    style={[s.markAllText, {color: hasUnread ? c.accent : c.textMuted}]}
+                    maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                    ✓✓
+                  </Text>
+                </Press>
+                <Press
+                  accessibilityLabel="Notification settings"
+                  onPress={() => setPane('settings')}
+                  style={s.headerBtn}>
+                  <Text style={[s.gearText, {color: c.textSecondary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                    ⚙
+                  </Text>
+                </Press>
+              </>
+            ) : (
+              <View style={s.headerBtn} />
+            )}
+          </View>
+
           {pane === 'list' ? (
             <>
-              <Press
-                accessibilityLabel="Mark all read"
-                onPress={markAll}
-                disabled={!hasUnread}
-                style={s.headerBtn}>
-                {/* Nested double checkmark — negative tracking pulls the checks together. */}
-                <Text
-                  style={[s.markAllText, {color: hasUnread ? c.accent : c.textMuted}]}
-                  maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                  ✓✓
-                </Text>
-              </Press>
-              <Press
-                accessibilityLabel="Notification settings"
-                onPress={() => setPane('settings')}
-                style={s.headerBtn}>
-                <Text style={[s.gearText, {color: c.textSecondary}]} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                  ⚙
-                </Text>
-              </Press>
-            </>
-          ) : (
-            <View style={s.headerBtn} />
-          )}
-        </View>
-
-        {pane === 'list' ? (
-          <>
-            <View style={[s.chipsWrap, {borderBottomColor: c.border}]}>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.chipsRow}>
-                {CHIPS.map(chip => {
-                  const active = chip.id === filter;
-                  const count = unreadCountFor(chip.id);
-                  return (
-                    <Press
-                      key={chip.id}
-                      accessibilityLabel={`Filter ${chip.label}`}
-                      onPress={() => setFilter(chip.id)}
-                      style={[s.chip, {backgroundColor: active ? c.accent : c.surface}]}>
-                      <Text
-                        style={[s.chipText, {color: active ? c.onAccent : c.textSecondary}]}
-                        maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                        {chip.label}
-                      </Text>
-                      {count > 0 && (
-                        <View
-                          style={[
-                            s.chipCount,
-                            {backgroundColor: active ? 'rgba(255,255,255,0.25)' : c.accentSoft},
-                          ]}>
-                          <Text
-                            style={[s.chipCountText, {color: active ? c.onAccent : c.accent}]}
-                            maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                            {count}
-                          </Text>
-                        </View>
-                      )}
-                    </Press>
-                  );
-                })}
-              </ScrollView>
-            </View>
-
-            {sections.length === 0 ? (
-              <EmptyState
-                icon="🔔"
-                title="You're all caught up"
-                subtitle="Nothing new in this filter right now."
-              />
-            ) : (
-              // Virtualized (the snapshot can be 100 rows of SVG avatars — mounting them all
-              // synchronously inside the Modal's slide-in is what made opening the center janky).
-              <SectionList
-                sections={sections.map(sec => ({title: sec.title, data: sec.items}))}
-                keyExtractor={item => item.id}
-                renderItem={({item}) => <NotifRow item={item} unread={isUnread(item)} onPress={tapRow} />}
-                renderSectionHeader={({section}) => (
-                  <Text
-                    style={[s.sectionTitle, {color: c.textMuted}]}
-                    maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                    {section.title.toUpperCase()}
-                  </Text>
-                )}
-                stickySectionHeadersEnabled={false}
-                showsVerticalScrollIndicator={false}
-                style={s.scroll}
-                initialNumToRender={10}
-                windowSize={7}
-                removeClippedSubviews
-                ListFooterComponent={<View style={s.bottomPad} />}
-              />
-            )}
-          </>
-        ) : (
-          <>
-            {/* Segmented tab: in-app (notification-center gates, unchanged) vs. push (OS-push
-                gates, layered on top — see prefs.ts isPushAllowed). Fixed above the scroll, like
-                the list pane's filter chips, so it stays reachable while the pane scrolls. */}
-            <View style={[s.segWrap, {borderBottomColor: c.border}]}>
-              <View style={[s.segRow, {backgroundColor: c.surface}]}>
-                <Press
-                  accessibilityLabel="Settings tab In-app"
-                  onPress={() => setSettingsTab('inapp')}
-                  style={[s.segBtn, settingsTab === 'inapp' && {backgroundColor: c.accent}]}>
-                  <Text
-                    style={[
-                      s.segText,
-                      {color: settingsTab === 'inapp' ? c.onAccent : c.textSecondary},
-                    ]}
-                    maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                    In-app
-                  </Text>
-                </Press>
-                <Press
-                  accessibilityLabel="Settings tab Push"
-                  onPress={() => setSettingsTab('push')}
-                  style={[s.segBtn, settingsTab === 'push' && {backgroundColor: c.accent}]}>
-                  <Text
-                    style={[
-                      s.segText,
-                      {color: settingsTab === 'push' ? c.onAccent : c.textSecondary},
-                    ]}
-                    maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
-                    Push
-                  </Text>
-                </Press>
+              <View style={[s.chipsWrap, {borderBottomColor: c.border}]}>
+                {/* A native horizontal ScrollView never joins JS PanResponder negotiation, so
+                    without this opt-out the page-level swipe-back above would win any rightward
+                    drag that starts on the chip strip and it would never get to scroll itself. */}
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={s.chipsRow}
+                  {...optOut}>
+                  {CHIPS.map(chip => {
+                    const active = chip.id === filter;
+                    const count = unreadCountFor(chip.id);
+                    return (
+                      <Press
+                        key={chip.id}
+                        accessibilityLabel={`Filter ${chip.label}`}
+                        onPress={() => setFilter(chip.id)}
+                        style={[s.chip, {backgroundColor: active ? c.accent : c.surface}]}>
+                        <Text
+                          style={[s.chipText, {color: active ? c.onAccent : c.textSecondary}]}
+                          maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                          {chip.label}
+                        </Text>
+                        {count > 0 && (
+                          <View
+                            style={[
+                              s.chipCount,
+                              {backgroundColor: active ? 'rgba(255,255,255,0.25)' : c.accentSoft},
+                            ]}>
+                            <Text
+                              style={[s.chipCountText, {color: active ? c.onAccent : c.accent}]}
+                              maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                              {count}
+                            </Text>
+                          </View>
+                        )}
+                      </Press>
+                    );
+                  })}
+                </ScrollView>
               </View>
-            </View>
 
-            <ScrollView showsVerticalScrollIndicator={false} style={s.scroll}>
-              {settingsTab === 'inapp' ? (
-                <InAppSettingsTab
-                  draft={draft}
-                  commit={commit}
-                  channels={channels}
-                  subscribedChannelIds={subscribedChannelIds}
-                  inboxPeers={inboxPeers}
-                  nameFor={nameFor}
-                  c={c}
+              {sections.length === 0 ? (
+                <EmptyState
+                  icon="🔔"
+                  title="You're all caught up"
+                  subtitle="Nothing new in this filter right now."
                 />
               ) : (
-                <PushSettingsTab draft={draft} commit={commit} c={c} />
+                // Virtualized (the snapshot can be 100 rows of SVG avatars — mounting them all
+                // synchronously inside the Modal's slide-in is what made opening the center janky).
+                <SectionList
+                  sections={sections.map(sec => ({title: sec.title, data: sec.items}))}
+                  keyExtractor={item => item.id}
+                  renderItem={({item}) => <NotifRow item={item} unread={isUnread(item)} onPress={tapRow} />}
+                  renderSectionHeader={({section}) => (
+                    <Text
+                      style={[s.sectionTitle, {color: c.textMuted}]}
+                      maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                      {section.title.toUpperCase()}
+                    </Text>
+                  )}
+                  stickySectionHeadersEnabled={false}
+                  showsVerticalScrollIndicator={false}
+                  style={s.scroll}
+                  initialNumToRender={10}
+                  windowSize={7}
+                  removeClippedSubviews
+                  ListFooterComponent={<View style={s.bottomPad} />}
+                />
               )}
-              <View style={s.bottomPad} />
-            </ScrollView>
-          </>
-        )}
+            </>
+          ) : (
+            <>
+              {/* Segmented tab: in-app (notification-center gates, unchanged) vs. push (OS-push
+                  gates, layered on top — see prefs.ts isPushAllowed). Fixed above the scroll, like
+                  the list pane's filter chips, so it stays reachable while the pane scrolls. */}
+              <View style={[s.segWrap, {borderBottomColor: c.border}]}>
+                <View style={[s.segRow, {backgroundColor: c.surface}]}>
+                  <Press
+                    accessibilityLabel="Settings tab In-app"
+                    onPress={() => setSettingsTab('inapp')}
+                    style={[s.segBtn, settingsTab === 'inapp' && {backgroundColor: c.accent}]}>
+                    <Text
+                      style={[
+                        s.segText,
+                        {color: settingsTab === 'inapp' ? c.onAccent : c.textSecondary},
+                      ]}
+                      maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                      In-app
+                    </Text>
+                  </Press>
+                  <Press
+                    accessibilityLabel="Settings tab Push"
+                    onPress={() => setSettingsTab('push')}
+                    style={[s.segBtn, settingsTab === 'push' && {backgroundColor: c.accent}]}>
+                    <Text
+                      style={[
+                        s.segText,
+                        {color: settingsTab === 'push' ? c.onAccent : c.textSecondary},
+                      ]}
+                      maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
+                      Push
+                    </Text>
+                  </Press>
+                </View>
+              </View>
+
+              <ScrollView showsVerticalScrollIndicator={false} style={s.scroll}>
+                {settingsTab === 'inapp' ? (
+                  <InAppSettingsTab
+                    draft={draft}
+                    commit={commit}
+                    channels={channels}
+                    subscribedChannelIds={subscribedChannelIds}
+                    inboxPeers={inboxPeers}
+                    nameFor={nameFor}
+                    c={c}
+                  />
+                ) : (
+                  <PushSettingsTab draft={draft} commit={commit} c={c} />
+                )}
+                <View style={s.bottomPad} />
+              </ScrollView>
+            </>
+          )}
+        </SwipeBackView>
       </SafeAreaView>
     </Modal>
   );

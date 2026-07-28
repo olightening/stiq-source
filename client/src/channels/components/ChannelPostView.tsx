@@ -23,6 +23,7 @@ import {GradientAvatar} from '../../ui/GradientAvatar';
 import {BackButton} from '../../ui/BackButton';
 import {decodeNameHeader} from '../../profile/displayName';
 import {colors, DENSE_MAX_FONT_SCALE} from '../../ui/theme';
+import {useSwipeOptOut} from '../../ui/swipeOptOut';
 import {CommentComposer} from '../../feed/components/CommentComposer';
 import {SendProgress} from '../../feed/components/SendProgress';
 import type {SendStatus} from '../../nostr/outbox';
@@ -275,6 +276,9 @@ export function ChannelPostView({
   const isPinned = message.tags.some(t => t[0] === 'pinned' || (t[0] === 't' && t[1] === 'pinned'));
   const commentCount = countComments(thread);
   const [menuOpen, setMenuOpen] = useState(false);
+  // Stands this page's own swipe-back down for touches beginning on the comment composer below —
+  // spread onto its wrapper View; see the opt-out there for what it protects.
+  const optOut = useSwipeOptOut();
 
   return (
     // SafeAreaView (not View): ChannelPostView renders inside MainScreen's post-detail overlay,
@@ -384,15 +388,21 @@ export function ChannelPostView({
       </ScrollView>
 
       {repliesEnabled && onPostComment && (
-        <CommentComposer
-          onSubmit={onPostComment}
-          onGetEvent={onGetEvent}
-          placeholder="Add a comment…"
-          submitLabel="Comment"
-          allowVoice={allowVoice}
-          pictureRules={pictureRules}
-          picturesSpentBytes={picturesSpentBytes}
-        />
+        // Wrapped in a plain View (CommentComposer's own props don't forward touch handlers) so the
+        // swipe-back drag stands down for any touch landing on it: the composer's TextInput does its
+        // own selection-handle drag, which never joins JS responder negotiation, so without this the
+        // page swipe would win that drag instead.
+        <View {...optOut}>
+          <CommentComposer
+            onSubmit={onPostComment}
+            onGetEvent={onGetEvent}
+            placeholder="Add a comment…"
+            submitLabel="Comment"
+            allowVoice={allowVoice}
+            pictureRules={pictureRules}
+            picturesSpentBytes={picturesSpentBytes}
+          />
+        </View>
       )}
     </SafeAreaView>
     </KeyboardAvoidingView>

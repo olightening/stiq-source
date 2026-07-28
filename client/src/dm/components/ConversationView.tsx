@@ -24,6 +24,7 @@ import {useReturnToLatest} from '../../ui/useReturnToLatest';
 import {SearchTimeButton} from '../../ui/SearchTimeButton';
 import {TimeFrameSheet} from '../../ui/TimeFrameSheet';
 import {ALL_TIME, filterByTime, selectionToRange, type TimeSelection} from '../../ui/timeframe';
+import {useSwipeOptOut} from '../../ui/swipeOptOut';
 import {ChatBubble, QuotedReply, SwipeToReply, shortNpub} from '../../channels/components/primitives';
 import {ReactionBar} from '../../channels/components/ReactionPicker';
 import {VoiceComposer} from '../../feed/components/VoiceComposer';
@@ -138,6 +139,9 @@ export function ConversationView({
   // passed; subscribing to it keeps the footer live in that mode.
   const blockedFromModule = useBlocklist(conversation.peer);
   const blocked = blockedProp ?? blockedFromModule;
+  // Stands this page's own swipe-back down for touches beginning on the in-conversation search
+  // field below — spread onto that TextInput; see the opt-out there for what it protects.
+  const optOut = useSwipeOptOut();
   // Live gradient lookup (No.9): resolved at render time from the peer's hex pubkey, so a gradient
   // that arrives/changes after mount (identity beacon, profile update) is reflected immediately —
   // unlike a static prop baked in by the caller at mount; falls back (inside GradientAvatar) to the
@@ -323,6 +327,9 @@ export function ConversationView({
       {/* In-conversation search bar (self-contained — see searchOpen). */}
       {searchOpen && (
         <View style={s.searchBar}>
+          {/* A TextInput's own selection-handle drag doesn't join JS PanResponder negotiation, so
+              without this opt-out the page-level swipe-back would win a rightward drag started
+              inside the field instead of moving the cursor. */}
           <TextInput
             style={s.searchInput}
             value={searchText}
@@ -331,6 +338,7 @@ export function ConversationView({
             placeholderTextColor={colors.textMuted}
             autoFocus
             returnKeyType="search"
+            {...optOut}
           />
           <SearchTimeButton selection={timeSel} onPress={() => setTimeSheetOpen(true)} />
           <Press style={s.searchClose} onPress={toggleSearch} accessibilityLabel="cancel-search">
@@ -773,6 +781,9 @@ function Composer({
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [pictureOpen, setPictureOpen] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
+  // Stands this page's own swipe-back down for touches beginning on the message composer below —
+  // spread onto its wrapper View; see the opt-out there for what it protects.
+  const optOut = useSwipeOptOut();
   // #13b: swipe-to-reply set `replyingTo` but nothing ever opened the keyboard — focus the
   // composer's input imperatively whenever a reply target is set (mirrors Telegram/every other
   // messenger's swipe-to-reply UX).
@@ -811,18 +822,24 @@ function Composer({
           <QuotedReply name={replyingTo.name} text={replyingTo.text} onClose={onClearReply} />
         </View>
       )}
-      <MessageComposer
-        ref={inputRef}
-        value={draft}
-        onChangeText={v => { setDraft(v); slot.persist(v); }}
-        placeholder="Message…"
-        onSend={send}
-        onEmbed={onOpenSavedPicker}
-        onExpand={() => setEditorOpen(true)}
-        onAddPicture={pictureRules?.allow ? () => setPictureOpen(true) : undefined}
-        onRecordVoice={allowVoice ? () => setVoiceOpen(true) : undefined}
-        accessibilitySend="send-dm"
-      />
+      {/* Wrapped in a plain View (MessageComposer's own props don't forward touch handlers) so the
+          swipe-back drag stands down for any touch landing on it: the composer's TextInput does its
+          own selection-handle drag, which never joins JS responder negotiation, so without this the
+          page swipe would win that drag instead. */}
+      <View {...optOut}>
+        <MessageComposer
+          ref={inputRef}
+          value={draft}
+          onChangeText={v => { setDraft(v); slot.persist(v); }}
+          placeholder="Message…"
+          onSend={send}
+          onEmbed={onOpenSavedPicker}
+          onExpand={() => setEditorOpen(true)}
+          onAddPicture={pictureRules?.allow ? () => setPictureOpen(true) : undefined}
+          onRecordVoice={allowVoice ? () => setVoiceOpen(true) : undefined}
+          accessibilitySend="send-dm"
+        />
+      </View>
       {allowVoice && (
         <VoiceComposer
           visible={voiceOpen}

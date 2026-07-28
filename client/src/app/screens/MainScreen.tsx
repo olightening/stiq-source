@@ -23,10 +23,12 @@ import {
   Platform,
   SafeAreaView,
   ScrollView,
+  type StyleProp,
   StyleSheet,
   Text,
   TextInput,
   View,
+  type ViewStyle,
 } from 'react-native';
 import Svg, {Defs, LinearGradient, Rect, Stop} from 'react-native-svg';
 import Reanimated, {
@@ -38,7 +40,9 @@ import Reanimated, {
 import {useScrollChrome} from '../../ui/useScrollChrome';
 import {useLazyModalMount} from '../../ui/useLazyModalMount';
 import {TabLayer} from '../../ui/TabLayer';
-import {SubScreen} from '../../ui/SubScreen';
+import {SubScreen, useSubScreenTransition} from '../../ui/SubScreen';
+import {SwipeBackView} from '../../ui/SwipeBack';
+import {SwipeOptOutContext} from '../../ui/swipeOptOut';
 import {BACK_PRIORITY, useBackAction} from '../../ui/back';
 import {Press, PressDelayContext, SCROLL_PRESS_DELAY_MS} from '../../ui/Press';
 import {BackButton} from '../../ui/BackButton';
@@ -64,6 +68,7 @@ import {TabRailTouchContext, useTabSwipe} from '../../ui/useTabSwipe';
 import {dockDefaultTab, setDockDefaultTab} from '../dockPrefs';
 import {feedSortPref, setFeedSortPref} from '../feedSortPrefs';
 import {firstEnteredAt, wasFirstEntry} from '../communityEntry';
+import {joinedAt} from '../spaceJoinedAt';
 import {isTweetLike} from '../../feed/components/PostCard';
 import {RichText} from '../../feed/components/RichText';
 import {DEFAULT_SPACE_RULE_SET, resolveReactionPalette} from '../../channels/spaceRules';
@@ -1241,6 +1246,23 @@ export function MainScreen({
     onOpenGroupRef.current?.(openGroupId);
     return () => onCloseGroupRef.current?.(openGroupId);
   }, [openGroupId]);
+  // Swipe-back (2026-07-27): GroupView holds its 'chat' | 'manage' | 'addpeople' state internally, so
+  // MainScreen can't see it directly — GroupView lifts a single "am I at the swipeable root" boolean
+  // via onAtRootChange, and this is where it lands (see the <SubScreen swipeEnabled={groupAtRoot}>
+  // site below). Initialised true so the very first group ever opened defaults swipeable.
+  //
+  // Deliberately NOT also reset by a `useEffect(() => setGroupAtRoot(true), [openGroupId])` here, even
+  // though that reads like the obvious belt-and-suspenders addition: GroupView is keyed on openGroupId
+  // (key={openGroupId} below), so every open is a genuine fresh mount, and a fresh mount's OWN
+  // onAtRootChange effect always fires — unconditionally, regardless of deps — reporting the CORRECT
+  // starting value (true for the normal chat-root open, false when a join-request notification seeds
+  // initialScreen='manage'). A same-commit reset effect here would still run — React fires a newly-
+  // mounted CHILD's effects before an already-mounted PARENT's changed-deps effects in the same commit
+  // (verified empirically against this exact React/react-test-renderer pin) — so it would fire AFTER
+  // GroupView's report and unconditionally stomp a correct `false` back to `true`, leaving a
+  // notification-opened manage page wrongly swipeable until the next in-page navigation. Relying
+  // solely on GroupView's own report avoids that ordering hazard entirely.
+  const [groupAtRoot, setGroupAtRoot] = useState(true);
 
   // Channels (NIP-53), bug 8: subscribe to the open channel's kind-1311 chat while its view is
   // mounted. Structurally identical to the group effect above — including the refs, which are
@@ -1704,6 +1726,13 @@ export function MainScreen({
     setOpenProfile(null);
     if (origin) restoreNavOrigin(origin);
   };
+  // Swipe-back (2026-07-27): NewMessageScreen's <SubScreen> needs the SAME identifier for its
+  // onSwipeBack as the screen's own onBack prop (the plan's ownership rule), and that onBack used to
+  // be an inline arrow — hoisted here, verbatim, so both call sites share one function instead of two
+  // expressions that could drift.
+  const closeNewMessageScreen = useCallback((): void => {
+    setShowNewMessage(false);
+  }, []);
 
   // No.5 "enable replies": promote the author's channel post into a feed thread. Open the composer
   // (which lives on the feed chrome) preloaded with the post's text; publishing routes to
@@ -2458,7 +2487,9 @@ export function MainScreen({
       // Absolute overlay covering the tab stage (whose origin already clears the iOS notch — see
       // the stage note; the header unmounts while a profile is open, so the stage spans the root).
       // ProfileScreen's own root is a plain View, so no extra inset is needed here.
-      <Reanimated.View style={[styles.flex, styles.profileOverlay]}>
+      // Swipe-back (2026-07-27): onSwipeBack is closeProfileView — the SAME function the BackButton
+      // right below calls — per the plan's ownership rule.
+      <SwipeBackOverlay onSwipeBack={closeProfileView} style={[styles.flex, styles.profileOverlay]}>
         <BackButton label="Back" onPress={closeProfileView} style={styles.backBtn} />
         <ProfileScreen
           profile={openProfile}
@@ -2490,7 +2521,7 @@ export function MainScreen({
             setTab('feed');
           }}
         />
-      </Reanimated.View>
+      </SwipeBackOverlay>
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openProfile, currentUserPubkey]);
@@ -3286,8 +3317,9 @@ export function MainScreen({
         <ErrorBoundary scope="thread-detail" onReset={() => setOpenPost(null)}>
         {/* Absolute overlay covering the tab stage (which spans the root while a sub-screen is open —
             the header unmounts — and whose origin already clears the iOS notch, so no manual inset
-            is needed). Enters with the shared sub-screen fade+slide. */}
-        <Reanimated.View style={[styles.flex, styles.threadOverlay]}>
+            is needed). Enters with the shared sub-screen fade+slide. onSwipeBack is closeOpenPostView —
+            the SAME function the BackButton below calls — per the plan's ownership rule. */}
+        <SwipeBackOverlay onSwipeBack={closeOpenPostView} style={[styles.flex, styles.threadOverlay]}>
           {/* iOS keyboard avoidance for the comment composer pinned below the thread. Android resizes
               the window itself (adjustResize), so the KAV is a no-op there (behavior undefined). The
               overlay origin already sits below the notch, so no extra vertical offset is needed. */}
@@ -3729,7 +3761,7 @@ export function MainScreen({
             </Press>
           </Modal>
           )}
-        </Reanimated.View>
+        </SwipeBackOverlay>
         </ErrorBoundary>
         )}
 
@@ -3885,7 +3917,15 @@ export function MainScreen({
       </TabLayer>
       {tab === 'channels' && openGroupId && (
         <ErrorBoundary scope="group-view" onReset={() => setOpenGroupId(null)}>
-        <SubScreen>
+        {/* Swipe-back (2026-07-27): onSwipeBack is closeOpenGroupView — the SAME function GroupView's
+            own onBack (below) hands to its header ‹ — per the plan's ownership rule. swipeEnabled is
+            groupAtRoot, NOT a bare true: GroupView holds its own 'chat' | 'manage' | 'addpeople' state
+            (task 3), and manage/add-people hold forms — a swipe there must stay inert (same as the
+            BACK_PRIORITY.page peel GroupView registers for those levels) or it would fire this
+            SubScreen's onSwipeBack and close the WHOLE group from two levels deep, stranding nothing
+            visible (the surface unmounts) but skipping the peel-one-level contract every ‹ and BACK
+            press on this surface otherwise honours. */}
+        <SubScreen onSwipeBack={closeOpenGroupView} swipeEnabled={groupAtRoot}>
           {searchActive && renderSearchBar('Search messages…')}
           <GroupView
           key={openGroupId}
@@ -3992,12 +4032,19 @@ export function MainScreen({
             if (Number.isFinite(oldest)) onLoadOlderGroupPage(openGroupId, oldest);
           } : undefined}
           onBack={closeOpenGroupView}
+          // Swipe-back (2026-07-27, task 3): lifts whether GroupView is sitting on its 'chat' root
+          // into groupAtRoot above, so this SubScreen's swipeEnabled can gate the drag to just that
+          // root — see the comment at the <SubScreen> open tag.
+          onAtRootChange={setGroupAtRoot}
           />
         </SubScreen>
         </ErrorBoundary>
       )}
       {tab === 'channels' && showNewMessage && (
-        <SubScreen>
+        // Swipe-back (2026-07-27): onSwipeBack is closeNewMessageScreen — the SAME identifier passed
+        // to NewMessageScreen's own onBack below (hoisted from what used to be a duplicated inline
+        // arrow) — per the plan's ownership rule.
+        <SubScreen onSwipeBack={closeNewMessageScreen}>
         <NewMessageScreen
           contacts={newMessageContacts}
           channels={newMessageChannels}
@@ -4009,7 +4056,7 @@ export function MainScreen({
             setChannelDetailOpen(false);
             setOpenChannelId(id);
           }}
-          onBack={() => setShowNewMessage(false)}
+          onBack={closeNewMessageScreen}
         />
         </SubScreen>
       )}
@@ -4062,7 +4109,10 @@ export function MainScreen({
       )}
       {tab === 'channels' && openChannelId && openChannel && !channelDetailOpen && (
         <ErrorBoundary scope="channel-view" onReset={() => setOpenChannelId(null)}>
-        <SubScreen>
+        {/* Swipe-back (2026-07-27): onSwipeBack is closeOpenChannelView — the SAME function ChannelView
+            passes as its own onBack (below) — per the plan's ownership rule. No inner-page state to
+            protect here (unlike GroupView), so swipeEnabled stays the default true. */}
+        <SubScreen onSwipeBack={closeOpenChannelView}>
           {searchActive && renderSearchBar('Search messages…')}
           <ChannelView
             key={openChannel.id}
@@ -4137,7 +4187,9 @@ export function MainScreen({
         const isChOwner = openChannel.owner === currentUserPubkey;
         const interactions = getChannelMessageInteractions?.(openChannel.id, post.id) ?? {comments: false, reactions: false};
         return (
-          <Reanimated.View style={styles.threadOverlay}>
+          // Swipe-back (2026-07-27): onSwipeBack is closeOpenChannelPostView — the SAME function
+          // onBack below hands to the header's ‹ — per the plan's ownership rule.
+          <SwipeBackOverlay onSwipeBack={closeOpenChannelPostView} style={styles.threadOverlay}>
             <ChannelPostView
               channelName={openChannel.name}
               message={post}
@@ -4179,7 +4231,7 @@ export function MainScreen({
                 else openEmbedTarget(mid);
               }}
             />
-          </Reanimated.View>
+          </SwipeBackOverlay>
         );
       })()}
       {tab === 'channels' && openChannelId && openChannel && (
@@ -4224,9 +4276,11 @@ export function MainScreen({
       {/* ── DM overlay (accessed via Profile → Message, not a dedicated tab) ── */}
       {messagesContent && (
         <ErrorBoundary scope="dm-conversation" onReset={() => setOpenPeer(null)}>
-        <Reanimated.View style={styles.dmOverlay}>
+        {/* onSwipeBack is closeOpenPeerView — the SAME function ConversationView's own onBack (above,
+            in messagesContent) hands to its header ‹ — per the plan's ownership rule. */}
+        <SwipeBackOverlay onSwipeBack={closeOpenPeerView} style={styles.dmOverlay}>
           {messagesContent}
-        </Reanimated.View>
+        </SwipeBackOverlay>
         </ErrorBoundary>
       )}
 
@@ -4327,6 +4381,11 @@ export function MainScreen({
         animationType="slide"
         onRequestClose={() => setJoinReq(null)}>
         <SafeAreaView style={styles.pvRoot}>
+          {/* pvRoot (immediately above) carries the opaque backdrop (colors.bg) and stays static —
+              SwipeBackView wraps just the CONTENT below, so the strip a drag reveals is app
+              background, never a bare Dialog window. onBack is the same expression the Modal's own
+              onRequestClose (above) uses, per the plan's ownership rule. */}
+          <SwipeBackView onBack={() => setJoinReq(null)}>
           {(() => {
             if (!joinReq) return null;
             const preview = onGetSpacePreview?.(joinReq.groupId) ?? null;
@@ -4464,6 +4523,7 @@ export function MainScreen({
               </>
             );
           })()}
+          </SwipeBackView>
         </SafeAreaView>
       </Modal>
 
@@ -4500,6 +4560,45 @@ export function MainScreen({
         />
       )}
     </SafeAreaView>
+  );
+}
+
+// ── SwipeBackOverlay ─────────────────────────────────────────────────────────────
+// Shared shell for MainScreen's four bespoke drill-in overlays (feed thread, channel single-post, DM
+// conversation, profile — PLAN_SWIPE_BACK_GESTURE_2026-07-27.md task 1). Each of these predates
+// <SubScreen> (PLAN_UI_SMOOTHNESS_OVERHAUL_2026-07-22.md) and keeps its own absolute-positioned
+// overlay style rather than routing through it, so each needs its own copy of the swipe-back wiring
+// SubScreen now does internally (SubScreen.tsx's useSubScreenTransition).
+//
+// MUST be its own mounted component — NOT a `useSubScreenTransition()` call inlined at one of the
+// four call sites. Two of those sites are a `useMemo` factory (profileContent) and a conditionally-
+// invoked IIFE (the channel single-post overlay); calling a hook inside either is a Rules-of-Hooks
+// violation, since the call would become conditional on openProfile / openChannelPostId. Just as
+// important: useSubScreenTransition's translateX/translateY live in useSharedValues scoped to
+// WHICHEVER component calls it. <SubScreen>'s own drill-ins reset that state for free because each
+// open is a genuine mount (their parent conditional is `cond && <SubScreen>…`, which unmounts on
+// close). Calling the hook from MainScreen itself — which never unmounts — would leave a COMMITTED
+// swipe's translateX pinned at `width` across a close+reopen, so the surface would reappear
+// translated fully off-screen instead of at rest. A dedicated component that itself mounts fresh on
+// every open gets both: a legal, unconditional hook call, and a fresh shared value every time.
+function SwipeBackOverlay({
+  onSwipeBack,
+  style,
+  children,
+}: {
+  /** The surface's own close expression — see the plan's ownership rule. All four current callers are
+   *  unconditionally swipeable (no inner page to protect), so this component has no `swipeEnabled`
+   *  prop of its own; add one the way `<SubScreen>` does if a future caller needs to withhold the
+   *  drag. */
+  onSwipeBack: () => void;
+  style: StyleProp<ViewStyle>;
+  children: React.ReactNode;
+}): React.JSX.Element {
+  const transition = useSubScreenTransition({onSwipeBack, swipeEnabled: true});
+  return (
+    <Reanimated.View style={[style, transition.style]} {...transition.panHandlers}>
+      <SwipeOptOutContext.Provider value={transition.optOut}>{children}</SwipeOptOutContext.Provider>
+    </Reanimated.View>
   );
 }
 
@@ -4631,7 +4730,10 @@ const ChannelList = React.memo(function ChannelList({
       shape: c.openCommunity ? 'octagon' : 'square',
       name: c.name,
       preview: text || c.about || '',
-      lastAt: at,
+      // No cached messages yet (a channel joined seconds ago — its 1311 history is still streaming
+      // in over Tor) → sort by the later of when I joined and when it was created, instead of the 0
+      // floor that buried it below every DM and space. Mirrors groupRow's metaAt fallback.
+      lastAt: at || Math.max(joinedAt(c.id), c.metaAt ?? 0),
       // Point 7: floor-clamp to firstEnteredAt() (hides pre-join history) + show a "1" nudge for a
       // not-yet-opened space on first entry. firstEnteredAt() is 0 for an established member → the
       // plain unread count, unchanged.
@@ -4662,7 +4764,7 @@ const ChannelList = React.memo(function ChannelList({
       // the 39000's created_at so the space surfaces near its creation/edit recency instead of
       // burying at lastAt 0 below every old row (on-device: an admin's new private channels were
       // invisible in All without deep scrolling).
-      lastAt: at || (state?.metaAt ?? 0),
+      lastAt: at || Math.max(joinedAt(g.id), state?.metaAt ?? 0),
       unread: spaceBadge(grpSeenId(g.id), msgs, me, firstEnteredAt()),
       badge: section === 'run' ? 'ADMIN' : undefined,
       gradient: state?.gradient ?? null,
@@ -4719,6 +4821,11 @@ const ChannelList = React.memo(function ChannelList({
   ].sort((a, b) => b.lastAt - a.lastAt); // most-recent activity first
 
   return allRows.map(r => ({_kind: 'row' as const, ...r}));
+  // `joinedAt` (spaceJoinedAt.ts) is deliberately NOT a dep: it's a synchronous module-level mirror,
+  // not React state, so it can't be listed. Every call site that mutates it already changes a listed
+  // dep in the same tick — subscribeChannel emits a snapshot with a fresh `subscribedChannelIds`
+  // array identity (→ subscribedIds here), and trackGroup emits one with a fresh `groups` array — so
+  // this memo still recomputes exactly when a join stamp lands.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channels, groups, inbox, filter, me, subscribedIds, readVersion, feedToken]);
 

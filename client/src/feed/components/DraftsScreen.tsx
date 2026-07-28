@@ -16,6 +16,7 @@ import {
   View,
 } from 'react-native';
 import {Press} from '../../ui/Press';
+import {SwipeBackView} from '../../ui/SwipeBack';
 import {colors, radius} from '../../ui/theme';
 import {relTimeAgo} from '../../ui/relTime';
 import {GradientAvatar} from '../../ui/GradientAvatar';
@@ -153,109 +154,118 @@ export function DraftsScreen({
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
       <SafeAreaView style={s.page}>
-        <View style={s.header}>
-          <Press onPress={onClose} hitSlop={10} style={s.headerSide}>
-            <Text style={s.headerLeft}>‹ Back</Text>
-          </Press>
-          <Text style={s.headerTitle}>Drafts</Text>
-          <Press onPress={onNew} hitSlop={10} style={[s.headerSide, s.headerRight]}>
-            <Text style={s.headerNew}>New</Text>
-          </Press>
-        </View>
-
-        <View style={s.titleRow}>
-          <Text style={s.h1}>Drafts</Text>
-          <Text style={s.savedCount}>{items.length} saved</Text>
-        </View>
-
-        <View style={s.filterRow}>
-          {FILTERS.map(f => {
-            const active = filter === f.key;
-            return (
-              <Press key={f.key} onPress={() => setFilter(f.key)} style={[s.filterChip, active && s.filterChipActive]}>
-                <Text style={[s.filterText, active && s.filterTextActive]}>{f.label}</Text>
-              </Press>
-            );
-          })}
-        </View>
-
-        {groups.length === 0 ? (
-          <View style={s.empty}>
-            <Text style={s.emptyTitle}>No drafts here</Text>
-            <Text style={s.emptySub}>Drafts you don't publish will wait for you here.</Text>
-          </View>
-        ) : (
-          <ScrollView style={s.flex} contentContainerStyle={s.listContent}>
-            {groups.map(g => (
-              <View key={g.bucket} style={s.group}>
-                <Text style={s.groupLabel}>{g.bucket}</Text>
-                {g.rows.map(d => (
-                  <DraftCard
-                    key={d.id}
-                    draft={d}
-                    labels={labels}
-                    limits={limits}
-                    now={now}
-                    onPress={() => onOpen(d)}
-                    onMenu={() => setSheetFor(d)}
-                  />
-                ))}
-              </View>
-            ))}
-          </ScrollView>
-        )}
-
-        {/* ── Undo toast ── */}
-        {undo && (
-          <View style={s.toast}>
-            <Text style={s.toastText}>Draft deleted</Text>
-            <Press onPress={undoDelete}>
-              <Text style={s.toastUndo}>Undo</Text>
+        {/* SwipeBackView wraps the SafeAreaView's children so the opaque page background stays put
+            as the backdrop while the content slides away — see
+            PLAN_SWIPE_BACK_GESTURE_2026-07-27.md's "Modal-hosted pages" note. The nested action-sheet
+            Modal below was already a direct child of this SafeAreaView and stays one here too; being
+            a Modal itself it renders into its own native window, so this view's transform cannot
+            affect it either way. `onBack` is `onClose`, the same function the header ‹ Back already
+            calls, so the button, the hardware key and the swipe can never drift apart. */}
+        <SwipeBackView onBack={onClose}>
+          <View style={s.header}>
+            <Press onPress={onClose} hitSlop={10} style={s.headerSide}>
+              <Text style={s.headerLeft}>‹ Back</Text>
+            </Press>
+            <Text style={s.headerTitle}>Drafts</Text>
+            <Press onPress={onNew} hitSlop={10} style={[s.headerSide, s.headerRight]}>
+              <Text style={s.headerNew}>New</Text>
             </Press>
           </View>
-        )}
 
-        {/* ── Action sheet ── */}
-        <Modal visible={!!sheetFor} transparent animationType="fade" onRequestClose={() => setSheetFor(null)}>
-          <Press variant="bare" style={s.sheetBack} onPress={() => setSheetFor(null)} accessibilityRole="none">
-            <Press variant="bare" style={s.sheet} onPress={() => {}} accessibilityRole="none">
-              {sheetFor && (
-                <View style={s.sheetPeek}>
-                  <Text style={s.sheetPeekKind}>{modeOf(sheetFor.title) === 'article' ? 'ARTICLE' : 'NOTE'}</Text>
-                  <Text style={s.sheetPeekTitle} numberOfLines={1}>
-                    {sheetFor.title.trim() || labelInlineMedia(sheetFor.content).trim() || '(empty draft)'}
-                  </Text>
+          <View style={s.titleRow}>
+            <Text style={s.h1}>Drafts</Text>
+            <Text style={s.savedCount}>{items.length} saved</Text>
+          </View>
+
+          <View style={s.filterRow}>
+            {FILTERS.map(f => {
+              const active = filter === f.key;
+              return (
+                <Press key={f.key} onPress={() => setFilter(f.key)} style={[s.filterChip, active && s.filterChipActive]}>
+                  <Text style={[s.filterText, active && s.filterTextActive]}>{f.label}</Text>
+                </Press>
+              );
+            })}
+          </View>
+
+          {groups.length === 0 ? (
+            <View style={s.empty}>
+              <Text style={s.emptyTitle}>No drafts here</Text>
+              <Text style={s.emptySub}>Drafts you don't publish will wait for you here.</Text>
+            </View>
+          ) : (
+            <ScrollView style={s.flex} contentContainerStyle={s.listContent}>
+              {groups.map(g => (
+                <View key={g.bucket} style={s.group}>
+                  <Text style={s.groupLabel}>{g.bucket}</Text>
+                  {g.rows.map(d => (
+                    <DraftCard
+                      key={d.id}
+                      draft={d}
+                      labels={labels}
+                      limits={limits}
+                      now={now}
+                      onPress={() => onOpen(d)}
+                      onMenu={() => setSheetFor(d)}
+                    />
+                  ))}
                 </View>
-              )}
-              <Press variant="row" style={s.sheetItem} onPress={() => { const d = sheetFor; setSheetFor(null); if (d) onOpen(d); }}>
-                <Text style={s.sheetItemText}>Continue editing</Text>
-              </Press>
-              <Press variant="row" style={s.sheetItem} onPress={() => { const d = sheetFor; setSheetFor(null); if (d) duplicate(d); }}>
-                <Text style={s.sheetItemText}>Duplicate</Text>
-              </Press>
-              {onSaveEmbed && (
-                <Press variant="row" style={s.sheetItem} onPress={() => { const d = sheetFor; setSheetFor(null); if (d) onSaveEmbed(d); }}>
-                  <Text style={s.sheetItemText}>Save to embed</Text>
-                </Press>
-              )}
-              {/* Only once this draft has actually been shared (has a shareId) — Phase 5§F. */}
-              {sheetFor?.shareId && onManageAccess && (
-                <Press variant="row" style={s.sheetItem} onPress={() => { const d = sheetFor; setSheetFor(null); if (d) onManageAccess(d); }}>
-                  <Text style={s.sheetItemText}>
-                    Manage access ({onGetPendingAccessCount?.(sheetFor.shareId) ?? 0} pending)
-                  </Text>
-                </Press>
-              )}
-              <Press variant="row" style={s.sheetItem} onPress={() => { const d = sheetFor; setSheetFor(null); if (d) deleteDraft(d); }}>
+              ))}
+            </ScrollView>
+          )}
 
-                <Text style={[s.sheetItemText, s.sheetDanger]}>Delete draft</Text>
+          {/* ── Undo toast ── */}
+          {undo && (
+            <View style={s.toast}>
+              <Text style={s.toastText}>Draft deleted</Text>
+              <Press onPress={undoDelete}>
+                <Text style={s.toastUndo}>Undo</Text>
               </Press>
-              <Press style={[s.sheetItem, s.sheetCancel]} onPress={() => setSheetFor(null)}>
-                <Text style={s.sheetItemText}>Cancel</Text>
+            </View>
+          )}
+
+          {/* ── Action sheet ── */}
+          <Modal visible={!!sheetFor} transparent animationType="fade" onRequestClose={() => setSheetFor(null)}>
+            <Press variant="bare" style={s.sheetBack} onPress={() => setSheetFor(null)} accessibilityRole="none">
+              <Press variant="bare" style={s.sheet} onPress={() => {}} accessibilityRole="none">
+                {sheetFor && (
+                  <View style={s.sheetPeek}>
+                    <Text style={s.sheetPeekKind}>{modeOf(sheetFor.title) === 'article' ? 'ARTICLE' : 'NOTE'}</Text>
+                    <Text style={s.sheetPeekTitle} numberOfLines={1}>
+                      {sheetFor.title.trim() || labelInlineMedia(sheetFor.content).trim() || '(empty draft)'}
+                    </Text>
+                  </View>
+                )}
+                <Press variant="row" style={s.sheetItem} onPress={() => { const d = sheetFor; setSheetFor(null); if (d) onOpen(d); }}>
+                  <Text style={s.sheetItemText}>Continue editing</Text>
+                </Press>
+                <Press variant="row" style={s.sheetItem} onPress={() => { const d = sheetFor; setSheetFor(null); if (d) duplicate(d); }}>
+                  <Text style={s.sheetItemText}>Duplicate</Text>
+                </Press>
+                {onSaveEmbed && (
+                  <Press variant="row" style={s.sheetItem} onPress={() => { const d = sheetFor; setSheetFor(null); if (d) onSaveEmbed(d); }}>
+                    <Text style={s.sheetItemText}>Save to embed</Text>
+                  </Press>
+                )}
+                {/* Only once this draft has actually been shared (has a shareId) — Phase 5§F. */}
+                {sheetFor?.shareId && onManageAccess && (
+                  <Press variant="row" style={s.sheetItem} onPress={() => { const d = sheetFor; setSheetFor(null); if (d) onManageAccess(d); }}>
+                    <Text style={s.sheetItemText}>
+                      Manage access ({onGetPendingAccessCount?.(sheetFor.shareId) ?? 0} pending)
+                    </Text>
+                  </Press>
+                )}
+                <Press variant="row" style={s.sheetItem} onPress={() => { const d = sheetFor; setSheetFor(null); if (d) deleteDraft(d); }}>
+
+                  <Text style={[s.sheetItemText, s.sheetDanger]}>Delete draft</Text>
+                </Press>
+                <Press style={[s.sheetItem, s.sheetCancel]} onPress={() => setSheetFor(null)}>
+                  <Text style={s.sheetItemText}>Cancel</Text>
+                </Press>
               </Press>
             </Press>
-          </Press>
-        </Modal>
+          </Modal>
+        </SwipeBackView>
       </SafeAreaView>
     </Modal>
   );

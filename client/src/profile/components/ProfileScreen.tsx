@@ -22,6 +22,7 @@ import {gradientFromSeed, type GradientSpec} from '../../media/gradient';
 import {GradientAvatar} from '../../ui/GradientAvatar';
 import {GradientMaker} from '../../ui/GradientMaker';
 import {colors, space, radius, type as typeScale, weight, DENSE_MAX_FONT_SCALE} from '../../ui/theme';
+import {useSwipeOptOut} from '../../ui/swipeOptOut';
 
 export interface ProfileScreenProps {
   profile: Profile;
@@ -132,6 +133,10 @@ export function ProfileScreen({
     setConflict(profile.nameConflict);
   }, [profile.pubkey, profile.npub, profile.name, profile.gradient, profile.nameConflict]);
 
+  // Stands this page's own swipe-back down for touches beginning on the display-name field or the
+  // "ACTIVE IN" channel rail below — spread onto each; see the opt-outs there for what they protect.
+  const optOut = useSwipeOptOut();
+
   const saveName = (): void => {
     const next = nameDraft.trim();
     onSaveName?.(next);
@@ -202,6 +207,9 @@ export function ProfileScreen({
                 {/* Name */}
                 {editing ? (
                   <View style={s.editRow}>
+                    {/* A TextInput's own selection-handle drag doesn't join JS PanResponder
+                        negotiation, so without this opt-out the page-level swipe-back would win a
+                        rightward drag started inside the field instead of moving the cursor. */}
                     <TextInput
                       style={s.nameInput}
                       value={nameDraft}
@@ -213,6 +221,7 @@ export function ProfileScreen({
                       returnKeyType="done"
                       onSubmitEditing={saveName}
                       maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}
+                      {...optOut}
                     />
                     <Press style={s.nameSaveBtn} onPress={saveName}>
                       <Text style={s.nameSaveText} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>Save</Text>
@@ -322,7 +331,14 @@ export function ProfileScreen({
             return (
               <View>
                 <Text style={s.sectionTitle} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>ACTIVE IN</Text>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.channelScroll}>
+                {/* A native horizontal ScrollView never joins JS PanResponder negotiation, so without
+                    this opt-out the page-level swipe-back would win any rightward drag that starts on
+                    the rail and it would never get to scroll itself. */}
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={s.channelScroll}
+                  {...optOut}>
                   {profile.channels.map(ch => (
                     <Press
                       key={ch.id}

@@ -63,6 +63,13 @@ export interface Channel {
   admins?: string[];
   /** Open community — admins (not only the owner) post, posts show author identity, octagon shape. */
   openCommunity?: boolean;
+  /**
+   * created_at of the 30311 this channel was parsed from — when it appeared (or was last edited).
+   * The Spaces list uses it as the recency fallback for a channel with no readable messages, so a
+   * freshly-joined channel sorts by its real age instead of the 0 floor that buried it below every
+   * other row. Mirrors {@link GroupState.metaAt}.
+   */
+  metaAt?: number;
 }
 
 /** NIP-01 addressable coordinate for a 30311 event. */
@@ -241,6 +248,7 @@ export function parseChannel(event: Event): Channel | null {
     pinnedMessageId: tagValue(event, 'pinned'),
     admins: admins.length > 0 ? admins : undefined,
     openCommunity: tagValue(event, 'mode') === 'open' || undefined,
+    metaAt: event.created_at,
   };
 }
 

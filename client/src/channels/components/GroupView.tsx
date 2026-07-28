@@ -35,6 +35,7 @@ import {GradientAvatar, type AvatarShape} from '../../ui/GradientAvatar';
 import {JumpButton} from '../../ui/JumpButton';
 import {BACK_PRIORITY, useBackAction} from '../../ui/back';
 import {useReturnToLatest} from '../../ui/useReturnToLatest';
+import {useSwipeOptOut} from '../../ui/swipeOptOut';
 import {isSourceMuted, toggleMute} from '../../notifications/notifications';
 import {SpaceHeader, SpaceBackButton, StatusPill, ChatBubble, ChannelComposer, QuotedReply, SwipeToReply, npubFor, shortNpub} from './primitives';
 import {shortenNpub} from '../../util/npub';
@@ -216,6 +217,12 @@ export interface GroupViewProps {
    *  A join-request notification tap passes 'manage' to land straight on the review queue. */
   initialScreen?: 'chat' | 'manage';
   onBack: () => void;
+  /** Swipe-back (PLAN_SWIPE_BACK_GESTURE_2026-07-27.md, task 3): MainScreen wraps this component in a
+   *  <SubScreen> whose swipe-to-dismiss must stay inert while `screen` is 'manage' or 'addpeople' —
+   *  those hold forms, and the swipe must always be the thing that unmounts (never fire past an inner
+   *  page the way a bare BACK press could). MainScreen can't see `screen` directly, so this lifts a
+   *  single "am I at the swipeable root" boolean; called from an effect on every `screen` change. */
+  onAtRootChange?: (atRoot: boolean) => void;
   /**
    * Stable React list key for an event id (AppRuntime.stableListKey). Our own optimistic
    * post/reply's `local-…` placeholder id is swapped for the real event id when it signs — keying
@@ -252,6 +259,10 @@ function AddPeopleScreen({
 }): React.JSX.Element {
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<Record<string, boolean>>({});
+  // AddPeopleScreen only renders while GroupView's own swipe-back is already disabled (see
+  // `onAtRootChange` elsewhere in this file) — opted out anyway for the search field below so the
+  // same protection holds even if that gating ever changes.
+  const optOut = useSwipeOptOut();
   // Snapshot the phone book once per mount (the screen is short-lived).
   const [contacts] = useState<Contact[]>(() => {
     const exclude = new Set(existingMembers);
@@ -280,6 +291,9 @@ function AddPeopleScreen({
         </Text>
         <View style={s.apSearch}>
           <Text style={s.apSearchIcon}>🔍</Text>
+          {/* A TextInput's own selection-handle drag doesn't join JS PanResponder negotiation, so
+              without this opt-out a live page-level swipe-back would win a rightward drag started
+              inside the field instead of moving the cursor (see `optOut`'s own comment above). */}
           <TextInput
             style={s.apSearchInput}
             value={query}
@@ -289,6 +303,7 @@ function AddPeopleScreen({
             autoCapitalize="none"
             autoCorrect={false}
             accessibilityLabel="add-people-search"
+            {...optOut}
           />
         </View>
       </View>
@@ -704,8 +719,11 @@ export function GroupView(props: GroupViewProps): React.JSX.Element {
     getAuthorGradient, onEditGroupMessage, onIsSpaceKeyMissing, onLookupEvent, onOpenRef, onOpenInviteLink, onEnableReplies, onOpenPromoted,
     getFeedReplyCount, allowVoice, pictureRules, picturesSpentBytes, postRules, pinnedMessageId, onSetPinned, onSaveReactions,
     sendStatus, sendReasons, onRetry, onCancel, draftStore, onOpenDrafts, onLoadOlder, onGetPhonebook,
-    initialScreen, listKeyFor,
+    initialScreen, listKeyFor, onAtRootChange,
   } = props;
+  // Stands this page's own swipe-back down for touches beginning on the chat composer below —
+  // spread onto its wrapper View; see the opt-out there for what it protects.
+  const optOut = useSwipeOptOut();
   // Type is fixed at creation. Derive the human label, avatar shape, and join model from the flags:
   //   private + broadcast  = Private channel (members read, admins post; join by invite OR request)
   //   private + !broadcast = Private group   (members read+write; INVITE-ONLY, no request)
@@ -850,6 +868,14 @@ export function GroupView(props: GroupViewProps): React.JSX.Element {
     },
     {enabled: screen !== 'chat', priority: BACK_PRIORITY.page},
   );
+  // Swipe-back (2026-07-27): mirror `screen` out to MainScreen (see onAtRootChange's doc above) so
+  // the <SubScreen> wrapping this component can disable its swipe-to-dismiss on manage/add-people —
+  // a swipe there must stay inert, same as it is for the BACK_PRIORITY.page peel just above, or it
+  // would fire the SubScreen's own onSwipeBack (closeOpenGroupView) and close the WHOLE space from
+  // two levels deep.
+  useEffect(() => {
+    onAtRootChange?.(screen === 'chat');
+  }, [screen, onAtRootChange]);
   // Resolved request cards stay visible for the session after the live pending entry vanishes
   // ("✓ Approved — added to members" / "Declined quietly…"), exactly like the prototype. Keyed by
   // pubkey; also drives the members list's NEW tag (approved this session).
@@ -1698,21 +1724,27 @@ export function GroupView(props: GroupViewProps): React.JSX.Element {
               </Text>
             </View>
           )}
-          <ChannelComposer
-            ref={composerInputRef}
-            value={draft}
-            onChangeText={v => { setDraft(v); if (!editingId) slot.persist(v); }}
-            placeholder={editingId ? 'Edit your message…' : 'Message'}
-            // No key means every send would immediately fail closed — disable the button rather
-            // than let the tap round-trip through a throw the user can't do anything about yet.
-            onSend={isSpaceKeyMissing ? NOOP : send}
-            onEmbed={() => setSavedSheetOpen(true)}
-            onExpand={() => setEditorOpen(true)}
-            onRecordVoice={allowVoice ? () => setVoiceOpen(true) : undefined}
-            onAddPicture={pictureRules?.allow ? () => setPictureOpen(true) : undefined}
-            accessibilityInput="group-composer"
-            accessibilitySend="group-send"
-          />
+          {/* Wrapped in a plain View (ChannelComposer's own props don't forward touch handlers) so
+              the swipe-back drag stands down for any touch landing on it: the composer's TextInput
+              does its own selection-handle drag, which never joins JS responder negotiation, so
+              without this the page swipe would win that drag instead. */}
+          <View {...optOut}>
+            <ChannelComposer
+              ref={composerInputRef}
+              value={draft}
+              onChangeText={v => { setDraft(v); if (!editingId) slot.persist(v); }}
+              placeholder={editingId ? 'Edit your message…' : 'Message'}
+              // No key means every send would immediately fail closed — disable the button rather
+              // than let the tap round-trip through a throw the user can't do anything about yet.
+              onSend={isSpaceKeyMissing ? NOOP : send}
+              onEmbed={() => setSavedSheetOpen(true)}
+              onExpand={() => setEditorOpen(true)}
+              onRecordVoice={allowVoice ? () => setVoiceOpen(true) : undefined}
+              onAddPicture={pictureRules?.allow ? () => setPictureOpen(true) : undefined}
+              accessibilityInput="group-composer"
+              accessibilitySend="group-send"
+            />
+          </View>
           {allowVoice && (
             <VoiceComposer
               visible={voiceOpen}
