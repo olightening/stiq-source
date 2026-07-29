@@ -11,6 +11,7 @@
 // imports). Every other config value keeps its real value via requireActual.
 jest.mock('../config', () => ({...jest.requireActual('../config'), TIMING_JITTER: false}));
 
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {AppRuntime} from './AppRuntime';
 import * as drawExchange from '../blind/drawExchange';
 import {Identity} from '../keys/identity';
@@ -370,6 +371,14 @@ describe('C5 — domain-separation verification', () => {
 });
 
 describe('weight-pricing — driven by caps.enforcedFlags.bytesPerToken', () => {
+  beforeEach(async () => {
+    // Sticky enforcement (2026-07-28) persists explicitly-advertised flags per community in
+    // AsyncStorage — a file-scoped singleton under the global jest mock. Earlier describes in this
+    // file advertise bytes_per_token for the SAME test cid, which leaked into the caps-fallback
+    // case below and broke its stays-off-at-0 expectation (identically on master). Same hygiene as
+    // AppRuntime.capsSticky.test.ts / spaceReactions.test.ts.
+    await AsyncStorage.clear();
+  });
   it('activates pricing at the advertised rate (bytes_per_token > 0)', async () => {
     const {runtime} = await enrolled(() => capsDoc({enforced: {bytes_per_token: 256}}));
     expect(getBytesPerToken()).toBe(0); // off until caps are negotiated

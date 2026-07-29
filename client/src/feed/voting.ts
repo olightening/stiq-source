@@ -10,6 +10,7 @@ import type {EventStore} from '../nostr/store';
 import type {UnsignedEvent} from '../keys/keystore';
 import type {Signer} from './compose';
 import {resolveAuthorPubkey} from '../blind/identity';
+import {resolveContent} from '../blind/blindPost';
 
 export type VoteDirection = 'up' | 'down';
 
@@ -95,7 +96,17 @@ export function reactionValue(event: Event): number {
   if (event.kind !== Kind.Reaction) {
     return 0;
   }
-  const content = event.content.trim();
+  // Reactions ride the blind feedSigner, so under content encryption their '+'/'-' body is sealed
+  // like any post body. Resolve first: a still-locked reaction is UNCOUNTED (never miscounted —
+  // its ciphertext must not fall into the "empty means like" NIP-25 rule below), and an unlocked
+  // one counts normally. The feed-item cache key already carries score/myVote, so the L→u rebuild
+  // after an epoch unlock re-runs this and the tallies fill in. (This is the same reasoning
+  // events/eventsStore.ts:interestedTallies applies to RSVPs — kind 7 had been left behind.)
+  const {text, locked} = resolveContent(event);
+  if (locked) {
+    return 0;
+  }
+  const content = text.trim();
   if (content === '-') {
     return -1;
   }

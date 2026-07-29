@@ -17,6 +17,7 @@
 // imports). Every other config value keeps its real value via requireActual.
 jest.mock('../config', () => ({...jest.requireActual('../config'), TIMING_JITTER: false}));
 
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {AppRuntime} from './AppRuntime';
 import {BlindTokensExhausted} from '../blind/blindSigner';
 import {InMemorySecureStorage} from '../keys/keystore';
@@ -148,6 +149,15 @@ describe('public-channel reactions ride the blind path', () => {
 });
 
 describe('group reactions carry a bearer posting token under blind_required', () => {
+  beforeEach(async () => {
+    // Sticky enforcement (2026-07-28) persists an explicitly-advertised flag per community in
+    // AsyncStorage — which the global jest mock keeps as a file-scoped singleton. Without a clear,
+    // the first test's explicit `blind_required: true` advertisement leaks into the "never
+    // advertised" fallback test below (same cid), whose tokenless expectation then fails. Same
+    // hygiene as AppRuntime.capsSticky.test.ts's own beforeEach.
+    await AsyncStorage.clear();
+  });
+
   it('reactToGroupMessage stays npub-signed and attaches plain (token, sig) pairs, no proofs', async () => {
     const {runtime, secure, published} = await enrolled(() =>
       capsDoc({enforced: {blind_required: true}}),

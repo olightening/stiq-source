@@ -136,6 +136,7 @@ import {
 } from '../../notifications/readState';
 import {decodeNameHeader} from '../../profile/displayName';
 import {labelInlineMedia, inlineMediaSummary} from '../../feed/inlineMedia';
+import {resolveContent} from '../../blind/blindPost';
 import type {GradientSpec} from '../../media/gradient';
 import {LogScreen, type LogPostOpenInfo} from './LogScreen';
 import {LogPostView} from './LogPostView';
@@ -3783,7 +3784,13 @@ export function MainScreen({
               const detailWhen = relTimeShort(openPost.createdAt);
               const lblMeta = livePost.label ? labelMetaFor(livePost.label, labels) : null;
               const isAuthor = currentUserPubkey === openPost.authorPubkey;
-              const noteText = pinnedHistory?.latest?.content?.trim();
+              // Author's notes are blind-signed comments, so under content encryption the body can
+              // arrive sealed — resolve it, and render the locked placeholder rather than
+              // ciphertext (or a silently missing note) while its epoch is still locked.
+              const noteResolved = pinnedHistory?.latest ? resolveContent(pinnedHistory.latest) : null;
+              const noteText = noteResolved?.locked
+                ? '🔒 Locked — unlock this epoch to read'
+                : noteResolved?.text?.trim();
               // Organizer-configured author's-note character cap (0 = unbounded).
               const authorNoteMax = postRules.authorNoteMax;
               const openEmbed = openEmbedTarget;
@@ -4094,13 +4101,19 @@ export function MainScreen({
                       <Text style={styles.histTsCurrent} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>
                         CURRENT · {new Date(pinnedHistory.latest.created_at * 1000).toLocaleString()}
                       </Text>
-                      <Text style={styles.histText}>{labelInlineMedia(pinnedHistory.latest.content)}</Text>
+                      <Text style={styles.histText}>{(() => {
+                        const r = resolveContent(pinnedHistory.latest);
+                        return r.locked ? '🔒 Locked — unlock this epoch to read' : labelInlineMedia(r.text);
+                      })()}</Text>
                     </View>
                   )}
                   {[...(pinnedHistory?.history ?? [])].reverse().map(ev => (
                     <View key={ev.id} style={styles.histItem}>
                       <Text style={styles.histTs} maxFontSizeMultiplier={DENSE_MAX_FONT_SCALE}>{new Date(ev.created_at * 1000).toLocaleString()}</Text>
-                      <Text style={styles.histText}>{labelInlineMedia(ev.content)}</Text>
+                      <Text style={styles.histText}>{(() => {
+                        const r = resolveContent(ev);
+                        return r.locked ? '🔒 Locked — unlock this epoch to read' : labelInlineMedia(r.text);
+                      })()}</Text>
                     </View>
                   ))}
                 </ScrollView>

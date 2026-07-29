@@ -61,6 +61,7 @@
  */
 import {KIND_MEDIA_BLOB, type Event} from '../contracts';
 import {LAZY_MEDIA_BLOBS} from '../config';
+import {resolveContent} from '../blind/blindPost';
 
 /**
  * Where an inline media token's bytes actually live. The ONE abstraction pictures and voice share:
@@ -192,7 +193,14 @@ export function buildMediaBlobEvent(payloadBase64: string, createdAt: number = M
 /** The payload carried by a blob event, or null if `event` isn't a well-formed blob. Never throws. */
 export function readMediaBlobPayload(event: Event | undefined | null): string | null {
   if (!event || event.kind !== KIND_MEDIA_BLOB) return null;
-  const content = event.content;
+  // Blobs ride the blind feedSigner, so under content encryption the base64 payload is sealed like
+  // any body — and NIP-44 ciphertext is ITSELF base64, so without resolving first the regex below
+  // would wave ciphertext through to the PNG/voice decoders as if it were media (the exact trap
+  // config.ts's LAZY_MEDIA_BLOBS note documents). Resolve; a still-locked blob is simply "not
+  // found" (soft-fail, retryable — peek() re-reads on every tap, so it heals the moment the epoch
+  // unlocks; the referencing post is sealed under the same epoch and drives that unlock).
+  const {text: content, locked} = resolveContent(event);
+  if (locked) return null;
   if (typeof content !== 'string' || content.length === 0) return null;
   // A blob's content is always a base64 payload; reject anything else rather than hand a renderer
   // bytes it will fail to decode halfway through paint.

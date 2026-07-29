@@ -86,6 +86,12 @@ jest.mock('../src/tor', () => {
       isLive: () => mockTor.live,
       isOnionAuthActive: () => true,
       onBootstrap: () => () => {},
+      // Deferred-reachability APIs (arti probe-retry, merged @26641f6b) — App.tsx calls both
+      // unconditionally; the fake predated them and threw "manager.onReach is not a function"
+      // before setup ever completed (broken on master too). installReach resolving true = the
+      // live-install fast path: startRelay() proceeds without a daemon restart.
+      onReach: () => () => {},
+      installReach: async () => true,
       onChange: (cb: (s: ConnectionState) => void) => {
         mockTor.listeners.add(cb);
         return () => mockTor.listeners.delete(cb);

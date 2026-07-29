@@ -229,7 +229,10 @@ The 21 steps in §6 describe roughly the first third of the product. Built since
   files).
 - **Content encryption and read tokens** — bodies sealed under a rotating community key with an
   epoch watcher and metered read authorization (`blind/contentKey.ts`, `blind/readUnlock.ts`,
-  `issuer/contentEpochKeys.mjs`).
+  `issuer/contentEpochKeys.mjs`). Every client surface is sealed-content-safe — a locked body
+  renders as a locked state, never ciphertext — enforced by `blind/sealedEverywhere.test.ts`;
+  federated mirror relays store ciphertext only and hold no decryption material
+  (`deploy/stiq-up.sh --attach`).
 - **Spaces** — channels, groups, and events with per-space rules, gradients, reactions, pinning,
   and client-side auto-moderation (`client/src/channels/`, 70 files).
 - **Organizer dashboard** — invite issuance (multi-use, expiring, short links), moderator roster,

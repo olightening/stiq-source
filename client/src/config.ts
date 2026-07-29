@@ -355,12 +355,11 @@ export const AUTHOR_NOTE_ENABLED = false as boolean;
  * The blob split cannot be delivered client-only; that is a property of the wire format chosen, not
  * of this implementation.
  *
- * ⚠️ NOT COMPATIBLE WITH CONTENT SEALING YET (both dark today, so this is a future trap, not a live
- * bug): BlindSigner seals an event's content under the write content-epoch key when one is
- * provisioned (C7). A blob signed through it inherits that seal, so its payload lands as NIP-44
- * ciphertext — which `readMediaBlobPayload` hands back verbatim (ciphertext is base64, so its
- * well-formedness check passes) and the chip then fails to decode. Turning this on together with
- * content encryption needs readMediaBlobPayload to route through `resolveContent` first.
+ * Content-sealing compatibility (T5.2, 2026-07-29): BlindSigner seals a blob's content under the
+ * write content-epoch key like any body, and NIP-44 ciphertext is itself base64 — so
+ * `readMediaBlobPayload` now routes through `resolveContent` FIRST. A still-locked blob reads as
+ * "not found" (soft-fail, retryable; heals on epoch unlock) instead of handing ciphertext to the
+ * PNG/voice decoders. Pinned by blind/sealedEverywhere.test.ts.
  */
 export const LAZY_MEDIA_BLOBS = true as boolean;
 

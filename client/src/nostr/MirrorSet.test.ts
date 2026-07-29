@@ -6,6 +6,11 @@ import type {RelaySocket} from './socket';
 import type {NegentropySyncOptions} from './RelayClient';
 import type {ReqFilter} from './protocol';
 import {FEED_KINDS} from '../contracts';
+import {TAG_TOKEN, TAG_SIG, TAG_ENC, ENC_NIP44, TAG_KE} from '../blind/protocol';
+import {encryptForSpace} from '../channels/groupCrypto';
+import {mintContentKey, setContentEpochKey, clearActiveContentKeys} from '../blind/contentKey';
+import {resolveContent, contentLockState} from '../blind/blindPost';
+import {bytesToBase64} from '../util/base64';
 
 /** A primary-shaped negentropy option: incremental `since` window, getItems reads FEED_KINDS from the
  *  shared store — the exact shape App.tsx builds. Used to prove secondaries widen it to full horizon. */
@@ -817,5 +822,133 @@ describe('fullHorizonNegentropy', () => {
     const derived = fullHorizonNegentropy(base, [1, 7, 1111], 300);
     const f = typeof derived.filter === 'function' ? derived.filter() : derived.filter;
     expect(f).toEqual({kinds: [1, 7, 1111], limit: 300});
+  });
+});
+
+/**
+ * Mirror-blindness under content encryption (T5.2 / WI-7). Sealing happens ONCE, inside
+ * BlindSigner, before the event ever reaches transport — so federation must be a pure pass-through:
+ * every mirror receives the identical ciphertext (never a per-relay plaintext variant), and a
+ * sealed event that arrives via a SECONDARY's reconcile feeds the same store + resolveContent
+ * machinery as one from the primary. These pin the N>1 path explicitly — N=1-passing tests do not
+ * validate federation.
+ */
+describe('sealed-content federation (mirror-blindness)', () => {
+  afterEach(() => {
+    clearActiveContentKeys();
+  });
+
+  /** A wire-accurate sealed blind post: token pair (isBlindPost) + NIP-44 marker + epoch tag. */
+  function sealedBlindPost(body: string, epoch: number, key: Uint8Array): Event {
+    return finalizeEvent(
+      {
+        kind: 1,
+        created_at: 1000,
+        tags: [
+          [TAG_TOKEN, bytesToBase64(Uint8Array.of(1, 2, 3))],
+          [TAG_SIG, bytesToBase64(Uint8Array.of(4, 5, 6))],
+          [TAG_ENC, ENC_NIP44],
+          [TAG_KE, String(epoch)],
+        ],
+        content: encryptForSpace(body, key),
+      },
+      generateSecretKey(),
+    );
+  }
+
+  /** The last EVENT frame a fake socket was asked to send, parsed. */
+  function lastPublishedEvent(socket: FakeRelaySocket): Event {
+    const frames = socket.sent.map(s => JSON.parse(s) as [string, Event]).filter(f => f[0] === 'EVENT');
+    expect(frames.length).toBeGreaterThan(0);
+    return frames[frames.length - 1]![1];
+  }
+
+  it('fans the IDENTICAL sealed event to every connected mirror — one ciphertext, no per-relay variant', () => {
+    jest.useFakeTimers();
+    try {
+      const primarySocket = new FakeRelaySocket();
+      const store = new InMemoryEventStore();
+      const {createSocket, socketsFor} = trackedCreateSocket();
+      const secondarySpec: MirrorSpec = {url: 'wss://mirror1.onion'};
+      const mirrors = new MirrorSet(primarySocket, store, {
+        primaryOptions: {kinds: [1]},
+        createSocket,
+        secondaryMirrors: [secondarySpec],
+        secondaryConnectDelayMs: 10,
+      });
+
+      primarySocket.simulateOpen();
+      primarySocket.emitEose('feed');
+      jest.advanceTimersByTime(10);
+      const secondarySocket = socketsFor(secondarySpec.url)[0]!;
+      secondarySocket.simulateOpen();
+
+      const key = mintContentKey();
+      const body = 'the plaintext body only members can read';
+      void mirrors.publish(sealedBlindPost(body, 7, key));
+
+      const viaPrimary = lastPublishedEvent(primarySocket);
+      const viaSecondary = lastPublishedEvent(secondarySocket);
+      // Byte-identical event to both relays: same id, same ciphertext, same tags.
+      expect(viaSecondary).toEqual(viaPrimary);
+      // And what they both store is ciphertext — the plaintext never crosses the transport.
+      expect(viaPrimary.content).not.toContain(body);
+      expect(viaPrimary.tags).toEqual(
+        expect.arrayContaining([
+          [TAG_ENC, ENC_NIP44],
+          [TAG_KE, '7'],
+        ]),
+      );
+      mirrors.close();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('a sealed event arriving ONLY via a secondary stays ciphertext in the shared store and resolves locked → unlocked', () => {
+    jest.useFakeTimers();
+    try {
+      const primarySocket = new FakeRelaySocket();
+      const store = new InMemoryEventStore();
+      const {createSocket, socketsFor} = trackedCreateSocket();
+      const secondarySpec: MirrorSpec = {url: 'wss://mirror1.onion'};
+      const mirrors = new MirrorSet(primarySocket, store, {
+        primaryOptions: {kinds: [1]},
+        createSocket,
+        secondaryMirrors: [secondarySpec],
+        secondaryPlan: () => [{subId: 'recon', filter: {kinds: [1]}}],
+        secondaryConnectDelayMs: 10,
+      });
+
+      primarySocket.simulateOpen();
+      primarySocket.emitEose('feed');
+      jest.advanceTimersByTime(10);
+      const secondarySocket = socketsFor(secondarySpec.url)[0]!;
+      secondarySocket.simulateOpen();
+      secondarySocket.emitEose('recon');
+
+      const key = mintContentKey();
+      const body = 'mirror-delivered secret';
+      const sealed = sealedBlindPost(body, 7, key);
+      secondarySocket.emitEvent('recon', sealed);
+
+      // The shared store holds the CIPHERTEXT byte-for-byte — reconcile never unseals anything.
+      const stored = store.query({kinds: [1]}).find(e => e.id === sealed.id);
+      expect(stored).toBeDefined();
+      expect(stored!.content).toBe(sealed.content);
+      expect(stored!.content).not.toContain(body);
+
+      // Without the epoch key the standard resolver reports LOCKED — never ciphertext.
+      expect(contentLockState(stored!)).toBe('L');
+      expect(resolveContent(stored!)).toEqual({text: '', locked: true});
+
+      // Unlocking the epoch flips the same stored event to plaintext (the L→u cache-key rebuild).
+      setContentEpochKey(7, key);
+      expect(contentLockState(stored!)).toBe('u');
+      expect(resolveContent(stored!)).toEqual({text: body, locked: false});
+      mirrors.close();
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

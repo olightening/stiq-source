@@ -199,6 +199,20 @@ RESTORE_ARCHIVE="${RESTORE_ARCHIVE:-}"
 EXPORT_ONION_KEY_OUT=""
 IMPORT_ONION_KEY_IN=""
 
+# Mirror federation (attach-mode). `--attach <bundle.json>` provisions THIS box as a BLIND MIRROR
+# relay of an EXISTING community instead of standing up a new one: relay binary + its own fresh
+# .onion + the community's PUBLIC verification keys and enforcement flags, and NOTHING else — no
+# organizer, no dashboard, no issuer private key, no epoch keys, no enrollment mailbox. Wherever
+# the community runs content encryption the mirror stores ciphertext only; it could not decrypt a
+# body even if modified to try, because no decryption key ever reaches this box. The bundle comes
+# from the PRIMARY box via `--export-mirror-bundle <out>` (a standalone action, like the onion-key
+# pair). The one shared piece of key material a bundle carries is the community's Tor v3 reach key
+# (the same `ck` every member's join code already holds) so the mirror can enforce members-only
+# reach and self-probe its own auth-gated onion — it grants RELAY REACH, never content access.
+# After attach, authorize the mirror from the primary: stiq-org mirror-add + mirrors-publish.
+ATTACH_BUNDLE=""
+EXPORT_MIRROR_BUNDLE_OUT=""
+
 PREFIX="/opt/stiq"                      # everything the organizer needs, co-located here
 ORG_DIR="${PREFIX}/organizer"           # the issuer/ tree (dashboard + keys)
 CLIENT_DIR="${PREFIX}/client"           # node_modules the organizer imports (../client/node_modules)
@@ -262,6 +276,16 @@ while [[ $# -gt 0 ]]; do
       IMPORT_ONION_KEY_IN="$2"; shift 2 ;;
     --import-onion-key=*)
       IMPORT_ONION_KEY_IN="${1#--import-onion-key=}"; shift ;;
+    --attach)
+      [[ $# -ge 2 ]] || die "--attach requires a bundle path: --attach <stiq-mirror-bundle.json>"
+      ATTACH_BUNDLE="$2"; shift 2 ;;
+    --attach=*)
+      ATTACH_BUNDLE="${1#--attach=}"; shift ;;
+    --export-mirror-bundle)
+      [[ $# -ge 2 ]] || die "--export-mirror-bundle requires an output path: --export-mirror-bundle <out.json>"
+      EXPORT_MIRROR_BUNDLE_OUT="$2"; shift 2 ;;
+    --export-mirror-bundle=*)
+      EXPORT_MIRROR_BUNDLE_OUT="${1#--export-mirror-bundle=}"; shift ;;
     -h|--help)
       cat <<'USAGE'
 stiq-up.sh — stand up (or restore) a self-hosted STIQ community.
@@ -280,6 +304,12 @@ stiq-up.sh — stand up (or restore) a self-hosted STIQ community.
                                                      # (B4) back up ONLY the .onion identity, encrypted
   sudo bash deploy/stiq-up.sh --import-onion-key onion-key.stiqokey
                                                      # (B4) restore the .onion identity onto this box (stop tor first)
+  sudo bash deploy/stiq-up.sh --export-mirror-bundle mirror.json
+                                                     # on the PRIMARY: emit the public keys + flags a mirror needs
+  sudo bash deploy/stiq-up.sh --attach mirror.json   # on a FRESH box: become a BLIND MIRROR relay of that
+                                                     # community (relay + own onion only — no organizer, no
+                                                     # issuer keys; ciphertext-only wherever sealing is on).
+                                                     # Then on the primary: stiq-org mirror-add + mirrors-publish
 
 Key env tunables: COMMUNITY, ORGANIZER, DASHBOARD_ONION, RELAY_ONION_AUTH, RELAY_SINGLE_ONION,
 SAFE_BROWSING_TOR, STIQ_RELAY_POW_DEFENSE, STIQ_TOKEN_DOMAIN_SEP, PUSH_WATCHER, STIQ_VANGUARDS,
@@ -292,7 +322,7 @@ DIFFERENT passphrase than any --restore community archive.
 USAGE
       exit 0 ;;
     *)
-      die "unknown argument '$1' (supported: --restore <archive>, --export-onion-key <out>, --import-onion-key <in>, --help)." ;;
+      die "unknown argument '$1' (supported: --restore <archive>, --attach <bundle>, --export-mirror-bundle <out>, --export-onion-key <out>, --import-onion-key <in>, --help)." ;;
   esac
 done
 
@@ -369,6 +399,81 @@ if [[ -n "$IMPORT_ONION_KEY_IN" ]]; then
   exit 0
 fi
 
+# ---------------------------------------------------------------------------
+# 0c. Mirror-bundle export — STANDALONE action, run on a provisioned PRIMARY box. Emits the
+#     community-semantic subset of the relay config (public keys, enforcement flags, limits — an
+#     explicit ALLOWLIST, never a blind copy) plus the shared community reach key, as one JSON
+#     file to carry to the mirror box for `--attach`. By construction it carries NO
+#     organizer/issuer private key, NO epoch/content keys, NO safe-browsing API key, and NO
+#     box-local paths — a mirror provisioned from it is blind to sealed content because nothing
+#     in the bundle can decrypt anything.
+# ---------------------------------------------------------------------------
+if [[ -n "$EXPORT_MIRROR_BUNDLE_OUT" ]]; then
+  [[ -n "$ATTACH_BUNDLE" ]] && die "--export-mirror-bundle and --attach are mutually exclusive (export runs on the primary, attach on the mirror box)."
+  say "Exporting the mirror bundle (community public keys + enforcement flags)..."
+  command -v python3 >/dev/null 2>&1 || die "python3 is required (a provisioned primary has it — is this box provisioned?)."
+  [[ -f "${RELAY_ETC}/config.json" ]] || die "no relay config at ${RELAY_ETC}/config.json — run this on the PRIMARY community box."
+  [[ -s "${TOR_HS_DIR}/hostname" ]] || die "no relay onion at ${TOR_HS_DIR}/hostname — run this on the PRIMARY community box."
+  [[ -f "${RELAY_AUTH_DIR}/community_priv.pem" ]] || die "no community reach key at ${RELAY_AUTH_DIR}/community_priv.pem — run this on the PRIMARY community box."
+  EXPORT_ONION_AUTH=0
+  [[ -f "${TOR_HS_DIR}/authorized_clients/community.auth" ]] && EXPORT_ONION_AUTH=1
+  STIQ_MB_CONFIG="${RELAY_ETC}/config.json" \
+  STIQ_MB_ONION="$(cat "${TOR_HS_DIR}/hostname")" \
+  STIQ_MB_ONION_AUTH="$EXPORT_ONION_AUTH" \
+  STIQ_MB_REACH_PEM="${RELAY_AUTH_DIR}/community_priv.pem" \
+  STIQ_MB_COMMUNITY="${COMMUNITY_NAME}" \
+  STIQ_MB_OUT="$EXPORT_MIRROR_BUNDLE_OUT" \
+  python3 <<'PY' || die "mirror-bundle export failed (see message above)."
+import json, os, sys
+
+with open(os.environ['STIQ_MB_CONFIG']) as f:
+    cfg = json.load(f)
+
+# The community-semantic allowlist: what a mirror must AGREE with the primary on to serve the same
+# fleet (verification keys, org trust root, admission rules, fleet-coordinated enforcement flags).
+# Box-local keys (listen/data_dir/membership_file/fdroid_repo_dir), runtime secrets
+# (safe_browsing_api_key) and per-box push onions are deliberately NOT here.
+ALLOW = [
+    'issuer_public_keys', 'binding_issuer_public_keys', 'posting_issuer_public_keys',
+    'picture_write_issuer_public_keys', 'audio_write_issuer_public_keys',
+    'space_write_issuer_public_keys', 'organizer_pubkeys', 'allowed_kinds',
+    'enroll_pow', 'pow_difficulty', 'max_event_bytes', 'max_tags_per_event',
+    'max_limit', 'default_limit', 'bytes_per_token',
+    'blind_required', 'holder_proof_required', 'private_group_read_auth',
+    'content_encryption', 'read_auth_required', 'space_tokens_required',
+    'media_tokens_enabled', 'websocket_compression',
+]
+sub = {k: cfg[k] for k in ALLOW if k in cfg}
+if not sub.get('issuer_public_keys'):
+    sys.exit('primary config has no issuer_public_keys — refusing to export a bundle no relay could enforce membership with.')
+if not sub.get('organizer_pubkeys'):
+    sys.exit('primary config has no organizer_pubkeys — refusing to export a bundle without the moderation trust root.')
+
+with open(os.environ['STIQ_MB_REACH_PEM']) as f:
+    reach_pem = f.read()
+
+bundle = {
+    'stiq_mirror_bundle': 1,
+    'community': os.environ.get('STIQ_MB_COMMUNITY', ''),
+    'primary_onion': os.environ['STIQ_MB_ONION'].strip(),
+    'onion_auth': os.environ.get('STIQ_MB_ONION_AUTH') == '1',
+    'relay_auth_priv_pem': reach_pem,
+    'config': sub,
+}
+out = os.environ['STIQ_MB_OUT']
+tmp = out + '.tmp'
+with open(tmp, 'w') as f:
+    json.dump(bundle, f, indent=2)
+    f.write('\n')
+os.replace(tmp, out)
+PY
+  chmod 600 "$EXPORT_MIRROR_BUNDLE_OUT"
+  say "Mirror bundle written to ${EXPORT_MIRROR_BUNDLE_OUT} (chmod 600)."
+  say "Carry it to the mirror box and run:  sudo bash deploy/stiq-up.sh --attach ${EXPORT_MIRROR_BUNDLE_OUT##*/}"
+  warn "The bundle carries the shared community REACH key (the same ck every member's join code holds) — it grants relay reach, never content access. Still: transfer over scp/a private channel and delete the copy on the mirror box once attached. Re-export + re-attach after any fleet-coordinated flag flip on the primary (content encryption, space tokens, ...) so the mirror advertises the same enforcement."
+  exit 0
+fi
+
 # PUSH_WATCHER is a strict 0/1 gate — reject anything else early so a stray value can't half-enable
 # the push stack (and to keep the default run's behavior unambiguous).
 case "$PUSH_WATCHER" in
@@ -442,6 +547,31 @@ if [[ -n "$RESTORE_ARCHIVE" ]]; then
   fi
 fi
 
+# --attach preflight: validate the bundle EARLY (before packages install) and pin down what mirror
+# mode means for every organizer-coupled flag. Full JSON validation waits for python3 (step 1
+# installs it); here we check existence + the magic marker cheaply so a wrong file dies in
+# seconds, not after an apt run.
+if [[ -n "$ATTACH_BUNDLE" ]]; then
+  [[ -n "$RESTORE_ARCHIVE" ]] && die "--attach and --restore are mutually exclusive: a mirror never adopts community private keys (that is the point). Restore rebuilds a PRIMARY."
+  [[ -f "$ATTACH_BUNDLE" ]] || die "--attach bundle not found: ${ATTACH_BUNDLE}"
+  grep -q '"stiq_mirror_bundle"' "$ATTACH_BUNDLE" \
+    || die "'${ATTACH_BUNDLE}' does not look like a mirror bundle (missing the stiq_mirror_bundle marker). Generate one on the PRIMARY with: sudo bash deploy/stiq-up.sh --export-mirror-bundle <out.json>"
+  ATTACH_BUNDLE="$(cd "$(dirname "$ATTACH_BUNDLE")" && pwd)/$(basename "$ATTACH_BUNDLE")"  # absolutize (cwd changes below)
+  # A mirror is a RELAY ONLY. Force every organizer-coupled feature off, whatever the environment
+  # says — there is no organizer process on this box to serve them. Enforcement FLAGS still arrive
+  # via the bundle's config (written verbatim in step 9's attach branch); the 9b/9c/9d activation
+  # blocks below are for coordinating a PRIMARY's organizer+relay pair and must not run here.
+  DASHBOARD_ONION=0
+  PUSH_WATCHER=0
+  TOKEN_DOMAIN_SEP=0
+  CONTENT_ENCRYPTION=0
+  SPACE_TOKENS=0
+  # Members-only reach on the mirror follows the PRIMARY's posture (bundle field), not this box's
+  # env: a mismatch either strands members (auth here, none in their code) or makes the mirror
+  # enumerable when the community chose not to be. Resolved for real in the step-4..7 else-branch
+  # (python3 exists by then); recorded here so the banner can already say which mode this is.
+fi
+
 # A caller-supplied password is written verbatim into a systemd EnvironmentFile, whose parser
 # treats leading #/; as comments, strips matched surrounding quotes, and unescapes — so a value
 # with those characters would reach the process altered (or empty). Reject such values early with
@@ -462,11 +592,19 @@ if [[ "$ENROLL_POW" != "12" ]]; then
   die "STIQ_ENROLL_POW=${ENROLL_POW} but the shipped client mines PoW at difficulty 12 (ENROLL_POW_DIFFICULTY). Deploying with a different value breaks enrollment for every installed app. Leave STIQ_ENROLL_POW unset (defaults to 12) unless you have ALSO shipped a client build with a matching, non-default ENROLL_POW_DIFFICULTY."
 fi
 
+if [[ -n "$ATTACH_BUNDLE" ]]; then
+  say "STIQ mirror installer (attach-mode)"
+  echo "    bundle    : ${ATTACH_BUNDLE}"
+  echo "    role      : BLIND MIRROR relay — no organizer, no issuer/epoch keys; ciphertext-only wherever the community seals"
+  echo "    repo      : ${REPO}"
+  echo "    layout    : relay → ${RELAY_BIN} + ${RELAY_ETC}; onion → ${TOR_HS_DIR}"
+else
 say "STIQ community installer"
 echo "    community : ${COMMUNITY_NAME}"
 echo "    organizer : ${ORGANIZER_LABEL}"
 echo "    repo      : ${REPO}"
 echo "    layout    : relay → ${RELAY_BIN} + ${RELAY_ETC}; organizer → ${ORG_DIR}; onion → ${TOR_HS_DIR}"
+fi
 [[ -n "$RESTORE_ARCHIVE" ]] && echo "    restore   : ${RESTORE_ARCHIVE} (adopting archived keys; a FRESH onion will be minted)"
 [[ "$PUSH_WATCHER" == "1" ]] && echo "    push      : ntfy + keyless pushwatcher ENABLED (loopback + onion, content-free wakes)"
 if [[ "$RELAY_SINGLE_ONION" == "1" ]]; then
@@ -552,6 +690,9 @@ fi
 # non-fatal so a transient fetch failure falls through to the actionable `die` below instead of
 # aborting under `set -e` with a bare curl exit code and no message.
 node_ok() { command -v node >/dev/null 2>&1 && [[ "$(node -p 'process.versions.node.split(".")[0]')" -ge 18 ]]; }
+if [[ -n "$ATTACH_BUNDLE" ]]; then
+  say "Mirror mode — skipping Node.js (no organizer runs on a mirror)."
+else
 if ! node_ok; then
   say "Installing Node.js ${NODE_MAJOR} LTS (NodeSource)..."
   if curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" -o /tmp/nodesource.sh; then
@@ -564,6 +705,7 @@ if ! node_ok; then
 fi
 node_ok || die "Node.js >= 18 is required but could not be installed. Install it manually, then re-run."
 say "Node $(node -v) ready."
+fi
 
 # ---------------------------------------------------------------------------
 # 2. The relay binary — use a prebuilt one if present, else build with Go
@@ -624,6 +766,12 @@ say "Creating the stiq service user and directories..."
 id -u stiq >/dev/null 2>&1 || useradd --system --home "${RELAY_LIB}" --shell /usr/sbin/nologin stiq
 mkdir -p "${ORG_DIR}" "${CLIENT_DIR}" "${RELAY_ETC}" "${RELAY_LIB}"
 
+# ---------------------------------------------------------------------------
+# 4-7 run only on a PRIMARY. Mirror mode (--attach) has no organizer, no issuer key, no
+# organizer Nostr identity — it adopts the community's PUBLIC material from the bundle instead
+# (else-branch at the bottom of step 7).
+# ---------------------------------------------------------------------------
+if [[ -z "$ATTACH_BUNDLE" ]]; then
 # ---------------------------------------------------------------------------
 # 4. Stage the organizer dashboard tree (code only — keys handled in step 5)
 # ---------------------------------------------------------------------------
@@ -710,6 +858,54 @@ ORG_PUBHEX="$(cd "${ORG_DIR}" && node -e \
 [[ "$ORG_PUBHEX" =~ ^[0-9a-f]{64}$ ]] || die "could not derive organizer pubkey (got: '${ORG_PUBHEX}')."
 chmod 600 "${ORG_DIR}/organizer_nostr.json"   # the organizer SECRET key — lock it the moment it exists
 say "  organizer pubkey: ${ORG_PUBHEX}"
+
+else
+# ---------------------------------------------------------------------------
+# 4-7 (mirror mode): adopt the community's shared reach key + reach posture from the bundle,
+# so step 8's existing machinery (mint-guard, authorized_clients, watchdog probe credentials)
+# runs UNCHANGED: it finds the key already present and derives the same public key the primary
+# enforces — members' existing join codes reach this mirror with zero client-side change.
+# Full bundle validation happens here too (python3 is installed by now).
+# ---------------------------------------------------------------------------
+say "Adopting the community's reach key + enforcement posture from the bundle..."
+ATTACH_ONION_AUTH="$(STIQ_MB_BUNDLE="$ATTACH_BUNDLE" python3 <<'PY'
+import json, os, sys
+with open(os.environ['STIQ_MB_BUNDLE']) as f:
+    b = json.load(f)
+if b.get('stiq_mirror_bundle') != 1:
+    sys.exit('unsupported bundle version (expected stiq_mirror_bundle: 1)')
+cfg = b.get('config') or {}
+if not cfg.get('issuer_public_keys'):
+    sys.exit('bundle carries no issuer_public_keys — a mirror could not enforce membership')
+if not cfg.get('organizer_pubkeys'):
+    sys.exit('bundle carries no organizer_pubkeys — a mirror could not admit organizer config')
+pem = b.get('relay_auth_priv_pem') or ''
+if 'PRIVATE KEY' not in pem:
+    sys.exit('bundle carries no community reach key (relay_auth_priv_pem)')
+print('1' if b.get('onion_auth') else '0')
+PY
+)" || die "mirror bundle validation failed (see message above)."
+[[ "$ATTACH_ONION_AUTH" == "0" || "$ATTACH_ONION_AUTH" == "1" ]] \
+  || die "mirror bundle validation failed: ${ATTACH_ONION_AUTH}"
+# The mirror's reach posture FOLLOWS the primary (see the preflight note): auth-enforced primary
+# ⇒ auth-enforced mirror under the SAME shared key; public primary ⇒ public mirror.
+RELAY_ONION_AUTH="$ATTACH_ONION_AUTH"
+install -d -o stiq -g stiq -m 0700 "$RELAY_AUTH_DIR"
+STIQ_MB_BUNDLE="$ATTACH_BUNDLE" STIQ_MB_KEY_OUT="${RELAY_AUTH_DIR}/community_priv.pem" python3 <<'PY' \
+  || die "failed to install the community reach key from the bundle."
+import json, os
+with open(os.environ['STIQ_MB_BUNDLE']) as f:
+    b = json.load(f)
+out = os.environ['STIQ_MB_KEY_OUT']
+tmp = out + '.tmp'
+with open(tmp, 'w') as f:
+    f.write(b['relay_auth_priv_pem'])
+os.replace(tmp, out)
+PY
+chown stiq:stiq "${RELAY_AUTH_DIR}/community_priv.pem"
+chmod 600 "${RELAY_AUTH_DIR}/community_priv.pem"
+say "  reach key installed; members-only reach: $([[ "$RELAY_ONION_AUTH" == "1" ]] && echo ENFORCED || echo off) (following the primary)."
+fi
 
 # ---------------------------------------------------------------------------
 # 8. Tor v3 hidden service(s): the relay onion always; the dashboard onion (with
@@ -1315,6 +1511,53 @@ if [[ "$PUSH_WATCHER" == "1" ]]; then
   PUSH_WATCHER_ONION="${ONION}:${WATCHER_PORT}"
   PUSH_NTFY_ONION="${ONION}"
 fi
+if [[ -n "$ATTACH_BUNDLE" ]]; then
+# Mirror mode: the BUNDLE is authoritative for every community-semantic key (same allowlist the
+# export wrote — verification public keys, org trust root, admission rules, enforcement flags),
+# so the mirror's NIP-11 advertises exactly what the primary enforces; a drifted advertisement
+# from a mirror could otherwise confuse a client whose capability fetch ever lands here. Box-local
+# keys (listen/data_dir/membership_file) are set fresh; any OTHER key an operator hand-added to
+# this mirror's config is preserved (same merge discipline as the primary writer below).
+STIQ_INSTALLER_CONFIG_PATH="$CONFIG_PATH" \
+STIQ_INSTALLER_BUNDLE="$ATTACH_BUNDLE" \
+STIQ_INSTALLER_DATA_DIR="${RELAY_LIB}/data" \
+STIQ_INSTALLER_MEMBERSHIP_FILE="${RELAY_LIB}/membership.json" \
+python3 <<'PY' || die "failed to write ${CONFIG_PATH} from the mirror bundle."
+import json, os, sys
+
+path = os.environ['STIQ_INSTALLER_CONFIG_PATH']
+existing = {}
+if os.path.exists(path):
+    try:
+        with open(path) as f:
+            existing = json.load(f)
+    except Exception as e:
+        sys.exit("refusing to merge: existing config.json is not valid JSON (%s)" % e)
+
+with open(os.environ['STIQ_INSTALLER_BUNDLE']) as f:
+    bundle = json.load(f)
+community = bundle.get('config') or {}
+if not community.get('issuer_public_keys') or not community.get('organizer_pubkeys'):
+    sys.exit('bundle config lost its issuer_public_keys/organizer_pubkeys — re-export it on the primary.')
+
+existing.update(community)
+existing.update({
+    'listen': '127.0.0.1:3334',
+    'data_dir': os.environ['STIQ_INSTALLER_DATA_DIR'],
+    'membership_file': os.environ['STIQ_INSTALLER_MEMBERSHIP_FILE'],
+})
+# A mirror must never carry another box's runtime secret or push endpoints, even if a hand-copied
+# config left them behind.
+for k in ('safe_browsing_api_key', 'push_watcher_onion', 'push_ntfy_onion'):
+    existing.pop(k, None)
+
+tmp = path + '.tmp'
+with open(tmp, 'w') as f:
+    json.dump(existing, f, indent=2)
+    f.write('\n')
+os.replace(tmp, path)
+PY
+else
 STIQ_INSTALLER_CONFIG_PATH="$CONFIG_PATH" \
 STIQ_INSTALLER_ISSUER_PEM="$ISSUER_PUB_PEM" \
 STIQ_INSTALLER_ORG_PUBHEX="$ORG_PUBHEX" \
@@ -1366,6 +1609,7 @@ with open(tmp, 'w') as f:
     f.write('\n')
 os.replace(tmp, path)
 PY
+fi
 python3 -c "import json,sys; json.load(open('${CONFIG_PATH}'))" \
   || die "generated relay config.json is invalid."
 
@@ -1474,7 +1718,9 @@ fi
 # ---------------------------------------------------------------------------
 # 10. Organizer dashboard service. Binds loopback always; reached EITHER via the
 #     client-auth dashboard onion (DASHBOARD_ONION=1) or an SSH tunnel.
+#     Mirror mode: skipped wholesale — a mirror runs a relay and nothing else.
 # ---------------------------------------------------------------------------
+if [[ -z "$ATTACH_BUNDLE" ]]; then
 say "Installing the organizer dashboard service..."
 # Persist the resolved onion next to the dashboard too, so manual `node organizer-server.mjs`
 # runs (outside systemd) still pick it up.
@@ -1564,13 +1810,27 @@ ReadWritePaths=${PREFIX} ${RELAY_ETC}
 WantedBy=multi-user.target
 UNIT
 
+fi
+
 # ---------------------------------------------------------------------------
 # 11. A single target binding relay + organizer (co-located lifecycle)
+#     Mirror mode: the target binds the relay alone.
 # ---------------------------------------------------------------------------
 # When PUSH_WATCHER=1 the pushwatcher joins the co-located lifecycle target. PUSH_UNIT is empty
 # otherwise, so a normal run writes a byte-identical target to today (relay + organizer only).
 PUSH_UNIT=""
 [[ "$PUSH_WATCHER" == "1" ]] && PUSH_UNIT=" stiq-pushwatcher.service"
+if [[ -n "$ATTACH_BUNDLE" ]]; then
+cat > /etc/systemd/system/stiq.target <<UNIT
+[Unit]
+Description=STIQ mirror relay (blind federation secondary)
+Wants=stiq-relay.service
+After=stiq-relay.service
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+else
 cat > /etc/systemd/system/stiq.target <<UNIT
 [Unit]
 Description=STIQ community (relay + organizer, co-located)
@@ -1580,6 +1840,7 @@ After=stiq-relay.service stiq-organizer.service${PUSH_UNIT}
 [Install]
 WantedBy=multi-user.target
 UNIT
+fi
 
 # ---------------------------------------------------------------------------
 # 12. Start everything
@@ -1590,9 +1851,14 @@ systemctl daemon-reload
 # organizer code, PoW settings, relay onion, and (critically) STIQ_ONION_AUTH_KEY, so explicitly
 # restart both processes after installing their units. Otherwise Tor may enforce the newly written
 # authorized-client key while the organizer keeps issuing join codes from its stale environment.
+if [[ -n "$ATTACH_BUNDLE" ]]; then
+  systemctl enable stiq-relay.service >/dev/null 2>&1
+  systemctl restart stiq-relay.service
+else
 systemctl enable stiq-relay.service stiq-organizer.service >/dev/null 2>&1
 systemctl restart stiq-relay.service
 systemctl restart stiq-organizer.service
+fi
 # Push watcher (T1) — enable + restart alongside the others so a re-run picks up a new binary, the
 # freshly written onion-host sentinel, or a changed loopback port. Gated: a normal run never touches
 # it. (ntfy was already enabled/restarted in step 9c.)
@@ -1604,9 +1870,11 @@ systemctl enable stiq.target >/dev/null 2>&1 || true
 
 sleep 2
 RELAY_STATE="$(systemctl is-active stiq-relay.service || true)"
-ORG_STATE="$(systemctl is-active stiq-organizer.service || true)"
 [[ "$RELAY_STATE" == "active" ]] || warn "stiq-relay is '${RELAY_STATE}' — check: journalctl -u stiq-relay -n 50"
-[[ "$ORG_STATE"   == "active" ]] || warn "stiq-organizer is '${ORG_STATE}' — check: journalctl -u stiq-organizer -n 50"
+if [[ -z "$ATTACH_BUNDLE" ]]; then
+  ORG_STATE="$(systemctl is-active stiq-organizer.service || true)"
+  [[ "$ORG_STATE" == "active" ]] || warn "stiq-organizer is '${ORG_STATE}' — check: journalctl -u stiq-organizer -n 50"
+fi
 
 # ---------------------------------------------------------------------------
 # 12a. Reachability watchdog (2026-07-28 reliability hardening)
@@ -1649,6 +1917,12 @@ fi
 # so it picks the new keys up — closing the "flag flipped on the organizer alone bricks posting" gap.
 # A hard failure here (die) is deliberate: half-wired domain-sep is worse than not enabling it, since
 # it would silently brick every post once the organizer starts signing under K_post.
+#
+# Mirror mode skips 9b-9d WHOLESALE: every purpose key and enforcement flag arrived verbatim in the
+# bundle (step 9's attach branch), there is no local organizer to coordinate with, and 9b's
+# reverse-transition guard below would otherwise (correctly, for a primary) refuse a config that
+# carries posting keys without STIQ_TOKEN_DOMAIN_SEP=1 — which on a mirror is the NORMAL state.
+if [[ -z "$ATTACH_BUNDLE" ]]; then
 if [[ "$TOKEN_DOMAIN_SEP" == "1" ]]; then
   say "Token domain separation is ON — wiring posting/binding keys into the relay config..."
   TOKEN_KEYS_JSON=""
@@ -1818,6 +2092,7 @@ PY
     || die "stiq-relay failed to restart with space_tokens_required on — check: journalctl -u stiq-relay -n 50"
   say "Space tokens verified: relay requires space_tokens on channel/group/DM content."
 fi
+fi  # end of the primary-only 9b-9d block (mirror mode: flags/keys came verbatim from the bundle)
 
 # Relay loopback smoke test (WebSocket upgrade → 101).
 HTTP_CODE="$(curl -s -o /dev/null -w '%{http_code}' --include \
@@ -1844,6 +2119,9 @@ fi
 # wrong enroll_pow, or (with TOKEN_DOMAIN_SEP=1) an unwired posting key surfaces HERE, not on someone
 # else's phone. Best-effort: verify_enroll.mjs missing, or the check failing, WARNS — it never aborts
 # the whole deploy, since the relay/organizer are already up and a manual retry is always possible.
+if [[ -n "$ATTACH_BUNDLE" ]]; then
+  say "Mirror mode — skipping the enrollment smoke test (enrollment happens at the PRIMARY's organizer; a mirror only stores/forwards)."
+elif true; then
 say "Running a full enrollment smoke test (mints + spends a throwaway invite end-to-end)..."
 if [[ -f "${ORG_DIR}/verify_enroll.mjs" ]]; then
   SMOKE_OK=0
@@ -1886,6 +2164,7 @@ except Exception: pass
 else
   warn "verify_enroll.mjs not found at ${ORG_DIR} — skipping the full enrollment smoke test (only the WS-upgrade check above ran)."
 fi
+fi  # end of the primary-only enrollment smoke test
 
 # --- Push stack smoke (T1) — only when PUSH_WATCHER=1 --------------------------------------------
 # Best-effort loopback checks (warn-not-die, matching the enrollment smoke convention): ntfy is
@@ -1959,6 +2238,42 @@ elif [[ "$STIQ_VANGUARDS" == "1" ]]; then
   else
     warn "pip3 install vanguards failed (network/package index?) — skipping the vanguards addon; tor's built-in vanguards-lite is still active."
   fi
+fi
+
+# ---------------------------------------------------------------------------
+# 13-mirror. Attach-mode summary — the mirror is up; the remaining steps (authorize + publish the
+# mirror list) happen on the PRIMARY box, so print them copy-paste ready and exit before the
+# community summary below (join codes, dashboard card — none of which exist here).
+# ---------------------------------------------------------------------------
+if [[ -n "$ATTACH_BUNDLE" ]]; then
+  ATTACH_PRIMARY_ONION="$(STIQ_MB_BUNDLE="$ATTACH_BUNDLE" python3 -c \
+    "import json,os; print((json.load(open(os.environ['STIQ_MB_BUNDLE'])).get('primary_onion') or '').strip())" 2>/dev/null || true)"
+  ATTACH_COMMUNITY="$(STIQ_MB_BUNDLE="$ATTACH_BUNDLE" python3 -c \
+    "import json,os; print((json.load(open(os.environ['STIQ_MB_BUNDLE'])).get('community') or '').strip())" 2>/dev/null || true)"
+  echo
+  say "Blind mirror relay is UP."
+  echo "    community    : ${ATTACH_COMMUNITY:-<unknown>} (primary: ${ATTACH_PRIMARY_ONION:-<unknown>})"
+  echo "    mirror onion : ${RELAY_ONION_WS}"
+  echo "    members-only : $([[ "$RELAY_ONION_AUTH" == "1" ]] && echo "ENFORCED (same shared reach key as the primary — members' existing join codes work)" || echo "off (public onion, following the primary)")"
+  echo "    blind by construction: this box holds ONLY public verification keys. No issuer key, no"
+  echo "    organizer key, no content-epoch keys — wherever the community seals bodies, this disk"
+  echo "    stores ciphertext it has no means to decrypt."
+  echo
+  say "Finish on the PRIMARY box (authorize + announce this mirror to the fleet):"
+  if [[ "$RELAY_ONION_AUTH" == "1" ]]; then
+    echo "    cd /opt/stiq/organizer && ./stiq-org mirror-add ${RELAY_ONION_WS} ${RELAY_AUTH_PRIV_B32}"
+  else
+    echo "    cd /opt/stiq/organizer && ./stiq-org mirror-add ${RELAY_ONION_WS}"
+  fi
+  echo "    cd /opt/stiq/organizer && ./stiq-org mirrors-publish"
+  echo
+  echo "    Clients adopt the organizer-signed stiq:mirrors list automatically (additive, cap 5);"
+  echo "    write fan-out, cross-mirror reconciliation, and withholding failover activate on their own."
+  echo "    Keep the mirror's enforcement in lock-step with the primary: after any fleet-coordinated"
+  echo "    flip there (content encryption, space tokens, ...), re-run --export-mirror-bundle on the"
+  echo "    primary and --attach here with the fresh bundle."
+  [[ -f "$ATTACH_BUNDLE" ]] && warn "Delete the bundle file (${ATTACH_BUNDLE}) now that the attach is complete — it carries the shared community reach key."
+  exit 0
 fi
 
 # ---------------------------------------------------------------------------

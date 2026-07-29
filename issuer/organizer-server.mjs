@@ -2818,6 +2818,12 @@ const server = createServer(async (req, res) => {
           enabled: !!cfg?.content_encryption && !!cfg?.read_auth_required,
           organizerEnforcing: READ_AUTH,
         },
+        // T5.2 mirror-awareness: this toggle writes the PRIMARY's config only. Each attached
+        // mirror advertises its own config, provisioned from a bundle — after a flip the operator
+        // re-exports + re-attaches so mirrors advertise the same enforcement. Client sealing keys
+        // off the primary alone (sticky, per community), so a lagging mirror can't unseal anyone —
+        // this count only drives the dashboard reminder.
+        mirrorCount: loadMirrors().length,
         // T1.6 (fixes F8): last outcome of the stiq:token-keys fleet broadcast (publishTokenKeys,
         // defined below), so an operator can see whether it actually reached the relay instead of
         // trusting a fire-and-forget publish. `attempted:false` while domainSeparation is on just

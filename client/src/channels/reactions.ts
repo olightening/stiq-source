@@ -10,6 +10,7 @@ import {Kind} from '../nostr/events';
 import type {Event} from 'nostr-tools/pure';
 import type {UnsignedEvent} from '../keys/keystore';
 import {resolveAuthorPubkey} from '../blind/identity';
+import {resolveContent} from '../blind/blindPost';
 
 /** Build an unsigned kind-7 reaction carrying `emoji` as its content, targeting a broadcast. */
 export function buildEmojiReaction(messageId: string, messagePubkey: string, emoji: string): UnsignedEvent {
@@ -47,7 +48,12 @@ function foldReactionEvents(
   const mine = new Set<string>();
   for (const ev of events) {
     if (ev.kind !== Kind.Reaction) continue;
-    const emoji = ev.content.trim();
+    // Channel reactions ride the blind feedSigner, so under content encryption the emoji body is
+    // sealed. Resolve first: a still-locked reaction stays UNCOUNTED (its ciphertext must never
+    // render as a chip label), and fills in once the epoch unlocks — same rule as feed voting.
+    const {text, locked} = resolveContent(ev);
+    if (locked) continue;
+    const emoji = text.trim();
     if (!emoji) continue;
     // Fold on the RESOLVED author: a public-channel reaction rides the blind path (throwaway
     // signer + encrypted attribution), so the raw pubkey is a fresh key per tap — dedup and
@@ -106,7 +112,12 @@ export function tallyAllReactions(
   const mine = new Set<string>();
   for (const ev of events) {
     if (ev.kind !== Kind.Reaction) continue;
-    const emoji = ev.content.trim();
+    // Group/DM reactions are npub-signed (never sealed — resolveContent passes them through
+    // verbatim), but route them anyway as permanent insurance, mirroring CommentThread's rule:
+    // if one ever arrives sealed it stays uncounted rather than rendering ciphertext as a chip.
+    const {text, locked} = resolveContent(ev);
+    if (locked) continue;
+    const emoji = text.trim();
     if (!emoji) continue;
     // Same resolved-author fold as tallyEmojiReactions: group/DM reactions are npub-signed today
     // (resolve to themselves), but any blind-signed reaction still dedups by real member.

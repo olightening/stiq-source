@@ -195,6 +195,18 @@ export function contentLockState(event: {tags: string[][]}): '' | 'u' | 'L' {
 }
 
 /**
+ * Successful decrypts, memoized per event OBJECT (the store holds one stable object per id, so
+ * repeated render/scoring passes hit). Only a decrypt that SUCCEEDED is cached: a locked result
+ * costs nothing to recompute (no decrypt is attempted without a key), and a failed decrypt under a
+ * present key must stay retryable — a same-epoch key REPLACEMENT (redelivery after a bad key)
+ * would otherwise be masked by a stale cached failure. This exists because reactions/votes now
+ * resolve inside the feed's score pass (T5.2), which re-runs per rebuild over every reaction —
+ * without the memo, every unlocked sealed reaction would re-decrypt on every rebuild, the exact
+ * score-pass hot path behind the 2026-07 UI-freeze diagnosis.
+ */
+const _resolvedOk = new WeakMap<object, ResolvedContent>();
+
+/**
  * Resolve a blind post's body for rendering. A plaintext post (no `['encrypted','nip44']` marker)
  * passes through unchanged. A sealed post is decrypted with the content epoch key named by its
  * `ke` tag when this device has unlocked that epoch; otherwise it is reported LOCKED — never
@@ -207,8 +219,16 @@ export function resolveContent(event: {content: string; tags: string[][]}): Reso
   if (!Number.isInteger(epoch) || epoch < 0) return {text: '', locked: true};
   const key = getContentEpochKey(epoch);
   if (!key) return {text: '', locked: true};
+  // The memo is consulted only while the epoch key is PRESENT: after clearActiveContentKeys
+  // (duress wipe, account switch) the `!key` return above re-locks everything regardless of what
+  // was cached. A successful NIP-44 decrypt is authenticated, so a cached success can never be
+  // wrong-key stale — only a failure could be, and failures are never cached.
+  const memo = _resolvedOk.get(event);
+  if (memo) return memo;
   try {
-    return {text: decryptForSpace(event.content, key), locked: false};
+    const result: ResolvedContent = {text: decryptForSpace(event.content, key), locked: false};
+    _resolvedOk.set(event, result);
+    return result;
   } catch {
     // undecryptable (tampered / wrong key) — treat as locked rather than render ciphertext
     return {text: '', locked: true};

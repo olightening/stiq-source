@@ -1575,9 +1575,15 @@ async function loadActivation() {
   // Content encryption — needs token domain separation so read tokens are drawn under K_read.
   ce.checked = !!d.contentEncryption.enabled;
   ce.disabled = !d.domainSeparation && !d.contentEncryption.enabled;
-  document.getElementById('act-ce-note').textContent = d.domainSeparation
+  // Mirror reminder (T5.2): the flip writes THIS relay's config; each attached mirror keeps
+  // advertising its bundle until re-attached. Sealing itself follows the primary (a lagging
+  // mirror can't unseal anyone) — this is an advertisement-consistency chore, not a leak.
+  var ceMirrors = d.mirrorCount > 0
+    ? ' ⚠ ' + d.mirrorCount + ' mirror relay' + (d.mirrorCount === 1 ? '' : 's') + ' attached: after changing this, re-run --export-mirror-bundle on this box and --attach on each mirror so they advertise the same enforcement.'
+    : '';
+  document.getElementById('act-ce-note').textContent = (d.domainSeparation
     ? (d.contentEncryption.enabled ? '● ON — bodies are sealed; revoke a reader under Read access.' : '○ OFF — bodies post in the clear, as today.')
-    : '⚠ Needs token domain separation (STIQ_TOKEN_DOMAIN_SEP=1) before enabling.';
+    : '⚠ Needs token domain separation (STIQ_TOKEN_DOMAIN_SEP=1) before enabling.') + ceMirrors;
 }
 
 async function toggleActivation(field, checked) {

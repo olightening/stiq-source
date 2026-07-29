@@ -53,6 +53,9 @@ function makeRuntime(fetchRelayInfo: () => unknown): AppRuntime {
 const spaceTokens = (runtime: AppRuntime): boolean =>
   runtime.relayCapabilities().enforcedFlags.spaceTokensRequired;
 
+const contentEnc = (runtime: AppRuntime): boolean =>
+  runtime.relayCapabilities().enforcedFlags.contentEncryption;
+
 describe('sticky enforcement flags (caps-fallback split-brain fix)', () => {
   beforeEach(async () => {
     // The sticky record deliberately persists across runtimes INSIDE a test (that's the restart
@@ -113,6 +116,44 @@ describe('sticky enforcement flags (caps-fallback split-brain fix)', () => {
     fail = true;
     await runtime.onRelayConnected();
     expect(spaceTokens(runtime)).toBe(true);
+
+    runtime.dispose();
+  });
+
+  it('content_encryption sticks across dead/degraded NIP-11 fetches — a downed or withholding primary can never silently turn sealing off (mirror-federation invariant)', async () => {
+    // Capability authority is the community PRIMARY (communityStore.relayUrl) — mirrors are never
+    // NIP-11-fetched, and MirrorSet's withholding-promotion does not re-point the fetch. So the only
+    // relay that can change this flag is the primary itself; while it is down (the exact window
+    // where secondaries carry the community) the sticky record must keep sealing ON, or every post
+    // written during the outage would leak plaintext to EVERY mirror.
+    let doc: unknown = {'stiq-capabilities': {enforced: {content_encryption: true}}};
+    let fail = false;
+    const runtime = makeRuntime(() => {
+      if (fail) throw new Error('primary onion unreachable');
+      return doc;
+    });
+    await runtime.init();
+    await runtime.completeEnrollment(await makeSession(), '1234', '9999');
+    expect(await runtime.submitPin('1234')).toBe('unlocked');
+
+    await runtime.onRelayConnected();
+    expect(contentEnc(runtime)).toBe(true);
+
+    // Primary down; reads/writes ride the mirrors. Fetch fails outright — sealing view survives.
+    fail = true;
+    await runtime.onRelayConnected();
+    expect(contentEnc(runtime)).toBe(true);
+
+    // Primary back but serving a degraded/older doc with no stiq block — absence is not a downgrade.
+    fail = false;
+    doc = {};
+    await runtime.onRelayConnected();
+    expect(contentEnc(runtime)).toBe(true);
+
+    // Only the primary's EXPLICIT false — the deliberate organizer rollback — lands.
+    doc = {'stiq-capabilities': {enforced: {content_encryption: false}}};
+    await runtime.onRelayConnected();
+    expect(contentEnc(runtime)).toBe(false);
 
     runtime.dispose();
   });
