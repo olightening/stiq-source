@@ -180,13 +180,15 @@ beforeEach(() => {
   mockState.torDormantCalls = 0;
 });
 
-async function enroll(relayUrl: string): Promise<string> {
+async function enroll(relayUrl: string, organizerPubkey?: string): Promise<string> {
   // A KeyRing slot + community, so the task resolves an active cid AND an active identity.
   const sk = generateSecretKey();
   await storage.setItem('stiq.communities.active', communityId(relayUrl));
   await storage.setItem(
     'stiq.communities.list',
-    JSON.stringify([{id: communityId(relayUrl), relayUrl, issuerPublicKey: 'x'}]),
+    JSON.stringify([
+      {id: communityId(relayUrl), relayUrl, issuerPublicKey: 'x', ...(organizerPubkey ? {organizerPubkey} : {})},
+    ]),
   );
   await storage.setItem('stiq_active_slot', 'slot-1');
   await new Identity(storage, 'slot-1').enroll(sk, relayUrl, {
@@ -229,6 +231,31 @@ describe('runBackgroundSync', () => {
     const dm = subs.find(s => s.subId === 'dm');
     expect(dm).toBeDefined();
     expect(dm!.filter.kinds).toEqual([Kind.GiftWrap]);
+  });
+
+  // 07-15 audit gap 2, still open at the 07-29 re-audit: the plan was built without the organizer
+  // pubkey, so subscriptionPlan never added the org-config sub and a phone that only ever
+  // background-syncs never refreshed the moderator roster / permissions / mod-limits. It could go on
+  // honouring a REVOKED moderator's hides indefinitely. (Authority is unaffected — the relay rejects
+  // their writes regardless — but what this device renders is decided client-side.)
+  it('subscribes to the organizer config docs so a headless wake refreshes the roster', async () => {
+    const organizer = getPublicKey(generateSecretKey());
+    await enroll(RELAY_URL, organizer);
+    await runAndSync();
+
+    const org = mockState.capturedPlan!().find(s => s.subId === 'org-config');
+    expect(org).toBeDefined();
+    expect(org!.filter.authors).toEqual([organizer]);
+    // kind-30078 carries EVERY addressable organizer doc under its own `d`, so a bare limit:1 would
+    // return only the most recently published one and the roster could never arrive.
+    expect(org!.filter.kinds).toEqual([Kind.AppData]);
+    expect(org!.filter.limit).toBeGreaterThan(1);
+  });
+
+  it('omits the org-config sub when the community records no organizer (nothing to trust)', async () => {
+    await enroll(RELAY_URL);
+    await runAndSync();
+    expect(mockState.capturedPlan!().find(s => s.subId === 'org-config')).toBeUndefined();
   });
 
   it('closes the store handle when the task ends', async () => {

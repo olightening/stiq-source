@@ -3394,6 +3394,7 @@ export function MainScreen({
             onLogAuthor={(pubkey, includePast) => onModeratorLogAuthor?.(pubkey, includePast)}
             onLogPost={(targetId, _targetType, author) => onModeratorLogPost?.(targetId, author)}
             onRestoreAuthor={pubkey => onModeratorRestoreAuthor?.(pubkey)}
+            onRestorePost={(targetId, targetType, author) => onModerationRestore?.(targetId, targetType, author)}
             onUnban={pubkey => onModeratorUnban?.(pubkey)}
             onViewPost={targetId => {
               pushNavOrigin({kind: 'modConsole'}, {kind: 'post', postId: targetId});

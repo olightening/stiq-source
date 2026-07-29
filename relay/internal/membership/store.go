@@ -211,7 +211,7 @@ func (s *MemStore) Bind(tokenID, pubkey string) error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.bound[pubkey] = true
-		s.boundAt[pubkey] = s.now().Unix()
+		s.markBoundAt(pubkey)
 		return s.save()
 	}
 	s.mu.Lock()
@@ -221,8 +221,20 @@ func (s *MemStore) Bind(tokenID, pubkey string) error {
 	}
 	s.spent[tokenID] = ""
 	s.bound[pubkey] = true
-	s.boundAt[pubkey] = s.now().Unix()
+	s.markBoundAt(pubkey)
 	return s.save()
+}
+
+// markBoundAt stamps a member's bind time, PRESERVING an existing one. Bind is re-entrant by design
+// (the save()-failure retry path above, and policy.handleBinding burning a spare credential a member
+// re-presents), and boundAt is a SENIORITY record: it drives the organizer's newcomer window (no
+// links, no channel creation for the first N days). Overwriting it would silently demote an
+// established member back to newcomer on a re-bind. Callers hold s.mu.
+func (s *MemStore) markBoundAt(pubkey string) {
+	if _, seen := s.boundAt[pubkey]; seen {
+		return
+	}
+	s.boundAt[pubkey] = s.now().Unix()
 }
 
 // Spend marks a per-post blind token spent without binding any npub. See the Store interface.

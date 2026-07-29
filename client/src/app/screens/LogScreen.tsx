@@ -44,6 +44,7 @@ import {
   type ModAction,
   type ModTargetType,
   UNATTRIBUTED_REPORT_TYPE,
+  OFF_ROLL_REPORT_TYPE,
 } from '../../moderation/modlog';
 import {decodeNameHeader} from '../../profile/displayName';
 import type {FeaturedRow} from '../../channels/featured';
@@ -314,7 +315,9 @@ export function buildRows(
       targetType: e.targetType,
       targetAuthorPubkey: e.targetAuthorPubkey,
       action: e.action,
-      unattributable: e.reportType === UNATTRIBUTED_REPORT_TYPE,
+      // Structural (automatic, no member to reinstate ⇒ no Restore): the unattributable bucket
+      // and the off-roll (not-an-enrolled-member) bucket share this treatment.
+      unattributable: e.reportType === UNATTRIBUTED_REPORT_TYPE || e.reportType === OFF_ROLL_REPORT_TYPE,
     };
   });
 }

@@ -10,6 +10,7 @@ import {
   UNATTRIBUTED_REPORT_TYPE,
 } from './modlog';
 import {toBlindEvent, assembleBlindEvent} from '../blind/blindPost';
+import {DEFAULT_POST_RULES} from '../feed/postRules';
 import {newTokenKeypair} from '../blind/holderProof';
 import {mintGroupKey, encryptForSpace} from '../channels/groupCrypto';
 import {setActiveCommunityKey} from '../blind/communityKey';
@@ -454,6 +455,85 @@ describe('buildModLog — unattributable blind posts (anonymization enforcement)
     });
     store.save(ev);
     expect(buildModLog(store, mods).find(e => e.target === ev.id)).toBeUndefined();
+  });
+});
+
+/**
+ * Blind-author attribution on mod-log rows (audit 2026-07-29, defect D2).
+ *
+ * Three entry builders recorded `targetAuthorPubkey: ev.pubkey` — the per-post THROWAWAY signer,
+ * a fresh key for every blind post — instead of the real author decrypted from `stiq_attr`. The
+ * damage is twofold: the row renders a garbage identity (LogScreen feeds the value straight to
+ * getProfile), and searching the mod log by the offender's real npub MISSES those entries, so a
+ * moderator reviewing someone's history sees a partial record. The suite's other blocks use
+ * synthetic non-blind pubkeys, where the two values coincide — which is why the seam was untested.
+ *
+ * Restore was never affected: un-hide matching keys on the target's event id, and the author pubkey
+ * only ever rides along as an inert `p` tag.
+ */
+describe('buildModLog — blind posts are attributed to their REAL author, not the throwaway signer', () => {
+  const communityKey = mintGroupKey();
+  const {q: tokenSecret, Q: tokenPub} = newTokenKeypair();
+  const token: Token = {token: tokenPub, sig: Uint8Array.of(2), secret: tokenSecret};
+  const authorSk = generateSecretKey();
+  const authorPub = getPublicKey(authorSk);
+  const authorNpub = nip19.npubEncode(authorPub);
+
+  beforeEach(() => setActiveCommunityKey(communityKey));
+  afterEach(() => setActiveCommunityKey(null));
+
+  /** A blind post by `authorSk`: signed by a throwaway key, real author sealed in the attribution. */
+  function blind(id: string, content = 'blind body', kind = 1): Event {
+    const ev = toBlindEvent({kind, created_at: 100, tags: [], content}, [token], authorSk, communityKey, {
+      name: 'alice',
+    });
+    return {...ev, id};
+  }
+
+  it('a plain moderator hide records the real author (block 1)', () => {
+    const store = new InMemoryEventStore();
+    const ev = blind('P-blind');
+    store.save(ev);
+    store.save(report('P-blind', 20));
+
+    const entry = buildModLog(store, mods).find(e => e.target === 'P-blind');
+    expect(entry).toBeDefined();
+    expect(ev.pubkey).not.toBe(authorPub); // the signer really is a throwaway key
+    expect(entry?.targetAuthorPubkey).toBe(authorPub);
+  });
+
+  it('the hidden post is findable by searching the offender\'s real npub', () => {
+    const store = new InMemoryEventStore();
+    store.save(blind('P-blind'));
+    store.save(report('P-blind', 20));
+
+    const log = buildModLog(store, mods);
+    expect(filterModLog(log, {search: authorNpub}).map(e => e.target)).toEqual(['P-blind']);
+  });
+
+  it('a lock / re-tag / pin action on a blind post also records the real author (block 1)', () => {
+    const store = new InMemoryEventStore();
+    store.save(blind('P-lock'));
+    store.save(report('P-lock', 20, '', [['stiq-action', 'lock']]));
+
+    const entry = buildModLog(store, mods).find(e => e.target === 'P-lock');
+    expect(entry?.action).toBe('lock');
+    expect(entry?.targetAuthorPubkey).toBe(authorPub);
+  });
+
+  it('an organizer auto-mod hide records the real author (block 3)', () => {
+    const store = new InMemoryEventStore();
+    // Over the note length limit → auto-hidden by the organizer's post rules.
+    store.save(blind('P-auto', 'x'.repeat(50)));
+    const autoCfg = {
+      postRules: {...DEFAULT_POST_RULES, note: {...DEFAULT_POST_RULES.note, max: 10}},
+      postRulesAt: 0,
+    };
+
+    const entry = buildModLog(store, mods, autoCfg).find(e => e.target === 'P-auto');
+    expect(entry?.auto).toBe(true);
+    expect(entry?.reportType).toBe('too-long');
+    expect(entry?.targetAuthorPubkey).toBe(authorPub);
   });
 });
 

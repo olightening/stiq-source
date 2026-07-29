@@ -298,3 +298,72 @@ func TestBlindPostBindsNoNpub(t *testing.T) {
 		t.Fatal("a blind post must not bind its throwaway pubkey")
 	}
 }
+
+// TestSpareBindingCredentialIsBurned (R2c). handleBinding's already-bound fast path used to return
+// BEFORE store.Bind, so the credential a re-presenting device offered was accepted and never spent.
+// A member holding a SECOND organizer-issued invite could therefore bind once, re-present the spare
+// (accepted, unburned), and keep it fully usable to mint ANOTHER npub later — precisely the
+// one-npub-per-invite scarcity the member roll rests on.
+func TestSpareBindingCredentialIsBurned(t *testing.T) {
+	issuer := testIssuer(t)
+	store := membership.NewMemStore()
+	m := NewMembership([]*rsa.PublicKey{&issuer.PublicKey}, store, []int{KindMembershipBinding}, 8, 0)
+
+	// Alice binds with her first invite.
+	first := blindEvent(KindMembershipBinding, mintCred(t, issuer))
+	first.PubKey = "alice"
+	if reject, msg := m.RejectEvent(context.Background(), first); reject {
+		t.Fatalf("first binding must succeed: %s", msg)
+	}
+
+	// She presents a SPARE credential. She is already bound, so this changes nothing for her — and
+	// must still be admitted (an idempotent re-bind is a normal lost-OK-frame retry, not an attack).
+	spare := mintCred(t, issuer)
+	replay := blindEvent(KindMembershipBinding, spare)
+	replay.PubKey = "alice"
+	if reject, msg := m.RejectEvent(context.Background(), replay); reject {
+		t.Fatalf("an already-bound member re-presenting a credential must still be admitted: %s", msg)
+	}
+
+	// The spare is now BURNED: a fresh npub cannot mint an account with it.
+	sock := blindEvent(KindMembershipBinding, spare)
+	sock.PubKey = "alice-sockpuppet"
+	if reject, _ := m.RejectEvent(context.Background(), sock); !reject {
+		t.Fatal("a spare credential presented by an already-bound member must be spent, not left reusable (R2c)")
+	}
+	if store.IsBound("alice-sockpuppet") {
+		t.Fatal("the sock puppet must never have been bound")
+	}
+	if !store.IsBound("alice") {
+		t.Fatal("alice must remain bound throughout")
+	}
+}
+
+// The re-bind above must not cost the member their seniority: boundAt drives the organizer's
+// newcomer window (no links, no channel creation for the first N days), so stamping it again would
+// silently demote an established member back to newcomer.
+func TestReBindPreservesBoundAtSeniority(t *testing.T) {
+	issuer := testIssuer(t)
+	store := membership.NewMemStore()
+	m := NewMembership([]*rsa.PublicKey{&issuer.PublicKey}, store, []int{KindMembershipBinding}, 8, 0)
+
+	first := blindEvent(KindMembershipBinding, mintCred(t, issuer))
+	first.PubKey = "veteran"
+	if reject, msg := m.RejectEvent(context.Background(), first); reject {
+		t.Fatalf("first binding must succeed: %s", msg)
+	}
+	original, ok := store.BoundAt("veteran")
+	if !ok {
+		t.Fatal("a bound member must have a boundAt stamp")
+	}
+
+	replay := blindEvent(KindMembershipBinding, mintCred(t, issuer))
+	replay.PubKey = "veteran"
+	if reject, msg := m.RejectEvent(context.Background(), replay); reject {
+		t.Fatalf("re-bind must be admitted: %s", msg)
+	}
+
+	if after, _ := store.BoundAt("veteran"); after != original {
+		t.Errorf("boundAt moved %d → %d on re-bind; the member would be demoted to newcomer", original, after)
+	}
+}

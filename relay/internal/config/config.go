@@ -139,6 +139,10 @@ type Config struct {
 	// unlike the blind path). Empty ⇒ token-tagged space kinds stay rejected exactly as today.
 	SpaceWriteIssuerPublicKeys []string `json:"space_write_issuer_public_keys"`
 	AllowedKinds               []int    `json:"allowed_kinds"`
+	// AllowedKindsExplicit records that the config FILE set allowed_kinds, rather than Load
+	// substituting DefaultAllowedKinds. Derived at load, never serialized — it exists so startup can
+	// tell the operator which defaults their explicit list omits (see MissingDefaultKinds).
+	AllowedKindsExplicit bool `json:"-"`
 	// OrganizerPubkeys are the hex Nostr pubkeys of the community organizer(s) (PLAN.md §3.4).
 	// Their kind-30078 `stiq:` config events (moderator roster + rate-limit policy) are the
 	// relay's moderation trust root; they are also exempt from the membership gate.
@@ -336,6 +340,8 @@ func Load(path string) (Config, error) {
 	}
 	if len(c.AllowedKinds) == 0 {
 		c.AllowedKinds = DefaultAllowedKinds
+	} else {
+		c.AllowedKindsExplicit = true
 	}
 	if c.MaxEventBytes == 0 {
 		c.MaxEventBytes = DefaultMaxEventBytes
@@ -421,4 +427,34 @@ func LoopbackOnly(listen string) error {
 		return fmt.Errorf("listen host %q is not loopback; the relay must be reachable only via Tor", host)
 	}
 	return nil
+}
+
+// MissingDefaultKinds returns the DefaultAllowedKinds that an EXPLICIT allowed_kinds omits, in
+// default order — empty when the list was defaulted, or when it covers every default.
+//
+// An explicit allowed_kinds fully REPLACES the defaults (see Load); it is not merged. That is
+// deliberate and stays that way: merging would silently re-admit a kind an operator removed on
+// purpose, which is a worse failure than the one below. But the consequence is a standing footgun —
+// every kind the app gains from here on needs a manual edit on every deployment that ever wrote an
+// explicit list, and the symptom is a feature that silently does nothing on that relay while
+// working everywhere else. It has been tripped and re-documented at least twice.
+//
+// So the list is never silently narrowed any more: startup names exactly what is missing. Note
+// 9020-9027 (the credential/read-token mailbox kinds) are absent from DefaultAllowedKinds ON
+// PURPOSE — they bypass the allow-list via the PoW mailbox path — so they can never appear here.
+func MissingDefaultKinds(c Config) []int {
+	if !c.AllowedKindsExplicit {
+		return nil
+	}
+	have := make(map[int]struct{}, len(c.AllowedKinds))
+	for _, k := range c.AllowedKinds {
+		have[k] = struct{}{}
+	}
+	var missing []int
+	for _, k := range DefaultAllowedKinds {
+		if _, ok := have[k]; !ok {
+			missing = append(missing, k)
+		}
+	}
+	return missing
 }

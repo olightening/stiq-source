@@ -21,7 +21,7 @@ import {decodeGradientHeader, decodeNameHeader, type DisplayNameStore} from '../
 import type {GradientStore} from '../profile/gradientIdentity';
 import type {GradientSpec} from '../media/gradient';
 import {parseVoiceMessage, type VoiceMessage} from './voice';
-import {resolveAuthor, resolveAuthorPubkey} from '../blind/identity';
+import {resolveAuthor, resolveAuthorPubkey, isUnverifiedBlindPost} from '../blind/identity';
 import {resolveContent, isSealedContent, contentLockState, contentEpochOf} from '../blind/blindPost';
 import {isEpochUnlockUnavailable} from '../blind/unlockState';
 
@@ -313,6 +313,13 @@ function prepareFeedItems(
   for (const c of allComments) {
     const root = commentRootId(c);
     if (!root) {
+      continue;
+    }
+    // Unverified comments (attribution stripped OR resolving off the member roll) are hidden from
+    // every thread (partitionThread) — so they must not inflate "N ideas" or the Rising discussion
+    // velocity either; a counted-but-invisible comment reads as phantom engagement and is exactly
+    // the sock-puppet lever the roll closes. Both predicates defer to false pre-roll/pre-key.
+    if (isUnverifiedBlindPost(c)) {
       continue;
     }
     countMap.set(root, (countMap.get(root) ?? 0) + 1);

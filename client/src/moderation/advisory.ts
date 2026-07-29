@@ -57,10 +57,12 @@ export function buildLogEvent(eventId: string, authorPubkey?: string): UnsignedE
   return {kind: Kind.Report, created_at: now(), tags, content: ''};
 }
 
-/** Reverse a single-event directive — the event returns to the feed. */
-export function buildRestoreEvent(eventId: string): UnsignedEvent {
-  return {kind: Kind.Report, created_at: now(), tags: [['e', eventId], [ACTION_TAG, 'restore']], content: ''};
-}
+// NOTE: there is deliberately no `buildRestoreEvent` here. Reversing a single-event directive goes
+// through the generic `report.buildRestore`, which emits the identical
+// `[['e', id], ['stiq-action','restore']]` shape and is the ONE restore path every surface uses —
+// the console, the post ⋯ menu, and the mod-log detail sheet. A second builder existed until
+// 2026-07-29 and was never called outside its own test; two ways to spell one wire event is how the
+// shapes drift apart. `advisory.test.ts` now exercises the real builder.
 
 /**
  * BATCH: render a fixed set of PAST events from `authorPubkey` in the log. Used when a mod bans

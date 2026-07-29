@@ -357,7 +357,8 @@ input.lim:focus{border-color:var(--acc)}
 <!-- MODERATORS -->
 <section id="tab-mods">
   <h2>Moderators <span class="badge" id="mod-count">—</span></h2>
-  <p class="sub">Grant or withdraw moderation power by Nostr npub, then <strong>Publish roster</strong> — it signs a kind-30078 event with your organizer key and sends it to the relay. The change takes effect for every client with no app rebuild.</p>
+  <p class="sub">Grant or withdraw moderation power by Nostr npub. Adding or removing <strong>signs and publishes the roster automatically</strong> (a kind-30078 event under your organizer key), so a withdrawal takes effect for every client with no app rebuild and no second step. <strong>Publish roster</strong> below is the manual retry for when the relay was unreachable — until a publish succeeds, the relay and every client still honour the last published roster.</p>
+  <div id="roster-stale" class="err" style="display:none"></div>
   <div class="row" style="margin-top:0">
     <input type="text" id="npub-in" placeholder="npub1…" style="flex:1;min-width:240px;height:40px;padding:0 11px;font-size:13px">
     <button class="btn" onclick="addMod()">Add moderator</button>

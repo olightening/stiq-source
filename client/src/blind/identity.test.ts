@@ -190,3 +190,74 @@ describe('warmAuthorResolution / warmAuthorResolutionCold — ingest/cold-start 
     expect(resolveAuthor(skippedGiftWrap).pubkey).toBe(skippedGiftWrap.pubkey); // kind-filtered out
   });
 });
+
+describe('isOffRollBlindPost — member-roll enforcement (ban-evasion fix)', () => {
+  const {setActiveMemberRoll} = require('./memberRoll') as typeof import('./memberRoll');
+  const {isOffRollBlindPost, isUnverifiedBlindPost} = require('./identity') as typeof import('./identity');
+
+  beforeEach(() => {
+    clearAuthorCache();
+    setActiveCommunityKey(communityKey);
+    setActiveMemberRoll(null);
+  });
+  afterAll(() => {
+    setActiveCommunityKey(null);
+    setActiveMemberRoll(null);
+  });
+
+  it('defers (false) while no roll is loaded — legacy communities unchanged', () => {
+    const ev = blindPostBy(authorSk, 'no roll yet');
+    expect(isOffRollBlindPost(ev)).toBe(false);
+    expect(isUnverifiedBlindPost(ev)).toBe(false);
+  });
+
+  it('a post whose attribution is ON the roll stays visible', () => {
+    setActiveMemberRoll(new Set([authorPk]));
+    const ev = blindPostBy(authorSk, 'enrolled author');
+    expect(isOffRollBlindPost(ev)).toBe(false);
+    expect(isUnverifiedBlindPost(ev)).toBe(false);
+  });
+
+  it('a post attributed to a fresh, never-bound npub is off-roll', () => {
+    setActiveMemberRoll(new Set([authorPk]));
+    const rogueSk = generateSecretKey();
+    const ev = blindPostBy(rogueSk, 'sock puppet');
+    expect(isOffRollBlindPost(ev)).toBe(true);
+    expect(isUnverifiedBlindPost(ev)).toBe(true);
+  });
+
+  it('an UNATTRIBUTED post is not off-roll (distinct bucket), but is unverified', () => {
+    setActiveMemberRoll(new Set([authorPk]));
+    const base = blindPostBy(authorSk, 'stripped');
+    const noAttr = {...base, tags: base.tags.filter(t => t[0] !== 'stiq_attr')};
+    expect(isOffRollBlindPost(noAttr)).toBe(false);
+    expect(isUnattributedBlindPost(noAttr)).toBe(true);
+    expect(isUnverifiedBlindPost(noAttr)).toBe(true);
+  });
+
+  it('defers without the community key even when a roll is loaded', () => {
+    setActiveMemberRoll(new Set([authorPk]));
+    const ev = blindPostBy(generateSecretKey(), 'cannot judge yet');
+    clearAuthorCache();
+    setActiveCommunityKey(null);
+    expect(isOffRollBlindPost(ev)).toBe(false);
+  });
+
+  it('a roll update flips the verdict without clearing the author cache', () => {
+    const rogueSk = generateSecretKey();
+    const roguePk = getPublicKey(rogueSk);
+    setActiveMemberRoll(new Set([authorPk]));
+    const ev = blindPostBy(rogueSk, 'late bind');
+    expect(isOffRollBlindPost(ev)).toBe(true);
+    // The member's binding lands and the organizer republishes the roll:
+    setActiveMemberRoll(new Set([authorPk, roguePk]));
+    expect(isOffRollBlindPost(ev)).toBe(false);
+  });
+
+  it('never flags a plain npub-signed event', () => {
+    setActiveMemberRoll(new Set([authorPk]));
+    const plain = finalizeEvent({kind: 1, created_at: 1000, tags: [], content: 'plain'}, generateSecretKey());
+    expect(isOffRollBlindPost(plain)).toBe(false);
+    expect(isUnverifiedBlindPost(plain)).toBe(false);
+  });
+});

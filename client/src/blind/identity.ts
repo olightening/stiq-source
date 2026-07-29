@@ -14,6 +14,7 @@
  */
 import {readBlindAuthor} from './blindPost';
 import {getActiveCommunityKey} from './communityKey';
+import {getActiveMemberRoll} from './memberRoll';
 import {isBlindPost} from './blindPost';
 import {FEED_KINDS} from '../contracts';
 
@@ -76,6 +77,43 @@ export function isUnattributedBlindPost(event: {id: string; pubkey: string; tags
   if (!isBlindPost(event)) return false;
   if (!getActiveCommunityKey()) return false;
   return !resolveAuthor(event).blind;
+}
+
+/**
+ * True iff `event` is a blind post whose attribution DOES resolve (a valid member-signed
+ * attestation) but to an npub that is NOT on the active member roll — i.e. a key nobody ever
+ * bound on the relay. That is the fresh-npub ban-evasion / sock-puppet shape: the attestation
+ * only ever proved control of *some* key, and binding a key costs a scarce enrollment credential,
+ * so a legitimately-enrolled author is always on the roll. Conforming clients treat it exactly
+ * like an unattributed post: hidden from feed/threads, excluded from tallies, mod-logged.
+ *
+ * DEFERRAL (each returns false — byte-identical to pre-roll behavior):
+ *   - no community key loaded (can't resolve attributions at all yet);
+ *   - no roll loaded (legacy community, roll doc not yet synced, or organizer publishes none);
+ *   - attribution doesn't resolve (that's isUnattributedBlindPost's bucket, distinct mod-log label).
+ *
+ * The roll Set already contains the organizer + self (unioned at load — see memberRoll.ts), so
+ * organizer posts and a member's own just-bound identity are never flagged. Verdicts are computed
+ * live against the current roll (never cached): a roll update flips them on the next feed build.
+ */
+export function isOffRollBlindPost(event: {id: string; pubkey: string; tags: string[][]}): boolean {
+  if (!isBlindPost(event)) return false;
+  if (!getActiveCommunityKey()) return false;
+  const roll = getActiveMemberRoll();
+  if (!roll) return false;
+  const res = resolveAuthor(event);
+  if (!res.blind) return false;
+  return !roll.has(res.pubkey);
+}
+
+/**
+ * A blind post that must not surface as legitimate member content: attribution stripped/forged
+ * (isUnattributedBlindPost) OR resolving off the member roll (isOffRollBlindPost). One import for
+ * hide-only call sites (thread partitions, tallies, learning, notifications); moderation surfaces
+ * that label the two cases distinctly call the two predicates separately.
+ */
+export function isUnverifiedBlindPost(event: {id: string; pubkey: string; tags: string[][]}): boolean {
+  return isUnattributedBlindPost(event) || isOffRollBlindPost(event);
 }
 
 /** Clear the resolver cache (e.g. after the community key changes on re-enrollment). */

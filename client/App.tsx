@@ -57,7 +57,6 @@ import type {SecureStorage} from './src/keys/keystore';
 import type {RelayClientOptions} from './src/nostr/RelayClient';
 import {createEventVerifier} from './src/nostr/nativeVerify';
 import {MirrorSet} from './src/nostr/MirrorSet';
-import type {ReqFilter} from './src/nostr/protocol';
 import {
   relayBackoffMs,
   shouldRotateCircuit,
@@ -73,7 +72,7 @@ import {setJoinStateResolver} from './src/channels/spaceCta';
 import {setEventLiveResolver} from './src/events/eventCardState';
 import {setReminderStorage} from './src/events/reminders';
 import type {EventsApi} from './src/events/api';
-import {toRetentionPolicy} from './src/moderation/organizerConfig';
+import {toRetentionPolicy, type ModScope} from './src/moderation/organizerConfig';
 import {randomizedSyncPeriodMinutes, SYNC_FLEX_MINUTES} from './src/background/syncSchedule';
 import {pushEnabled, buildRegistration, registerWithWatcher, registerApp, getDistributor, getEndpoint, hasUnifiedPushModule} from './src/push/unifiedPush';
 import {Kind, GroupKind, type Event} from './src/contracts';
@@ -3806,6 +3805,42 @@ function App(): React.JSX.Element {
     setSnapshot(r.getSnapshot());
   }, [cancelPendingSnapshotFlush]);
 
+  /**
+   * Client-side pre-check for a moderator QUICK action (the post/comment ⋯ menu: Hide, Hide user,
+   * Lock, Re-tag, Pin) — returns true when it may proceed, otherwise explains why and returns false.
+   *
+   * The relay hard-enforces both the organizer's permission scopes and the daily/weekly caps
+   * (internal/policy/organizer.go checkModAction), so this was never an authority bypass. But it
+   * enforces them by REJECTING the event, and these dispatchers fired and forgot: a scope-limited
+   * moderator tapped "Lock", saw the action appear to succeed, and it silently did nothing —
+   * indistinguishable from a slow relay. The moderator console has pre-checked scope + limit since
+   * it shipped (`can(scope)` + `checkLimit(action)`); the quick actions never did.
+   *
+   * `action` is the stiq-action value the event will carry, so the cap counted here is the same one
+   * the organizer configured and the relay will charge. `scopes` MIRRORS the relay's
+   * `modActionPermitted` mapping and must never be stricter than it — blocking something the relay
+   * would accept trades a silent failure for a wrong one. That is why a plain hide passes with
+   * EITHER hide scope: this dispatcher serves both the post and the comment ⋯ menus and can't tell
+   * which, exactly as the relay hook can't resolve the target's type.
+   */
+  const modQuickActionAllowed = (scopes: ModScope | readonly ModScope[], action: string): boolean => {
+    if (!snapshot.isModerator) return false;
+    const needed = typeof scopes === 'string' ? [scopes] : scopes;
+    if (!needed.some(s => snapshot.modScopes.includes(s))) {
+      Alert.alert(
+        'Not permitted',
+        'The organizer has not granted you this moderation permission. The relay would reject the action.',
+      );
+      return false;
+    }
+    const notice = runtimeRef.current?.checkModLimit(action);
+    if (notice) {
+      Alert.alert('Limit reached', notice);
+      return false;
+    }
+    return true;
+  };
+
   // Hold the splash until the runtime knows the real enrolled state, so onboarding never flashes
   // for an already-enrolled user on cold start. By the time init() settles it has already emitted
   // the real snapshot, so the splash hands off directly to the lock screen (or onboarding).
@@ -4120,23 +4155,41 @@ function App(): React.JSX.Element {
       onGetPostItem={id => runtimeRef.current?.feedItemFor(id) ?? null}
       onResolveIdentity={id => runtimeRef.current?.resolveIdentityById(id) ?? null}
       onModeratePost={(postId, authorPubkey, action) => {
-        if (action === 'hideUser') setPendingBan({pubkey: authorPubkey});
-        else setPendingRemoval({kind: 'post', targetId: postId, authorPubkey});
+        // Gate BEFORE opening the sheet: a moderator who can't do this shouldn't compose a reason
+        // bucket and a note only to have the relay drop the result on the floor.
+        if (action === 'hideUser') {
+          if (!modQuickActionAllowed('ban', 'ban')) return;
+          setPendingBan({pubkey: authorPubkey});
+        } else {
+          // Either hide scope: this fires from the post ⋯ menu AND the comment ⋯ menu.
+          if (!modQuickActionAllowed(['hide-post', 'hide-comment'], 'hide')) return;
+          setPendingRemoval({kind: 'post', targetId: postId, authorPubkey});
+        }
       }}
       onChannelOwnerHide={(targetId, authorPubkey) => {
         setPendingRemoval({kind: 'channel', targetId, authorPubkey});
       }}
       onModerationRestore={(targetId, targetType, authorPubkey) => {
-        if (targetType === 'user') void runtimeRef.current?.moderatorUnhideUser(targetId);
-        else void runtimeRef.current?.moderatorRestore(targetId, authorPubkey);
+        // Un-hiding a USER republishes a kind-10000 mute list, not a kind-1984 stiq-action, so the
+        // relay's checkModAction never sees it and gating it here would be stricter than the relay.
+        if (targetType === 'user') {
+          void runtimeRef.current?.moderatorUnhideUser(targetId);
+          return;
+        }
+        if (!modQuickActionAllowed('restore', 'restore')) return;
+        void runtimeRef.current?.moderatorRestore(targetId, authorPubkey);
       }}
       onModeratorLock={(postId, authorPubkey, lock) => {
+        // The stiq-action differs by direction, and so does the organizer's cap for it.
+        if (!modQuickActionAllowed('lock', lock ? 'lock' : 'unlock')) return;
         void runtimeRef.current?.moderatorLockThread(postId, lock, authorPubkey);
       }}
       onModeratorRetag={(postId, authorPubkey, label) => {
+        if (!modQuickActionAllowed('retag', 'retag')) return;
         void runtimeRef.current?.moderatorRetag(postId, label, authorPubkey);
       }}
       onModeratorPin={(postId, authorPubkey, pin) => {
+        if (!modQuickActionAllowed('pin', pin ? 'pin' : 'unpin')) return;
         void runtimeRef.current?.moderatorPin(postId, pin, authorPubkey);
       }}
       onMuteAuthor={pk => { void runtimeRef.current?.muteAuthor(pk); }}

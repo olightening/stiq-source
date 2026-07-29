@@ -20,6 +20,7 @@ import {moderatorHides} from './filter';
 import {advisoryOverlay} from './advisory';
 import {bannedAuthors} from './bans';
 import {bucketMetaFor, type ReasonsConfig} from './reasons';
+import {restoredIds} from './autoModeration';
 import {isStiqComment} from '../feed/comments';
 import {decodeNameHeader} from '../profile/displayName';
 import {resolveAuthorPubkey} from '../blind/identity';
@@ -44,6 +45,54 @@ export interface PendingReport {
   latestAt: number;
   /** True when reporterCount has reached the organizer's auto-hide threshold (0 = disabled). */
   thresholdReached: boolean;
+}
+
+/**
+ * Targets auto-hidden by the organizer's report threshold: ids that at least `reportThreshold`
+ * DISTINCT members have reported, pending a moderator's decision.
+ *
+ * This is the suppression half of the feature. The organizer doc has carried `reportThreshold`
+ * (prod: 5) since the feature shipped, `reasons.ts` documents it as "auto-hidden pending moderator
+ * review", and the queue has flagged + sorted on it — but nothing ever hid anything, so a post
+ * crossing the threshold stayed fully visible to every member until a human acted (audit
+ * 2026-07-29, D3).
+ *
+ * Deliberately shaped like `autoHiddenPosts`: PURE over the store, materialized as no event, so
+ * every client reaches the same verdict instantly, offline, with nothing to forge. Reversal reuses
+ * the identical `restoredIds` override — one explicit moderator Restore clears it for good, even if
+ * reports keep arriving. Threshold 0 (the default, and every community that never set one) returns
+ * an empty set: no behavior change.
+ *
+ * Only NON-moderator reports count. Moderators act directly, and their own hides route through the
+ * ordinary hide map — counting them here would let one moderator's report masquerade as consensus.
+ */
+export function thresholdHiddenTargets(
+  store: EventStore,
+  npubs: readonly string[] | undefined,
+  reasons: ReasonsConfig,
+): Set<string> {
+  const out = new Set<string>();
+  if (!(reasons.reportThreshold > 0)) return out;
+  const mods = moderatorPubkeySet(npubs);
+  const reporters = new Map<string, Set<string>>();
+  for (const r of store.query({kinds: [Kind.Report]})) {
+    if (mods.has(r.pubkey)) continue;
+    if (!isHideReport(r)) continue; // ignore restore/lock/retag/pin/ban stiq-actions
+    const id = reportedPostId(r);
+    if (!id) continue;
+    const seen = reporters.get(id);
+    if (seen) seen.add(r.pubkey);
+    else reporters.set(id, new Set([r.pubkey]));
+  }
+  if (reporters.size === 0) return out;
+  // A moderator's explicit Restore is the override, and it is FINAL for this mechanism: it stays
+  // the latest visibility action no matter how many further reports land, so a brigade can't
+  // re-hide something a moderator already cleared.
+  const restored = restoredIds(store, mods);
+  for (const [id, who] of reporters) {
+    if (who.size >= reasons.reportThreshold && !restored.has(id)) out.add(id);
+  }
+  return out;
 }
 
 /** Header-stripped, whitespace-collapsed excerpt of an event (title preferred for articles). A

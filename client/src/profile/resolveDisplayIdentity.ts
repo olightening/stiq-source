@@ -27,7 +27,7 @@
  * attestation-then-npub resolve), from anywhere that doesn't hold a full AppRuntime.
  */
 import * as nip19 from 'nostr-tools/nip19';
-import {resolveAuthor} from '../blind/identity';
+import {resolveAuthor, isOffRollBlindPost} from '../blind/identity';
 import type {DisplayNameStore} from './displayName';
 import type {GradientStore} from './gradientIdentity';
 import {decodeGradient, gradientFromSeed, type GradientSpec} from '../media/gradient';
@@ -76,9 +76,15 @@ export function displayIdentityFor(event: IdentityEvent, deps: DisplayIdentityDe
   const npub = nip19.npubEncode(pubkey);
   const isMe = deps.myPubkey !== undefined && pubkey === deps.myPubkey;
 
-  const name = resolveName(pubkey, isMe, author.name, event.created_at, deps.names);
+  // Member-roll enforcement: an off-roll event (valid attestation, never-bound npub) still
+  // RENDERS — a mod-log detail sheet legitimately shows the claimed identity — but must not
+  // TEACH the phonebook: sock-puppet keys could otherwise squat display names/gradients whose
+  // arbitration (longest-held / latest-wins) outlives the hidden post. Reads still resolve.
+  const teach = !isOffRollBlindPost(event);
+  const name = resolveName(pubkey, isMe, teach ? author.name : undefined, event.created_at, deps.names);
   const gradient =
-    resolveGradient(pubkey, isMe, author.gradient, event.created_at, deps.grads) ?? gradientFromSeed(npub);
+    resolveGradient(pubkey, isMe, teach ? author.gradient : undefined, event.created_at, deps.grads) ??
+    gradientFromSeed(npub);
 
   return {pubkey, npub, ...(name ? {name} : {}), gradient};
 }

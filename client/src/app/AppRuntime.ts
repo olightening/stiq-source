@@ -56,8 +56,11 @@ import {
   clearAuthorCache,
   resolveAuthorPubkey,
   isUnattributedBlindPost,
+  isOffRollBlindPost,
+  isUnverifiedBlindPost,
   warmAuthorResolutionCold,
 } from '../blind/identity';
+import {setActiveMemberRoll, getMemberRollVersion} from '../blind/memberRoll';
 import {
   runTokenDraw,
   resumeTokenDraw,
@@ -415,6 +418,10 @@ import {
   type Permissions,
   type ModActionLimits,
   type LogPageDoc,
+  ORGANIZER_D_MEMBER_ROLL,
+  currentMemberRoll,
+  parseMemberRollContent,
+  type MemberRoll,
 } from '../moderation/organizerConfig';
 import {resolveLogPage, legacyLogPageDoc, type LogHearthData} from '../channels/logPage';
 import {quotaFor, limitMessage, type LimitCategory} from '../moderation/limits';
@@ -516,10 +523,18 @@ import {
   advisoryActionOf,
   loggedAuthorsFrom,
   type LoggedAuthor,
+  type AdvisoryOverlay,
 } from '../moderation/advisory';
 import {bannedAuthors, bannedMembers, type BannedMember} from '../moderation/bans';
-import {pendingReports, type PendingReport} from '../moderation/queue';
-import {moderatorHides, isModeratorHidden, moderatorMutedAuthors, type ModeratorHides} from '../moderation/filter';
+import {pendingReports, thresholdHiddenTargets, type PendingReport} from '../moderation/queue';
+import {
+  moderatorHides,
+  isModeratorHidden,
+  isCommunityHidden,
+  moderatorMutedAuthors,
+  type ModeratorHides,
+  type CommunityHideContext,
+} from '../moderation/filter';
 import {buildModLog, type ModLogEntry, type SpaceAutoContext} from '../moderation/modlog';
 import {moderationOverlay, type ModerationOverlay} from '../moderation/modActions';
 import {buildMuteList, blockedPubkeys, ownerReportedIds, channelOwnerOf} from '../moderation/ownerComments';
@@ -575,6 +590,8 @@ const EMPTY_GROUPS: GroupSummary[] = [];
 const EMPTY_SPACE_INVITES: IncomingSpaceInvite[] = [];
 const EMPTY_JOINING_SPACES: JoiningSpace[] = [];
 const EMPTY_SCOPES: readonly ModScope[] = [];
+/** Stable identity for "no report threshold configured" — keeps cache keys/compares cheap. */
+const EMPTY_PENDING_REVIEW: ReadonlySet<string> = new Set<string>();
 
 /** How long the completed (5/5) ring lingers before the entry is dropped. */
 const CONFIRM_LINGER_MS = 1500;
@@ -1826,7 +1843,7 @@ export class AppRuntime {
    * User action correctness: any post/vote/comment calls publishOptimistic → store.save →
    * feedVer bumps → cache miss → immediate recompute. Safe.
    */
-  private _feedCache: {feedVer: number; moderatorsKey: string; myPubkey: string | undefined; autoKey: string; identityVersion: number; feed: Feed} | undefined;
+  private _feedCache: {feedVer: number; moderatorsKey: string; myPubkey: string | undefined; autoKey: string; identityVersion: number; rollVersion: number; feed: Feed} | undefined;
 
   /**
    * Bumped whenever the viewer's OWN relay-blind identity (display name or gradient) changes.
@@ -1960,6 +1977,14 @@ export class AppRuntime {
   private _overlayIdCache: {overlay: ModerationOverlay | undefined; locked: string[]; pinned: string[]} | undefined;
   /** bannedAuthors() key-set — keyed on versionOf([Report]) + roster identity. */
   private _bannedCache: {ver: number; modKey: string; banned: Set<string>} | undefined;
+  /** advisoryOverlay() — the log-user / log / log-batch routing state, keyed on versionOf([Report])
+   *  + roster identity (the roster gates which directives count). Mirrors _bannedCache. Threads
+   *  consult this on every open, so caching collapses the full report scan to a hit. */
+  private _advisoryCache: {ver: number; modKey: string; overlay: AdvisoryOverlay} | undefined;
+  /** thresholdHiddenTargets() — keyed on versionOf([Report]) + roster identity + the threshold. */
+  private _pendingReviewCache:
+    | {ver: number; modKey: string; threshold: number; ids: ReadonlySet<string>}
+    | undefined;
   /** currentLimits() — keyed on versionOf([AppData]) + organizer. */
   private _limitsCache: {ver: number; org: string | undefined; limits: Limits | undefined} | undefined;
   /** currentPermissions() — keyed on versionOf([AppData]) + organizer. */
@@ -2004,7 +2029,7 @@ export class AppRuntime {
    */
   private readonly _profileCache = new Map<
     string,
-    {feedVer: number; moderatorsKey: string; myPubkey: string | undefined; autoKey: string; identityVersion: number; mutedVer: number; profile: Profile}
+    {feedVer: number; moderatorsKey: string; myPubkey: string | undefined; autoKey: string; identityVersion: number; mutedVer: number; rollVersion: number; profile: Profile}
   >();
   /**
    * getIdentity() memo, per pubkey — a thin name+gradient+npub lookup for render-hot callers that
@@ -2132,6 +2157,17 @@ export class AppRuntime {
     Kind.LiveActivity,
     ...AppRuntime.FEED_KINDS,
   ];
+
+  /**
+   * The bucket the member roll rides in (organizer kind-30078 config). Its version is what
+   * syncMemberRollFromStore compares, so the roll converges with the store without a decrypt per
+   * feed build. Deliberately just AppData: the roll doc is replaceable, so this counter moves once
+   * per organizer config arrival, not per member post.
+   */
+  private static readonly ROLL_KINDS: readonly number[] = [Kind.AppData];
+
+  /** Store version of ROLL_KINDS at the last member-roll derivation (see syncMemberRollFromStore). */
+  private _rollStoreVer: number | undefined;
 
   /**
    * Kinds getChannelMessages self-invalidates on (channel broadcasts, space settings, owner/mod
@@ -4602,7 +4638,52 @@ export class AppRuntime {
     // starts. Empty when the active community has no secondaries or none are auth-gated — a
     // single-mirror/public-onion build stays byte-identical to today (no auth files beyond primary).
     setActiveOnionAuthExtra(active ? deriveOnionAuthSet(effectiveMirrors(active)) : []);
+    // Member roll (ban-evasion fix): derive the active community's bound-npub Set from the stored
+    // organizer roll doc, in lock-step with the community key it decrypts under. Null (defer) when
+    // no doc / no key / no organizer — legacy communities enforce nothing.
+    this.refreshMemberRollFromStore();
     clearAuthorCache();
+  }
+
+  /**
+   * Recompute the active member roll from the STORE's latest organizer roll doc (cold start +
+   * community switch; the live-arrival path parses the arriving doc directly — see applyOrgConfig's
+   * ORGANIZER_D_MEMBER_ROLL case). Union with the organizer + self before publishing: the organizer
+   * never binds (relay-privileged, absent from membership.json) and a member's own fresh binding may
+   * not have reached the organizer's roll yet — neither must ever be hidden.
+   */
+  private refreshMemberRollFromStore(): void {
+    this._rollStoreVer = this.storeVersionOf(AppRuntime.ROLL_KINDS);
+    this.applyMemberRollSet(
+      currentMemberRoll(this.deps.store, this.organizerNpub(), getActiveCommunityKey()),
+    );
+  }
+
+  /**
+   * Keep the active roll in step with the STORE, recomputing only when the kind-30078 bucket has
+   * actually changed (a cheap version-counter compare — the roll doc is replaceable, so this is at
+   * most one decrypt per org-doc arrival). Called at the top of the feed build so every path that
+   * puts a roll doc in the store converges without its own wiring: cold-start hydration (the store
+   * is swapped in AFTER the community policy loads, so the load-time read can legitimately see
+   * nothing), a mirror/backfill delivery, and the live org-config path alike.
+   */
+  private syncMemberRollFromStore(): void {
+    const ver = this.storeVersionOf(AppRuntime.ROLL_KINDS);
+    if (ver !== undefined && ver === this._rollStoreVer) return;
+    this.refreshMemberRollFromStore();
+  }
+
+  /** Publish `roll` (plus organizer + self) as the active member roll; undefined clears (defer). */
+  private applyMemberRollSet(roll: MemberRoll | undefined): void {
+    if (!roll) {
+      setActiveMemberRoll(null);
+      return;
+    }
+    const set = new Set(roll.members);
+    const org = this.activeOrganizerHex();
+    if (org) set.add(org);
+    if (this.myPubkey) set.add(this.myPubkey);
+    setActiveMemberRoll(set);
   }
 
   /**
@@ -5483,6 +5564,23 @@ export class AppRuntime {
     return banned;
   }
 
+  /** Version-cached advisory routing overlay (log-user standing rules, log / log-batch event
+   * directives), keyed on versionOf([Report]) + roster identity — the same key shape as
+   * cachedBannedSet, and for the same reason: the roster gates which directives count, so
+   * un-rostering a moderator must retroactively drop theirs. The thread view consults this on every
+   * open. */
+  private cachedAdvisory(moderators: readonly string[]): AdvisoryOverlay {
+    const ver = this.storeVersionOf([Kind.Report]);
+    const modKey = this.moderatorsKeyOf(moderators);
+    const c = this._advisoryCache;
+    if (ver !== undefined && c && c.ver === ver && c.modKey === modKey) return c.overlay;
+    const overlay = advisoryOverlay(this.deps.store.query({kinds: [Kind.Report]}), pk =>
+      isModerator(pk, moderators),
+    );
+    if (ver !== undefined) this._advisoryCache = {ver, modKey, overlay};
+    return overlay;
+  }
+
   /** Version-cached organizer rate-limit policy. Keyed on versionOf([AppData]) + organizer. */
   private cachedLimits(): Limits | undefined {
     const org = this.organizerNpub();
@@ -5873,18 +5971,55 @@ export class AppRuntime {
    * `_cachedBuildFeed` (needs the derived `autoCfg` too) and getProfile's memo (only needs `autoKey`,
    * to detect a reshuffle of visibleFeed's posts without re-deriving `autoCfg` a second time).
    */
-  private autoModKeyFor(
-    moderators: readonly string[],
-  ): {autoCfg: {postRules: PostRules; postRulesAt: number; bannedAuthors: Set<string>}; autoKey: string} {
+  private autoModKeyFor(moderators: readonly string[]): {
+    autoCfg: {
+      postRules: PostRules;
+      postRulesAt: number;
+      bannedAuthors: Set<string>;
+      pendingReview: ReadonlySet<string>;
+    };
+    autoKey: string;
+  } {
     const nowSec = Math.floor(Date.now() / 1000);
     const banned = this.cachedBannedSet(moderators, nowSec);
-    const autoCfg = {postRules: this.postRules, postRulesAt: this.postRulesAt, bannedAuthors: banned};
+    const pendingReview = this.cachedPendingReview(moderators);
+    const autoCfg = {
+      postRules: this.postRules,
+      postRulesAt: this.postRulesAt,
+      bannedAuthors: banned,
+      pendingReview,
+    };
     const r = this.postRules;
-    const autoKey = `${this.postRulesAt}|${r.note.max}|${r.note.labelRequired}|${r.article.max}|${r.article.labelRequired}|${[...banned].sort().join(',')}`;
+    // The threshold SET itself needs no key component: every input that can change it — a new
+    // report, a restore (both kind-1984, in FEED_KINDS) or the roster — already moves the caller's
+    // feedVer/modKey. Only the threshold VALUE rides an out-of-band 30078 reasons doc, so that is
+    // what goes in the key.
+    const autoKey = `${this.postRulesAt}|${r.note.max}|${r.note.labelRequired}|${r.article.max}|${r.article.labelRequired}|${[...banned].sort().join(',')}|th${this.reasons.reportThreshold}`;
     return {autoCfg, autoKey};
   }
 
+  /** Version-cached report-threshold hide set (queue.thresholdHiddenTargets). Keyed on
+   * versionOf([Report]) + roster identity + the threshold value — the same shape as
+   * cachedBannedSet, since it folds the same kind-1984 bucket. */
+  private cachedPendingReview(moderators: readonly string[]): ReadonlySet<string> {
+    const threshold = this.reasons.reportThreshold;
+    if (!(threshold > 0)) return EMPTY_PENDING_REVIEW;
+    const ver = this.storeVersionOf([Kind.Report]);
+    const modKey = this.moderatorsKeyOf(moderators);
+    const c = this._pendingReviewCache;
+    if (ver !== undefined && c && c.ver === ver && c.modKey === modKey && c.threshold === threshold) {
+      return c.ids;
+    }
+    const ids = thresholdHiddenTargets(this.deps.store, moderators, this.reasons);
+    if (ver !== undefined) this._pendingReviewCache = {ver, modKey, threshold, ids};
+    return ids;
+  }
+
   private _cachedBuildFeed(moderators: readonly string[], overlay?: ModerationOverlay): Feed {
+    // Converge the member roll with the store before any verdict is computed (cheap version
+    // compare; see syncMemberRollFromStore). Must precede the rollVersion read below, so a roll
+    // that changes here invalidates this build's cache entry rather than the next one's.
+    this.syncMemberRollFromStore();
     const {autoCfg, autoKey} = this.autoModKeyFor(moderators);
     // POSTS-FIRST (A2): the first heavy feed build skips the kind-7 reaction bucketing (the largest
     // bucket) so the structural feed paints without warming/parsing every cached reaction; a scored
@@ -5900,6 +6035,11 @@ export class AppRuntime {
       // stable regardless of the order returned by moderatorNpubs().
       const moderatorsKey = [...moderators].sort().join('\0');
       const identityVersion = this._identityVersion;
+      // Member-roll enforcement hides off-roll posts inside buildFeed, but the roll arrives as a
+      // kind-30078 doc — NOT a FEED_KIND — so a roll update moves none of the other key parts and
+      // would otherwise serve a feed computed under the PREVIOUS roll (a newly-enrolled member's
+      // posts staying hidden until unrelated content arrived). Key on it explicitly.
+      const rollVersion = getMemberRollVersion();
       const c = this._feedCache;
       if (
         c !== undefined &&
@@ -5907,7 +6047,8 @@ export class AppRuntime {
         c.moderatorsKey === moderatorsKey &&
         c.myPubkey === this.myPubkey &&
         c.autoKey === autoKey &&
-        c.identityVersion === identityVersion
+        c.identityVersion === identityVersion &&
+        c.rollVersion === rollVersion
       ) {
         // The overlay is derived purely from kind-1984 (in FEED_KINDS), so any overlay change
         // also bumps feedVer → this hit only happens when the overlay is unchanged too. When the
@@ -5916,7 +6057,7 @@ export class AppRuntime {
         return c.feed;
       }
       const feed = buildFeed(this.deps.store, moderators, this.myPubkey, this.displayNames, this.gradients, overlay, autoCfg, opts, this._ownPostOrder);
-      this._feedCache = {feedVer, moderatorsKey, myPubkey: this.myPubkey, autoKey, identityVersion, feed};
+      this._feedCache = {feedVer, moderatorsKey, myPubkey: this.myPubkey, autoKey, identityVersion, rollVersion, feed};
       if (skipScores) this.scheduleScorePass();
       this.noteFeedLocks(feed.items);
       return feed;
@@ -6395,6 +6536,9 @@ export class AppRuntime {
       // notifies me, and (b) a peer's reply renders "Someone" over a stranger's seed-gradient because
       // the phonebook has no name for the throwaway. This is the resolveIdentity rule the embed-card
       // fix pinned (getEvent was the last hold-out then; the notification centre was another).
+      // Unverified comments are hidden from every thread (partitionThread) — never notify about
+      // content the member can't see. Off-roll additionally covers sock-puppet commenters.
+      if (isUnattributedBlindPost(ev) || isOffRollBlindPost(ev)) continue;
       const commenter = this.resolveIdentity(ev);
       if (commenter.pubkey === this.myPubkey) continue; // my own reply — never notify me
 
@@ -6755,14 +6899,25 @@ export class AppRuntime {
    * Split a thread into visible comments and those hidden by community moderators.
    *
    * Post authors have NO moderation authority over comments on their own posts — only the
-   * organizer's signed moderator roster can hide content. A comment is hidden community-wide
-   * only when a current moderator reported it (kind-1984) or its author is on a moderator's
-   * mute list.
+   * organizer's signed moderator roster can hide content.
+   *
+   * This applies the FEED'S EXACT routing via the shared `isCommunityHidden` predicate: plain
+   * kind-1984 hides + kind-10000 mutes, the advisory overlay (standing `log-user` rules and every
+   * `log`/`log-batch` event id — the overlay folds ALL `e` tags, unlike `reportedPostId`'s
+   * first-tag contract), and the active ban set — each author-scoped rule matched on the REAL
+   * author. Before the 2026-07-29 audit this consulted the hide map ALONE, so bans, standing rules,
+   * and every batched id past the first stayed visible in every thread (D1).
    */
   private moderatedThread(rootId: string): {visible: CommentNode[]; hidden: CommentNode[]} {
     const tree = buildThread(this.deps.store, rootId);
-    const modHides = this.cachedModeratorHides(this.moderatorNpubs());
-    return partitionThread(tree, ev => isModeratorHidden(ev, modHides) || isUnattributedBlindPost(ev));
+    const moderators = this.moderatorNpubs();
+    const ctx: CommunityHideContext = {
+      hides: this.cachedModeratorHides(moderators),
+      advisory: this.cachedAdvisory(moderators),
+      bannedAuthors: this.cachedBannedSet(moderators, Math.floor(Date.now() / 1000)),
+      pendingReview: this.cachedPendingReview(moderators),
+    };
+    return partitionThread(tree, ev => isCommunityHidden(ev, ctx) || isUnverifiedBlindPost(ev));
   }
 
   // ── Moderator-global actions (Phase C) ────────────────────────────────────────────────
@@ -6962,10 +7117,15 @@ export class AppRuntime {
 
   /** Full moderator-action log (newest first) for the searchable Moderation Log screen. */
   getModLog(): ModLogEntry[] {
+    const moderators = this.moderatorNpubs();
     return buildModLog(
       this.deps.store,
-      this.moderatorNpubs(),
-      {postRules: this.postRules, postRulesAt: this.postRulesAt},
+      moderators,
+      // `pendingReview` matters here: a report-threshold auto-hide writes no event, so without it
+      // the content would vanish from feed and threads with NO row anywhere for a moderator to see
+      // — or to restore from. (`bannedAuthors` is deliberately absent: it only drives
+      // buildModeratedFeed's filter; a banned author's posts reach the log via block 5's routing.)
+      {postRules: this.postRules, postRulesAt: this.postRulesAt, pendingReview: this.cachedPendingReview(moderators)},
       this.administeredSpaceAutoContexts(),
     );
   }
@@ -7014,10 +7174,7 @@ export class AppRuntime {
    * Matched on the REAL author, so a rule follows a blind author across every throwaway key.
    */
   getLoggedAuthors(): LoggedAuthor[] {
-    const overlay = advisoryOverlay(this.deps.store.query({kinds: [Kind.Report]}), pk =>
-      isModerator(pk, this.moderatorNpubs()),
-    );
-    return loggedAuthorsFrom(overlay);
+    return loggedAuthorsFrom(this.cachedAdvisory(this.moderatorNpubs()));
   }
 
   /**
@@ -7511,6 +7668,9 @@ export class AppRuntime {
     const identityVersion = this._identityVersion;
     const mutedVer = this._mutedVersion;
     const myPubkey = this.myPubkey;
+    // A profile's post list comes from visibleFeed, so it inherits the feed's roll dependency —
+    // and the roll doc is not a PROFILE_KIND either. See _cachedBuildFeed's rollVersion note.
+    const rollVersion = getMemberRollVersion();
 
     if (feedVer !== undefined) {
       const cached = this._profileCache.get(pubkey);
@@ -7521,7 +7681,8 @@ export class AppRuntime {
         cached.myPubkey === myPubkey &&
         cached.autoKey === autoKey &&
         cached.identityVersion === identityVersion &&
-        cached.mutedVer === mutedVer
+        cached.mutedVer === mutedVer &&
+        cached.rollVersion === rollVersion
       ) {
         return cached.profile;
       }
@@ -7554,7 +7715,7 @@ export class AppRuntime {
     const result = nameConflict ? {...withGradient, nameConflict} : withGradient;
 
     if (feedVer !== undefined) {
-      this._profileCache.set(pubkey, {feedVer, moderatorsKey, myPubkey, autoKey, identityVersion, mutedVer, profile: result});
+      this._profileCache.set(pubkey, {feedVer, moderatorsKey, myPubkey, autoKey, identityVersion, mutedVer, rollVersion, profile: result});
     }
     return result;
   }
@@ -7724,6 +7885,9 @@ export class AppRuntime {
   private learnFromUnlockedEpoch(epoch: number): void {
     for (const ev of this.deps.store.query({kinds: FEED_KINDS, unordered: true})) {
       if (contentEpochOf(ev) !== epoch) continue; // unsealed, or sealed under a different epoch
+      // Never learn names from off-roll events (member-roll enforcement): a sock-puppet key must
+      // not seed the phonebook via the unlock sweep any more than via the feed learn pass.
+      if (isOffRollBlindPost(ev)) continue;
       const body = resolveContent(ev);
       if (body.locked) continue; // malformed `ke` / still-locked for some other reason — nothing to learn
       this.learnNameFromContent(resolveAuthorPubkey(ev), body.text, ev.created_at);
@@ -10642,6 +10806,8 @@ export class AppRuntime {
     this._hidesCache = undefined;
     this._overlayIdCache = undefined;
     this._bannedCache = undefined;
+    this._advisoryCache = undefined;
+    this._pendingReviewCache = undefined;
     this._limitsCache = undefined;
     this._permsCache = undefined;
     this._communityConfigCache = undefined;
@@ -10651,6 +10817,11 @@ export class AppRuntime {
     this._bookmarksCache = undefined;
     this._subsCache = undefined;
     this._scoreCache = undefined;
+    this._eventTallyCache = undefined; // RSVP tallies are roll- AND community-scoped
+    // The outgoing community's member roll must never gate the incoming one's posts. Cleared here
+    // and re-derived by loadActiveCommunityPolicyInner (refreshMemberRollFromStore) for the new
+    // community, in lock-step with its community key.
+    setActiveMemberRoll(null);
     this._channelMsgCache.clear();
     this._groupMsgCache.clear();
     this._profileCache.clear(); // no stale posts/ideaCount/name/gradient from the outgoing community
@@ -11184,6 +11355,7 @@ export class AppRuntime {
         // global mirror anymore — the key at rest lives only in the per-community list record (cleared
         // by communities.clear below) + any pre-slot leftover (wiped by wipeLegacyGlobals).
         setActiveCommunityKey(null);
+        setActiveMemberRoll(null); // derived from the community key + organizer doc — clear with them
         // Per-community PUBLIC layer, before clearing the list (each record embeds the community's
         // base64 key): the ORPHANED legacy per-cid store (finding #4 — the per-(cid, account) stores
         // are wiped in the per-slot loop below) + legacy snapshot + non-sqlite fallback blob + learned
@@ -11460,6 +11632,21 @@ export class AppRuntime {
           this.activeCommunity = {...this.activeCommunity, mirrorsOrg: v, mirrorsOrgAt: createdAt};
         }
         return {mirrorsOrg: v, mirrorsOrgAt: createdAt};
+      }
+      case ORGANIZER_D_MEMBER_ROLL: {
+        // Live roll update (member-roll enforcement): judge the ARRIVING doc's own content —
+        // independent of store write ordering — under the active community key. A doc that fails
+        // to decrypt/validate returns null (nothing applied, watermark not advanced), and the
+        // previously-applied roll stays in force; the roll is derived state, so the patch is empty
+        // (nothing persists on the community record — the doc itself is the durable copy). The
+        // truthy `{}` return still advances the watermark and emit()s, which is what rebuilds the
+        // feed so a just-enrolled member's posts unhide the moment the republished roll lands.
+        const key = getActiveCommunityKey();
+        if (!key) return null;
+        const roll = parseMemberRollContent(content, key, createdAt);
+        if (!roll) return null;
+        this.applyMemberRollSet(roll);
+        return {};
       }
       case ORGANIZER_D_STORAGE: {
         // Organizer-tunable retention policy (T16-S2). Dark unless COMPACTION_V2 is on. The just-arrived
@@ -11807,7 +11994,10 @@ export class AppRuntime {
       // carries their real display name instead of the blank "Someone replied". (Same rule as the
       // notification-centre derivation above and the embed-card fix.)
       const commenter = this.resolveIdentity(event);
-      if (isForMe && commenter.pubkey !== this.myPubkey) {
+      // Never push for a comment the member can't see: unattributed and off-roll comments are
+      // hidden from every thread (see moderatedThread / deriveNotifications).
+      const unverified = isUnattributedBlindPost(event) || isOffRollBlindPost(event);
+      if (isForMe && !unverified && commenter.pubkey !== this.myPubkey) {
         const rootId = commentRootId(event);
         if (rootId) {
           const rootItem = this.feedItemFor(rootId);
@@ -13319,7 +13509,7 @@ export class AppRuntime {
   private readonly eventApplications = new Map<string, Map<string, EventApplicationRecord>>();
   private readonly eventWaitlists = new Map<string, Map<string, EventWaitlistRecord>>();
   private _eventDocsCache?: {ver: number; docs: Map<string, EventDocView>};
-  private _eventTallyCache?: {ver: number; tallies: Map<string, InterestedTally>};
+  private _eventTallyCache?: {ver: string; tallies: Map<string, InterestedTally>};
   private readonly requestedEventCoords = new Set<string>();
   /** Throttle for {@link republishMyEventDocs} — once per (re)connect cycle, not once per call. */
   private _lastEventSweepAt = 0;
@@ -13393,13 +13583,18 @@ export class AppRuntime {
 
   /** Interested tallies per coordinate, deduped per real author, version-cached. */
   private eventTallies(): Map<string, InterestedTally> {
-    const ver = this.storeVersionOf([KIND_EVENT_RSVP]);
+    // The tally depends on the member roll too (off-roll RSVPs are excluded), so fold the roll
+    // version into the cache key — a roll update must invalidate a tally computed under the old
+    // roll even when no new RSVP arrived.
+    const storeVer = this.storeVersionOf([KIND_EVENT_RSVP]);
+    const ver = storeVer !== undefined ? `${storeVer}|${getMemberRollVersion()}` : undefined;
     const c = this._eventTallyCache;
     if (ver !== undefined && c && c.ver === ver) return c.tallies;
     const tallies = interestedTallies(
       this.deps.store.query({kinds: [KIND_EVENT_RSVP], unordered: true}),
       ev => resolveAuthorPubkey(ev),
       this.myPubkey ?? null,
+      ev => isOffRollBlindPost(ev),
     );
     if (ver !== undefined) this._eventTallyCache = {ver, tallies};
     return tallies;

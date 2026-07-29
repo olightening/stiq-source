@@ -710,3 +710,62 @@ describe('organizerConfig — currentLogPage (d="stiq:log-page")', () => {
     expect(currentLogPage(store, ORGANIZER_NPUB)).toBeUndefined();
   });
 });
+
+describe('organizerConfig — member roll (stiq:member-roll)', () => {
+  const {encryptForSpace, mintGroupKey} = require('../channels/groupCrypto') as typeof import('../channels/groupCrypto');
+  const {ORGANIZER_D_MEMBER_ROLL, currentMemberRoll} = require('./organizerConfig') as typeof import('./organizerConfig');
+  const KEY = mintGroupKey();
+  const M1 = 'd'.repeat(64);
+  const M2 = 'e'.repeat(64);
+
+  function rollDoc(members: unknown[], opts: {v?: number; key?: Uint8Array; author?: string} = {}): Event {
+    const payload = JSON.stringify({v: opts.v ?? 1, members, updated_at: 1721000000});
+    return appData(opts.author ?? ORGANIZER_HEX, ORGANIZER_D_MEMBER_ROLL, [], encryptForSpace(payload, opts.key ?? KEY));
+  }
+
+  it('decrypts + parses the organizer roll into a Set', () => {
+    const store = new InMemoryEventStore();
+    store.save(rollDoc([M1, M2, M1, 'junk', 'ff']));
+    const roll = currentMemberRoll(store, ORGANIZER_NPUB, KEY);
+    expect(roll).toBeDefined();
+    expect([...roll!.members].sort()).toEqual([M1, M2]);
+    expect(roll!.updatedAt).toBe(1721000000);
+  });
+
+  it('newest doc wins', () => {
+    const store = new InMemoryEventStore();
+    store.save(rollDoc([M1]));
+    store.save(rollDoc([M2]));
+    expect([...currentMemberRoll(store, ORGANIZER_NPUB, KEY)!.members]).toEqual([M2]);
+  });
+
+  it('defers (undefined) without the community key', () => {
+    const store = new InMemoryEventStore();
+    store.save(rollDoc([M1]));
+    expect(currentMemberRoll(store, ORGANIZER_NPUB, null)).toBeUndefined();
+  });
+
+  it('ignores a roll doc not authored by the organizer', () => {
+    const store = new InMemoryEventStore();
+    store.save(rollDoc([M1], {author: M2}));
+    expect(currentMemberRoll(store, ORGANIZER_NPUB, KEY)).toBeUndefined();
+  });
+
+  it('defers on wrong key, garbage ciphertext, unknown version, and empty members', () => {
+    const store = new InMemoryEventStore();
+    store.save(rollDoc([M1], {key: mintGroupKey()}));
+    expect(currentMemberRoll(store, ORGANIZER_NPUB, KEY)).toBeUndefined();
+
+    const store2 = new InMemoryEventStore();
+    store2.save(appData(ORGANIZER_HEX, ORGANIZER_D_MEMBER_ROLL, [], 'not-nip44'));
+    expect(currentMemberRoll(store2, ORGANIZER_NPUB, KEY)).toBeUndefined();
+
+    const store3 = new InMemoryEventStore();
+    store3.save(rollDoc([M1], {v: 2}));
+    expect(currentMemberRoll(store3, ORGANIZER_NPUB, KEY)).toBeUndefined();
+
+    const store4 = new InMemoryEventStore();
+    store4.save(rollDoc(['junk-only']));
+    expect(currentMemberRoll(store4, ORGANIZER_NPUB, KEY)).toBeUndefined();
+  });
+});

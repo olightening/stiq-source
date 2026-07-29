@@ -528,6 +528,20 @@ func categorize(event *nostr.Event) category {
 		return catComment
 	case 42, 1311:
 		return catChannel
+	// 1984 (reports + every moderator stiq-action). A MEMBER report used to be completely
+	// unrate-limited: policy.checkModAction returns early for a non-moderator, and this switch had
+	// no 1984 case, so it fell to catNone = unlimited. Only the per-event size/tag weight gate stood
+	// between one bound member and unbounded storage growth (audit 2026-07-29, §2.3 / risk 2).
+	//
+	// Deliberately the CHANNEL/management window rather than a new one — the same call already made
+	// for NIP-29 management and 31923 above, for the same reason. At the 50/day default it is far
+	// above anything a real member does (who reports fifty posts a day?) while bounding a flood, and
+	// MODERATORS are exempt by default (limits.ExemptModerators, checked in RejectEvent before the
+	// per-user windows), so bulk moderation is untouched. Their own separate stiq:mod-limits caps
+	// still apply. Note this bounds STORAGE only: the report THRESHOLD counts distinct reporters, so
+	// a single-npub flood could never move a moderation verdict either way.
+	case 1984:
+		return catChannel
 	// NIP-29 group management + creation (9000-9009, 9021/9022): each accepted event rewrites the
 	// whole groups.json (marshal + fsync) and re-signs group state, yet none were rate-limited (they
 	// returned catNone). Cap them with the per-user channel window so a single bound member can't

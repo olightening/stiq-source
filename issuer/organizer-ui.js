@@ -536,7 +536,31 @@ async function loadMods() {
   var r = await fetch('/api/moderators');
   var d = await r.json();
   mods = d.moderators;
+  renderRosterState(d);
   renderMods();
+}
+
+/**
+ * Surface the one dangerous state this tab can be in: moderators.json no longer matches the roster
+ * the relay was last told, so a "removed" moderator still has full power. Add/remove publish
+ * automatically now, but a publish can still fail (relay down mid-edit) — and silence there is what
+ * made the old decoupled workflow a revocation trap.
+ */
+function renderRosterState(d) {
+  var el = document.getElementById('roster-stale');
+  if (!el) return;
+  if (d && d.unpublished) {
+    el.textContent = '⚠ The saved roster has NOT reached the relay. Until you publish, the relay and '
+      + 'every client still honour the last published roster — anyone you just removed keeps full '
+      + 'moderator power. Use “Publish roster to relay” below.';
+    el.style.display = 'block';
+  } else if (d && d.ok === false) {
+    el.textContent = '⚠ Roster publish failed: ' + (d.message || 'unknown error') + '. Retry with '
+      + '“Publish roster to relay” below.';
+    el.style.display = 'block';
+  } else {
+    el.style.display = 'none';
+  }
 }
 
 async function addMod() {
@@ -554,6 +578,7 @@ async function addMod() {
     if (d.error) throw new Error(d.error);
     mods = d.moderators;
     document.getElementById('npub-in').value = '';
+    renderRosterState(d);
     renderMods();
   } catch (e) {
     errEl.textContent = e.message;
@@ -565,6 +590,7 @@ async function removeMod(npub) {
   var r = await fetch('/api/moderators/' + encodeURIComponent(npub), { method: 'DELETE' });
   var d = await r.json();
   mods = d.moderators;
+  renderRosterState(d);
   renderMods();
 }
 
@@ -717,6 +743,7 @@ async function publishRoster() {
     out.textContent = (d.ok ? '✓ ' : '⚠ ') + (d.message || d.error || 'done')
       + ' — event id ' + (d.event ? d.event.id.slice(0, 12) + '…' : '?');
     out.style.display = 'block';
+    renderRosterState(d);
   } catch (e) {
     out.className = 'err'; out.textContent = e.message; out.style.display = 'block';
   } finally {

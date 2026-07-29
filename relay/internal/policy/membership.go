@@ -1225,8 +1225,20 @@ func (m *Membership) handleBinding(event *nostr.Event) (reject bool, msg string)
 	}
 	id := membership.TokenID(cred.Token)
 	// Idempotent fast-path: this device already completed its binding (e.g. an earlier attempt whose OK
-	// frame was lost in transit). It is already a member, so admit without touching the spent-set.
+	// frame was lost in transit). It is already a member, so the event changes nothing — but the
+	// credential it presents must still be BURNED (R2c). Returning here without spending left a member
+	// holding a SECOND invite able to bind once, re-present the spare, have it accepted, and keep it
+	// fully usable to mint ANOTHER npub later — which is exactly the scarcity premise the member roll
+	// rests on (one enrolled npub per organizer-issued invite).
+	//
+	// Bind is safe to call here: for a credential this same pubkey already owns it converges
+	// idempotently, and boundAt is preserved (markBoundAt), so re-binding never resets the member's
+	// newcomer seniority. ErrTokenSpent means a DIFFERENT device owns the presented credential — a
+	// replay that mints nothing, since this npub is already bound — so admit either way. An I/O
+	// failure likewise leaves membership unchanged; the credential simply stays unburned, exactly as
+	// it always did before this.
 	if m.store.IsBound(event.PubKey) {
+		_ = m.store.Bind(id, event.PubKey)
 		return false, ""
 	}
 	// Bind is the authoritative double-spend guard: it re-checks spent-ness under its write lock and

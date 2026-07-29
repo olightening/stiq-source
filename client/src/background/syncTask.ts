@@ -124,6 +124,7 @@ export async function runBackgroundSync(): Promise<void> {
   // Resolve the active community + relay (set at enrollment). Nothing community-specific is baked
   // in, so an un-enrolled device has no relay — bail rather than bring Tor up for nothing.
   const communities = secureStorage ? new CommunityStore(secureStorage) : null;
+  const activeCommunity = (await communities?.active()) ?? null;
   const activeCid = (await communities?.activeId()) ?? undefined;
   const relayUrl = communities
     ? await communities.activeRelayUrl(RELAY_ONION_WS)
@@ -131,6 +132,13 @@ export async function runBackgroundSync(): Promise<void> {
   if (!relayUrl) {
     return;
   }
+  // The organizer's pubkey, so the plan can include the org-config subscription (below). Without it
+  // a phone that only ever background-syncs never refreshes the moderator roster, permissions or
+  // mod-limits, and can go on honouring a REVOKED moderator's hides indefinitely (07-15 audit gap 2,
+  // still open at the 07-29 re-audit). Enforcement authority is unaffected — the relay rejects a
+  // revoked moderator's writes regardless — but what this device RENDERS is client-side, and
+  // moderation state is exactly the config that must not go stale.
+  const organizerPubkey = activeCommunity?.organizerPubkey;
 
   // Resolve the ACTIVE identity slot BEFORE opening the store: the event cache is now per-(cid,
   // ACCOUNT) (finding #4), so background sync must write the ACTIVE account's OWN file — the exact
@@ -353,7 +361,11 @@ export async function runBackgroundSync(): Promise<void> {
         // over Tor as part of FEED_KINDS could never raise a notification anyway — it only warmed the
         // cache, at full unscoped cost, for every channel in the community.
         relayRef.current = new RelayClient(socket, store, {
-          plan: createFeedAndDmPlan({store, getMyPubkey: () => myPubkey}),
+          plan: createFeedAndDmPlan({
+            store,
+            getMyPubkey: () => myPubkey,
+            getOrganizerPubkey: () => organizerPubkey,
+          }),
         });
         relayRef.current.onEvent(e => collected.push(e));
         relayRef.current.onSynced(done);

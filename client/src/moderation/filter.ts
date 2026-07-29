@@ -20,7 +20,7 @@ import {isStiqComment} from '../feed/comments';
 import {KIND_VOICE_MESSAGE} from '../feed/voice';
 import {autoHiddenPosts, type AutoModConfig} from './autoModeration';
 import {advisoryOverlay, type AdvisoryOverlay} from './advisory';
-import {resolveAuthorPubkey, isUnattributedBlindPost} from '../blind/identity';
+import {resolveAuthorPubkey, isUnattributedBlindPost, isOffRollBlindPost} from '../blind/identity';
 import {detectDoubleSpends} from '../blind/doubleSpend';
 
 export interface ModerationEntry {
@@ -168,6 +168,49 @@ export function isModeratorHidden(event: Event, hides: ModeratorHides): boolean 
   return hides.reports.has(event.id) || hides.mutedAuthors.has(resolveAuthorPubkey(event));
 }
 
+/**
+ * Everything the community-wide hide decision needs.
+ *
+ * `filterFeed` can't use a boolean — it must know WHICH moderator event hid each item so the mod
+ * log can attribute it. Surfaces that only need yes/no (threads) use this context with
+ * {@link isCommunityHidden}, so the two paths consult the SAME maps and can't drift apart again.
+ *
+ * They had drifted: `moderatedThread` consulted only `hides`, so a standing `log-user` rule (which
+ * carries no `e` tag and therefore never enters the hide map), an author `ban`, and every
+ * `log-batch` id past the first all stayed fully visible in every thread a member opened — the two
+ * most severe moderator actions leaking in the highest-engagement surface (audit 2026-07-29, D1).
+ */
+export interface CommunityHideContext {
+  /** Plain moderator hides: kind-1984 hide reports + kind-10000 mute lists. */
+  hides: ModeratorHides;
+  /** Advisory routing: `log-user` standing rules and `log`/`log-batch` event directives. */
+  advisory?: AdvisoryOverlay;
+  /** Real author pubkeys under an active moderator ban. */
+  bannedAuthors?: ReadonlySet<string>;
+  /** Ids auto-hidden by the organizer's report threshold, pending moderator review. */
+  pendingReview?: ReadonlySet<string>;
+}
+
+/**
+ * Whether a post/comment is hidden community-wide right now — the same routing `filterFeed`
+ * applies, minus the attribution bookkeeping. Author-scoped rules match the REAL author (decrypted
+ * from a blind event's attribution), so they follow an author across the throwaway key each blind
+ * event is signed with. Every optional context member is a pure widening: omit them all and this
+ * is exactly `isModeratorHidden`.
+ */
+export function isCommunityHidden(event: Event, ctx: CommunityHideContext): boolean {
+  if (ctx.hides.reports.has(event.id)) return true;
+  if (ctx.advisory?.loggedEvents.has(event.id)) return true;
+  if (ctx.pendingReview?.has(event.id)) return true;
+  // Resolve the real author ONCE for all three author-scoped checks.
+  const author = resolveAuthorPubkey(event);
+  return (
+    ctx.hides.mutedAuthors.has(author) ||
+    (ctx.advisory?.loggedAuthors.has(author) ?? false) ||
+    (ctx.bannedAuthors?.has(author) ?? false)
+  );
+}
+
 function entryFor(post: Event, report: Event): ModerationEntry {
   return {
     post,
@@ -263,15 +306,21 @@ export function buildModeratedFeed(
   const advisory = advisoryOverlay(reports, pk => isModerator(pk, npubs));
   const feed = filterFeed(posts, reports, npubs, moderatorMutedAuthors(store, npubs), advisory);
   // Drop unattributable blind posts (token spent but no member-signed attestation) — a patched
-  // client evading ban-author. They surface in the Mod Log via buildModLog. Deferred when the
-  // community key isn't loaded (isUnattributedBlindPost returns false), so a legit feed isn't emptied.
-  feed.visible = feed.visible.filter(p => !isUnattributedBlindPost(p));
+  // client evading ban-author — AND off-roll ones (valid attestation, but the npub was never bound
+  // on the relay: the fresh-key rotate-past-a-ban / sock-puppet shape). Both surface in the Mod Log
+  // via buildModLog under distinct labels. Each predicate defers to false when its prerequisite
+  // isn't loaded (community key / member roll), so a legit feed is never emptied.
+  feed.visible = feed.visible.filter(p => !isUnattributedBlindPost(p) && !isOffRollBlindPost(p));
   if (autoCfg) {
     const auto = autoHiddenPosts(store, autoCfg, npubs);
     const banned = autoCfg.bannedAuthors;
-    if (auto.size > 0 || (banned && banned.size > 0)) {
+    // `pendingReview`: enough DISTINCT members reported the item to cross the organizer's
+    // reportThreshold, so it is auto-hidden pending a moderator's decision (queue.ts). Computed by
+    // the caller, restore-overridable, and empty whenever no threshold is configured.
+    const pending = autoCfg.pendingReview;
+    if (auto.size > 0 || (banned && banned.size > 0) || (pending && pending.size > 0)) {
       feed.visible = feed.visible.filter(
-        p => !auto.has(p.id) && !banned?.has(resolveAuthorPubkey(p)),
+        p => !auto.has(p.id) && !pending?.has(p.id) && !banned?.has(resolveAuthorPubkey(p)),
       );
     }
   }

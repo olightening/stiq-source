@@ -1,7 +1,7 @@
 import {generateSecretKey, getPublicKey, type Event} from 'nostr-tools/pure';
 import {nip19} from 'nostr-tools';
 import {InMemoryEventStore} from '../nostr/store';
-import {pendingReports} from './queue';
+import {pendingReports, thresholdHiddenTargets} from './queue';
 import {DEFAULT_REASONS, type ReasonsConfig} from './reasons';
 import {buildLogUser, buildUnlogUser, buildLogEvent} from './advisory';
 import {assembleBlindEvent} from '../blind/blindPost';
@@ -172,5 +172,99 @@ describe('pendingReports', () => {
       const unlockedRow = pendingReports(s, mods, DEFAULT_REASONS, 1000).find(r => r.targetId === sealed.id);
       expect(unlockedRow?.snippet).toBe('a members-only reported body');
     });
+  });
+});
+
+/**
+ * Report-threshold auto-hide (audit 2026-07-29, defect D3).
+ *
+ * `reasons.ts` has always documented reportThreshold as "once that many DISTINCT members report one
+ * item it is auto-hidden pending moderator review", and prod runs a threshold of 5 — but nothing
+ * ever hid anything. `thresholdReached` reached only the queue's sort order and a console pill; a
+ * repo-wide grep found zero references in any feed path. This is the suppression half.
+ */
+describe('thresholdHiddenTargets', () => {
+  const memberC = getPublicKey(generateSecretKey());
+  const threshold = (n: number): ReasonsConfig => ({...DEFAULT_REASONS, reportThreshold: n});
+  function modRestore(target: string, at: number): Event {
+    return {
+      id: `restore-${target}-${at}`,
+      pubkey: modPub,
+      created_at: at,
+      kind: 1984,
+      tags: [['e', target], ['stiq-action', 'restore']],
+      content: '',
+      sig: 's',
+    };
+  }
+
+  it('hides a target once DISTINCT reporters reach the threshold', () => {
+    const s = storeWith(post('p1'), memberReport('p1', memberA, 200), memberReport('p1', memberB, 210));
+    expect([...thresholdHiddenTargets(s, mods, threshold(2))]).toEqual(['p1']);
+  });
+
+  it('does not hide below the threshold', () => {
+    const s = storeWith(post('p1'), memberReport('p1', memberA, 200));
+    expect(thresholdHiddenTargets(s, mods, threshold(2)).size).toBe(0);
+  });
+
+  it('counts DISTINCT members — one member reporting repeatedly never crosses it', () => {
+    const s = storeWith(
+      post('p1'),
+      memberReport('p1', memberA, 200),
+      memberReport('p1', memberA, 210, 'harassment'),
+      memberReport('p1', memberA, 220, 'off-topic'),
+    );
+    expect(thresholdHiddenTargets(s, mods, threshold(2)).size).toBe(0);
+  });
+
+  it('is disabled at threshold 0 (the default) no matter how many reports land', () => {
+    const s = storeWith(
+      post('p1'),
+      memberReport('p1', memberA, 200),
+      memberReport('p1', memberB, 210),
+      memberReport('p1', memberC, 220),
+    );
+    expect(thresholdHiddenTargets(s, mods, DEFAULT_REASONS).size).toBe(0);
+    expect(DEFAULT_REASONS.reportThreshold).toBe(0);
+  });
+
+  it('ignores MODERATOR reports — one moderator must not masquerade as member consensus', () => {
+    const s = storeWith(post('p1'), memberReport('p1', memberA, 200), modHide('p1', 210));
+    expect(thresholdHiddenTargets(s, mods, threshold(2)).size).toBe(0);
+  });
+
+  it('ignores non-hide stiq-actions (ban/lock/retag carry their own semantics)', () => {
+    const s = storeWith(post('p1'), memberReport('p1', memberA, 200), modBan(AUTHOR, 210));
+    expect(thresholdHiddenTargets(s, mods, threshold(2)).size).toBe(0);
+  });
+
+  it('a moderator RESTORE overrides the auto-hide, and stays final as more reports arrive', () => {
+    const base = [post('p1'), memberReport('p1', memberA, 200), memberReport('p1', memberB, 210)];
+    expect([...thresholdHiddenTargets(storeWith(...base), mods, threshold(2))]).toEqual(['p1']);
+
+    const restored = storeWith(...base, modRestore('p1', 220));
+    expect(thresholdHiddenTargets(restored, mods, threshold(2)).size).toBe(0);
+
+    // A later brigade cannot re-hide what a moderator already cleared: the restore remains the
+    // latest MODERATOR visibility action, which is what restoredIds keys on.
+    const brigaded = storeWith(...base, modRestore('p1', 220), memberReport('p1', memberC, 230));
+    expect(thresholdHiddenTargets(brigaded, mods, threshold(2)).size).toBe(0);
+  });
+
+  it('tracks each target independently', () => {
+    const s = storeWith(
+      post('p1'),
+      post('p2'),
+      memberReport('p1', memberA, 200),
+      memberReport('p1', memberB, 205),
+      memberReport('p2', memberA, 210),
+    );
+    expect([...thresholdHiddenTargets(s, mods, threshold(2))]).toEqual(['p1']);
+  });
+
+  it('works on comments as well as posts', () => {
+    const s = storeWith(comment('c1'), memberReport('c1', memberA, 200), memberReport('c1', memberB, 210));
+    expect([...thresholdHiddenTargets(s, mods, threshold(2))]).toEqual(['c1']);
   });
 });

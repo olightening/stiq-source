@@ -160,8 +160,21 @@ android {
         //     the header/compose avatars read the runtime's own store instead of a feed-derived
         //     value that went stale for zero-post viewers, and an announce swallowed while the
         //     key was locked is retried on the next unlock.
-        versionCode 17
-        versionName "2.4-parity"
+        // vc18 "2.5-moderation": the member roll + the 2026-07-29 moderation audit.
+        // (1) member-roll enforcement — the organizer publishes the relay's authoritative
+        //     bound-npub set as an encrypted kind-30078 doc, and a blind post whose attribution
+        //     resolves OFF that roll is hidden and untallied exactly like an unattributed one.
+        //     Closes rotate-to-a-fresh-npub ban evasion, and a live sock-puppet vote-inflation
+        //     bug with it. Deferral is the safety property: no roll loaded ⇒ zero enforcement.
+        // (2) threads now enforce what the feed always did — bans, standing log-user rules, and
+        //     every id of a log-batch rather than just the first (audit D1); mod-log rows name the
+        //     real author of blind content instead of the throwaway signer (D2); and the
+        //     organizer's reportThreshold actually suppresses, restorably (D3).
+        // (3) moderator quick actions pre-check scope and rate cap instead of firing into a relay
+        //     rejection, and headless background syncs refresh org config so a phone that only
+        //     ever background-syncs stops honouring a REVOKED moderator.
+        versionCode 18
+        versionName "2.5-moderation"
 
         /* RN developer support (red box, dev menu, HMR, and the Metro dev-server websocket).
          *

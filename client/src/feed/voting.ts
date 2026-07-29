@@ -9,7 +9,7 @@ import {Kind} from '../nostr/events';
 import type {EventStore} from '../nostr/store';
 import type {UnsignedEvent} from '../keys/keystore';
 import type {Signer} from './compose';
-import {resolveAuthorPubkey} from '../blind/identity';
+import {resolveAuthorPubkey, isOffRollBlindPost} from '../blind/identity';
 import {resolveContent} from '../blind/blindPost';
 
 export type VoteDirection = 'up' | 'down';
@@ -137,6 +137,12 @@ export function scoreReactions(reactions: Event[]): Score {
   const latest = new Map<string, Event>();
   for (const reaction of reactions) {
     if (reaction.kind !== Kind.Reaction) {
+      continue;
+    }
+    // Off-roll votes never count (member-roll enforcement): the attribution layer accepts any
+    // validly-signed attestation, so one member could otherwise mint unlimited fresh keys and
+    // vote once per key. Defers to counting-as-today while no roll is loaded.
+    if (isOffRollBlindPost(reaction)) {
       continue;
     }
     const voter = resolveAuthorPubkey(reaction);

@@ -44,6 +44,17 @@ func main() {
 	if len(cfg.IssuerPublicKeys) == 0 {
 		log.Fatal("config: issuer_public_keys is empty; refusing to start an unverifiable relay")
 	}
+	// An explicit allowed_kinds fully REPLACES DefaultAllowedKinds — deliberately, so an operator who
+	// removed a kind on purpose keeps it removed. The cost is that every kind the app gains needs a
+	// manual edit on each such deployment, and the symptom of forgetting is a feature that silently
+	// does nothing on THIS relay while working everywhere else. Name what is missing rather than let
+	// it be discovered in the field.
+	if missing := config.MissingDefaultKinds(cfg); len(missing) > 0 {
+		log.Printf("config: WARNING — allowed_kinds is set explicitly and omits %d default kind(s): %v. "+
+			"An explicit list REPLACES the defaults (it is not merged), so events of these kinds are "+
+			"REJECTED on this relay. If that is intentional, ignore this; otherwise add them to %s.",
+			len(missing), missing, path)
+	}
 	// Fail closed: never bind a public interface. The relay is reachable only via Tor.
 	if os.Getenv("STIQ_RELAY_ALLOW_PUBLIC_BIND") != "1" {
 		if err := config.LoopbackOnly(cfg.Listen); err != nil {

@@ -581,3 +581,38 @@ func TestUncappedCategoryAndPrune(t *testing.T) {
 		t.Fatalf("stale buckets should have been pruned: %s", msg)
 	}
 }
+
+// Member reports (kind-1984) used to be COMPLETELY unrate-limited: policy.checkModAction returns
+// early for a non-moderator and categorize() had no 1984 case, so they fell to catNone. Only the
+// per-event size/tag weight gate stood between one bound member and unbounded storage growth
+// (audit 2026-07-29, §2.3 / operational risk 2). They are now counted under the channel/management
+// window — the same call already made for NIP-29 management and 31923.
+func TestReportsAreRateLimitedButModeratorsAreNot(t *testing.T) {
+	if got := categorize(ev(1984, "x")); got != catChannel {
+		t.Fatalf("kind 1984: categorize = %v, want catChannel (a report flood must be bounded)", got)
+	}
+
+	limits := policy.Limits{Channel: policy.Window{Daily: 2}, ExemptModerators: true}
+	src := &fakeSource{limits: limits, mods: map[string]struct{}{"themod": {}}}
+	l := New(src)
+	l.now = func() time.Time { return time.Unix(1000, 0) }
+
+	// A member gets a generous but finite allowance.
+	for i := 0; i < 2; i++ {
+		if reject, _ := l.RejectEvent(context.Background(), ev(1984, "member")); reject {
+			t.Fatalf("report %d from a member should pass", i+1)
+		}
+	}
+	if reject, _ := l.RejectEvent(context.Background(), ev(1984, "member")); !reject {
+		t.Fatal("a member's report flood must eventually be rejected")
+	}
+
+	// A MODERATOR is exempt, so bulk moderation is untouched — the whole point of picking a category
+	// that respects ExemptModerators rather than bolting on an unconditional cap. Their own
+	// stiq:mod-limits caps still apply, enforced separately in policy.checkModAction.
+	for i := 0; i < 10; i++ {
+		if reject, msg := l.RejectEvent(context.Background(), ev(1984, "themod")); reject {
+			t.Fatalf("moderator action %d was rate-limited (%s); bulk moderation must not be capped here", i+1, msg)
+		}
+	}
+}

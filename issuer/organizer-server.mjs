@@ -13,7 +13,7 @@
 
 import {createServer} from 'http';
 import {connect as netConnect} from 'net';
-import {readFileSync, writeFileSync, renameSync, existsSync, chmodSync, accessSync, constants as FS} from 'fs';
+import {readFileSync, writeFileSync, renameSync, existsSync, chmodSync, accessSync, statSync, constants as FS} from 'fs';
 import {fileURLToPath, pathToFileURL} from 'url';
 import {dirname, join} from 'path';
 import {timingSafeEqual, randomBytes, createHash} from 'crypto';
@@ -24,7 +24,9 @@ import {issueInviteCredential, normalizeEntry, summarizeInvite} from './invite-i
 import {createContentKeyCustody, buildContentEpochDoc} from './contentEpochKeys.mjs';
 import {startContentEpochWatcher} from './contentEpochWatcher.mjs';
 import {organizerIdentity, signConfig, signRoster, signLimits, signPermissions, signBridges, signMirrors, publish, publishWithRetry, fetchEvents, encodeNpub, decodeNpub, verifyReaderAuth} from './organizer-nostr.mjs';
+import {rosterUnpublished as rosterDiffers} from './roster.mjs';
 import {buildArchive, collectArtifactPaths} from './archive.mjs';
+import {readBoundSet, rollFingerprint, buildRollPayload, encryptRoll} from './member-roll.mjs';
 import {SPACE_OFFER_D_PREFIX, latestOffersByGid, newestOfferOf, resolveOfferedGroup, offeredGroupFromOffer} from './log-offer.mjs';
 import {sanitizeLogPage} from './log-page.mjs';
 
@@ -534,6 +536,35 @@ function loadMods() {
   }
 }
 function saveMods(list) { writeJsonAtomic(MODS_PATH, list); }
+
+/**
+ * The roster as last SUCCESSFULLY published to the relay (null = nothing published this process
+ * lifetime). Everything downstream — the relay's authority checks, every client's hide/ban fold —
+ * trusts the last PUBLISHED roster, never moderators.json. Tracking the two separately is what lets
+ * the dashboard say so out loud.
+ */
+let lastPublishedMods = null;
+
+/**
+ * Sign + publish the current roster. Called automatically on every add/remove, because the two
+ * used to be decoupled: `DELETE /api/moderators/:npub` rewrote moderators.json and stopped there,
+ * so a "removed" moderator silently kept FULL power — relay-accepted actions and client-honored
+ * hides — until an operator happened to click "⇪ Publish roster" (no auto-trigger, no reminder, no
+ * indicator anywhere). Every OTHER config tab saves+signs+publishes in one round trip. That gap was
+ * ranked the highest-likelihood real-world moderation-integrity incident in the 2026-07-29 audit;
+ * a failed revocation is the one config change where "saved but not published" is dangerous.
+ */
+async function publishRoster(mods) {
+  const event = signRoster(mods);
+  const result = await publish(event, RELAY_WS);
+  if (result.ok) lastPublishedMods = [...mods];
+  return {result, event};
+}
+
+/** True when moderators.json differs from what the relay was last told (a revocation in limbo). */
+function rosterUnpublished(mods) {
+  return rosterDiffers(lastPublishedMods, mods);
+}
 
 // ── Community relay mirrors ──────────────────────────────────────────────────
 // The organizer's own additional relays for the community, published as a kind-30078 d=stiq:mirrors
@@ -2447,7 +2478,8 @@ const server = createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && url.pathname === '/api/moderators') {
-    return json(res, {moderators: loadMods()});
+    const mods = loadMods();
+    return json(res, {moderators: mods, unpublished: rosterUnpublished(mods)});
   }
 
   if (req.method === 'POST' && url.pathname === '/api/moderators') {
@@ -2460,23 +2492,36 @@ const server = createServer(async (req, res) => {
       }
       const mods = loadMods();
       if (!mods.includes(npub)) { mods.push(npub); saveMods(mods); }
-      return json(res, {moderators: mods});
+      // Save AND publish, like every other config tab (see publishRoster's note).
+      const {result} = await publishRoster(mods);
+      return json(res, {moderators: mods, ok: result.ok, message: result.message, unpublished: rosterUnpublished(mods)});
     } catch (e) { return fail(res, e); }
   }
 
   if (req.method === 'DELETE' && url.pathname.startsWith('/api/moderators/')) {
-    const npub = decodeURIComponent(url.pathname.slice('/api/moderators/'.length));
-    const mods = loadMods().filter(n => n !== npub);
-    saveMods(mods);
-    return json(res, {moderators: mods});
+    try {
+      const npub = decodeURIComponent(url.pathname.slice('/api/moderators/'.length));
+      const mods = loadMods().filter(n => n !== npub);
+      saveMods(mods);
+      // A REVOCATION that never reaches the relay leaves the removed moderator in full power, so
+      // this publish is the point of the request — not an optional follow-up step.
+      const {result} = await publishRoster(mods);
+      if (!result.ok) {
+        console.error('[organizer] WARNING: moderator ' + npub + ' was removed from ' + MODS_PATH +
+          ' but the roster PUBLISH failed (' + result.message + '). They keep full moderator power ' +
+          'until a roster publish succeeds — retry from the Moderators tab.');
+      }
+      return json(res, {moderators: mods, ok: result.ok, message: result.message, unpublished: rosterUnpublished(mods)});
+    } catch (e) { return fail(res, e); }
   }
 
-  // Sign + publish the current moderator roster as a kind-30078 stiq:moderators event.
+  // Sign + publish the current moderator roster as a kind-30078 stiq:moderators event. Still here
+  // as the explicit retry after an add/remove whose automatic publish failed (e.g. relay down).
   if (req.method === 'POST' && url.pathname === '/api/moderators/publish') {
     try {
-      const event  = signRoster(loadMods());
-      const result = await publish(event, RELAY_WS);
-      return json(res, {ok: result.ok, message: result.message, event});
+      const mods = loadMods();
+      const {result, event} = await publishRoster(mods);
+      return json(res, {ok: result.ok, message: result.message, event, unpublished: rosterUnpublished(mods)});
     } catch (e) { return fail(res, e, 500); }
   }
 
@@ -2834,6 +2879,10 @@ const server = createServer(async (req, res) => {
         // defined below) — an operator can see whether the fleet's current epoch actually reached the
         // relay, same shape as tokenKeysPublish above.
         contentEpochPublish: {...contentEpochPublishStatus},
+        // Member-roll (ban-evasion fix): last outcome of the stiq:member-roll broadcast
+        // (publishMemberRoll, defined below), same shape as tokenKeysPublish. memberCount is the
+        // size of the last roll actually published this run (null until one succeeds).
+        memberRollPublish: {...memberRollPublishStatus},
       };
     };
 
@@ -3322,6 +3371,9 @@ startMailbox({
   onOpen: () => {
     publishTokenKeys().catch(e => console.error('[organizer] token-keys publish failed (reconnect):', e?.message || e));
     publishContentEpoch().catch(e => console.error('[organizer] content-epoch publish failed (reconnect):', e?.message || e));
+    // force: a reconnect may follow a relay wipe/restore — converge the roll even when the
+    // fingerprint says "unchanged since we last published".
+    publishMemberRoll({force: true}).catch(e => console.error('[organizer] member-roll publish failed (reconnect):', e?.message || e));
   },
 })
   .then(handle => { mailboxHandle = handle; })
@@ -3375,7 +3427,13 @@ async function publishContentEpoch() {
 // purpose key added after they enrolled — notably swk/space-write — AND so a member who enrolled from
 // a SHORT (key-less) join code picks up all seven live. Fire-and-forget; never blocks startup — see
 // publishTokenKeys itself for the bounded retry that runs before this settles.
+// NOTE: this call sits ABOVE `tokenKeysPublishStatus`, and only gets away with it because the
+// function's first touch of that binding happens AFTER its first `await` — by which point module
+// evaluation has finished and the temporal dead zone has passed. Add a synchronous read of any
+// module-level `let` before that await and this throws on every boot. Prefer the
+// publishContentEpoch/publishMemberRoll shape (declare state, then call, then define).
 publishTokenKeys().catch(e => console.error('[organizer] token-keys publish failed:', e?.message || e));
+// (The member roll's boot publish lives with its own state, further down — see the note there.)
 // Broadcast every purpose-specific issuer PUBLIC key as a kind-30078 config doc (d=stiq:token-keys),
 // applied by the client like any other org-config d-tag. WHY: an issuer key used to reach a member
 // ONLY inside their join code, parsed once at enrollment. When a new purpose key is added later
@@ -3397,6 +3455,85 @@ publishTokenKeys().catch(e => console.error('[organizer] token-keys publish fail
 // Callers (startup above, and the /api/activation POST handler) stay fire-and-forget so a slow/
 // unreachable relay never delays startup or the HTTP response; only this function's own await chain
 // (bounded to a handful of attempts/seconds) waits, and it never throws.
+// ── Member roll (ban-evasion fix, 2026-07-29) ─────────────────────────────────────
+// Broadcast the relay's authoritative bound-npub set as an organizer-signed, community-key-
+// encrypted kind-30078 doc (d=stiq:member-roll). Clients treat a blind post whose attribution
+// resolves to an npub NOT on this roll exactly like an unattributed one (hidden + mod-logged),
+// closing the rotate-to-a-fresh-npub ban-evasion path and the sock-puppet vote-inflation hole.
+//
+// Source of truth is the relay's membership file (same box, same user), NEVER kind-9011 events:
+// manual binds exist, 9011s are self-deletable without unbinding, and the relay now refuses to
+// serve them at the wire. GATED on TOKEN_DOMAIN_SEP: with a shared enrollment/posting key a drawn
+// posting token doubles as a binding credential (relay bindingKeys() falls back to the general
+// issuers), so fresh npubs would be bindable at posting-token prices and the roll's scarcity
+// premise would be false — refusing to publish keeps clients in their deferred (no-enforcement)
+// state rather than enforcing a lie.
+//
+// FAIL-CLOSED: a read/parse failure or an EMPTY bound set skips the publish and keeps the last-
+// good doc on the relay (replaceable — absent a new publish, members keep enforcing yesterday's
+// roll; a wrongly-empty roll would hide EVERY member's posts fleet-wide). Change-detection via
+// rollFingerprint keeps the 60s poll cheap and the relay quiet; startup/reconnect publish
+// unconditionally (idempotent replaceable doc) so a wiped relay converges.
+const MEMBERSHIP_FILE = process.env.STIQ_MEMBERSHIP_FILE ?? '/var/lib/stiq-relay/membership.json';
+let memberRollNip44 = null; // lazy-loaded client nostr-tools bundle; null ⇒ publishing disabled
+try {
+  const base = join(__dirname, '../client/node_modules/nostr-tools/lib/esm');
+  memberRollNip44 = (await import(pathToFileURL(join(base, 'nip44.js')).href)).v2;
+} catch (e) {
+  console.error('[organizer] member-roll disabled — could not load nip44 (' + (e?.message || e) + '); run npm install for ../client');
+}
+let memberRollPublishStatus = {attempted: false, ok: null, attempts: 0, message: '', at: null, memberCount: null};
+let lastPublishedRollFingerprint = null;
+// Boot publish (idempotent replaceable doc; force past the fingerprint skip so a fresh process
+// always converges the relay), then kept live by the 60s membership-file poll below, the mailbox
+// reconnect hook, and the 6h backstop timer.
+//
+// It MUST sit here, below `memberRollNip44`, not up with the other boot publishes. `let` bindings
+// are in their temporal dead zone until evaluated, and only the `async function` is hoisted — so
+// calling this earlier in module order threw `Cannot access 'memberRollNip44' before initialization`
+// on every single boot. The roll still reached the relay (the mailbox onOpen hook fired later and
+// forced one), which is exactly why this hid in plain sight: correct doc, correct member count, an
+// error line every startup, and the "publish on boot" guarantee quietly not holding.
+publishMemberRoll({force: true}).catch(e => console.error('[organizer] member-roll publish failed:', e?.message || e));
+async function publishMemberRoll({force = false} = {}) {
+  if (!TOKEN_DOMAIN_SEP) return; // see gate rationale above — never advertise a roll separation can't back
+  if (!memberRollNip44) return;
+  let members;
+  try {
+    members = readBoundSet(MEMBERSHIP_FILE);
+  } catch (e) {
+    memberRollPublishStatus = {attempted: true, ok: false, attempts: 0, message: String(e?.message || e), at: Date.now(), memberCount: null};
+    console.error('[organizer] member-roll publish skipped (fail-closed): ' + (e?.message || e));
+    return;
+  }
+  const fingerprint = rollFingerprint(members);
+  if (!force && fingerprint === lastPublishedRollFingerprint) return; // unchanged — keep the relay quiet
+  if (members.length > 400) {
+    console.warn(`[organizer] member-roll is large (${members.length} members) — approaching doc-size limits; plan sharding before ~1000`);
+  }
+  const event = signConfig('stiq:member-roll', [], encryptRoll(
+    buildRollPayload(members, Math.floor(Date.now() / 1000)),
+    communityKeyB64,
+    memberRollNip44,
+  ));
+  const result = await publishWithRetry(event, RELAY_WS);
+  memberRollPublishStatus = {
+    attempted: true,
+    ok: result.ok,
+    attempts: result.attempts,
+    message: result.message,
+    at: Date.now(),
+    memberCount: result.ok ? members.length : memberRollPublishStatus.memberCount,
+  };
+  if (result.ok) {
+    lastPublishedRollFingerprint = fingerprint;
+    console.log(`[organizer] member-roll published (${members.length} members) after ${result.attempts} attempt(s): ${result.message}`);
+  } else {
+    console.error(`[organizer] member-roll publish FAILED after ${result.attempts} attempt(s): ${result.message}`);
+  }
+  return result;
+}
+
 let tokenKeysPublishStatus = {attempted: false, ok: null, attempts: 0, message: '', at: null};
 async function publishTokenKeys() {
   if (!TOKEN_DOMAIN_SEP) return;
@@ -3447,8 +3584,29 @@ const REPUBLISH_INTERVAL_MS = 6 * 3600 * 1000;
 const republishTimer = setInterval(() => {
   publishTokenKeys().catch(e => console.error('[organizer] token-keys periodic republish failed:', e?.message || e));
   publishContentEpoch().catch(e => console.error('[organizer] content-epoch periodic republish failed:', e?.message || e));
+  publishMemberRoll({force: true}).catch(e => console.error('[organizer] member-roll periodic republish failed:', e?.message || e));
 }, REPUBLISH_INTERVAL_MS);
 republishTimer.unref?.();
+
+// Member-roll change poll: a new member's bind (or a manual bind) must reach the fleet within
+// ~a minute, not the 6h backstop. mtime is the cheap fast-path; publishMemberRoll's fingerprint
+// check makes a false-positive mtime (rewrite with identical content) a no-op. statSync throws on
+// a missing file — treated as "no change" (the fail-closed read inside publishMemberRoll owns the
+// error reporting when a real publish attempts).
+const MEMBER_ROLL_POLL_MS = 60 * 1000;
+let lastMembershipMtimeMs = null;
+const memberRollPollTimer = setInterval(() => {
+  let mtimeMs;
+  try {
+    mtimeMs = statSync(MEMBERSHIP_FILE).mtimeMs;
+  } catch {
+    return;
+  }
+  if (lastMembershipMtimeMs !== null && mtimeMs === lastMembershipMtimeMs) return;
+  lastMembershipMtimeMs = mtimeMs;
+  publishMemberRoll().catch(e => console.error('[organizer] member-roll poll publish failed:', e?.message || e));
+}, MEMBER_ROLL_POLL_MS);
+memberRollPollTimer.unref?.();
 
 // ── Graceful shutdown + last-resort process handlers ────────────────────────────
 // On SIGTERM/SIGINT (systemd stop, Ctrl-C) stop accepting HTTP, then stop the mailbox — its stop()
@@ -3459,6 +3617,7 @@ function shutdown(signal) {
   shuttingDown = true;
   console.log('[organizer] received ' + signal + '; shutting down.');
   try { clearInterval(republishTimer); } catch { /* best-effort */ }
+  try { clearInterval(memberRollPollTimer); } catch { /* best-effort */ }
   try { mailboxHandle?.stop(); } catch (e) { console.error('[organizer] mailbox stop error:', e?.message || e); }
   try { server.close(() => process.exit(0)); } catch { process.exit(0); }
   // Don't hang forever if a keep-alive socket won't close.

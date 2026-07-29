@@ -316,11 +316,16 @@ export function interestedTallies(
   rsvps: Event[],
   resolveAuthor: (ev: Event) => string,
   myPubkey: string | null,
+  isExcluded?: (ev: Event) => boolean,
 ): Map<string, InterestedTally> {
   // coordinate → author → latest rsvp
   const byCoord = new Map<string, Map<string, Event>>();
   for (const ev of rsvps) {
     if (ev.kind !== KIND_EVENT_RSVP) continue;
+    // Member-roll enforcement (injected — this module is pure/shared): an excluded RSVP (off-roll
+    // sock-puppet attribution) never counts as a distinct interested member. Absent predicate or
+    // deferred roll ⇒ counts exactly as before.
+    if (isExcluded?.(ev)) continue;
     const coord = rsvpTarget(ev);
     if (!coord) continue;
     const author = resolveAuthor(ev) || ev.pubkey;

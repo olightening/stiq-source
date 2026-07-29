@@ -21,6 +21,7 @@ import {validateBridgeLine} from '../tor/torSettings';
 import {MAX_SEEDED_BRIDGES} from '../onboarding/join';
 import {parseSpaceEmbed, SPACE_EMBED_PREFIX} from '../channels/spaceEmbed';
 import {decodeGradient, type GradientSpec} from '../media/gradient';
+import {decryptForSpace} from '../channels/groupCrypto';
 
 export const ORGANIZER_D_MODERATORS = 'stiq:moderators';
 export const ORGANIZER_D_LIMITS = 'stiq:limits';
@@ -271,6 +272,72 @@ export function currentSeededBridges(
     if (out.length >= MAX_SEEDED_BRIDGES) break;
   }
   return out.length > 0 ? out : undefined;
+}
+
+// ── Member roll (d="stiq:member-roll") — ban-evasion fix, 2026-07-29 ───────────
+//
+// The organizer broadcasts the relay's authoritative bound-npub set (membership.json — never
+// kind-9011 events, which are incomplete vs manual binds and now write-only at the wire),
+// NIP-44-encrypted under the community key so the member list never sits plaintext in relay
+// storage. Clients treat a blind post whose attribution resolves OFF this roll exactly like an
+// unattributed one (blind/identity.ts isOffRollBlindPost): hidden + mod-logged. Doc presence IS
+// the feature gate — no roll, no enforcement — and the organizer only publishes under token
+// domain separation (without it a drawn posting token doubles as a binding credential and the
+// roll's scarcity premise is false).
+
+export const ORGANIZER_D_MEMBER_ROLL = 'stiq:member-roll';
+
+/** The decrypted member roll: the bound-npub set plus the organizer's publish stamp. */
+export interface MemberRoll {
+  members: ReadonlySet<string>;
+  updatedAt: number;
+}
+
+/**
+ * The organizer's current member roll, or undefined when no organizer is configured, none is
+ * published, the community key is absent (can't decrypt ⇒ must defer, mirroring identity.ts's
+ * community-key deferral), or the doc fails to decrypt/parse/validate. An EMPTY members list is
+ * treated as absent — a wrongly-empty roll must defer, never hide every member's posts. Unknown
+ * versions (v !== 1) are treated as absent so a future roll format degrades to no-enforcement on
+ * old clients rather than mass-hiding.
+ */
+export function currentMemberRoll(
+  store: EventStore,
+  organizerNpub: string | undefined,
+  communityKey: Uint8Array | null,
+): MemberRoll | undefined {
+  if (!communityKey) return undefined;
+  const hex = organizerHex(organizerNpub);
+  if (!hex) return undefined;
+  const ev = latestConfig(store, hex, ORGANIZER_D_MEMBER_ROLL);
+  if (!ev) return undefined;
+  return parseMemberRollContent(ev.content, communityKey, ev.created_at);
+}
+
+/**
+ * Decrypt + validate one roll doc's content. Shared by {@link currentMemberRoll} (store path —
+ * cold start / community switch) and AppRuntime's live org-doc arrival path (which judges the
+ * arriving event's own content, independent of store write ordering). Same deferral contract as
+ * currentMemberRoll; `fallbackUpdatedAt` stands in when the payload omits updated_at.
+ */
+export function parseMemberRollContent(
+  content: string,
+  communityKey: Uint8Array,
+  fallbackUpdatedAt = 0,
+): MemberRoll | undefined {
+  let raw: Record<string, unknown>;
+  try {
+    raw = JSON.parse(decryptForSpace(content, communityKey)) as Record<string, unknown>;
+  } catch {
+    return undefined; // wrong key / tampered ciphertext / malformed JSON — defer, never enforce garbage
+  }
+  if (raw.v !== 1 || !Array.isArray(raw.members)) return undefined;
+  const members = new Set<string>();
+  for (const pk of raw.members) {
+    if (typeof pk === 'string' && /^[0-9a-f]{64}$/.test(pk)) members.add(pk);
+  }
+  if (members.size === 0) return undefined;
+  return {members, updatedAt: num(raw.updated_at) ?? fallbackUpdatedAt};
 }
 
 // ── Per-mod permissions, mod-action limits, governance, community config ────────

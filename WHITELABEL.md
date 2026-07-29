@@ -9,12 +9,13 @@ The string `stiq` appears in **382 files** under `client/src`. Most of them are 
 
 STIQ's wire protocol namespaces its Nostr events and embeds under a literal `stiq:` prefix —
 kind-30078 parameterized-replaceable `d` tags, embed URI schemes, and credential message types.
-There are **35 distinct** such identifiers, including:
+There are **36 distinct** such identifiers, including:
 
 ```
 stiq:community      stiq:token-keys     stiq:draft        stiq:content-epoch
 stiq:cred-req       stiq:cred-resp      stiq:log-page     stiq:gov
 stiq:featured       stiq:bridges        stiq:events       stiq:guide
+stiq:member-roll
 ```
 
 These are **on-the-wire contract**, shared by the client, the relay, and the organizer

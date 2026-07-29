@@ -9,7 +9,7 @@
 import {Kind} from '../nostr/events';
 import type {Event} from 'nostr-tools/pure';
 import type {UnsignedEvent} from '../keys/keystore';
-import {resolveAuthorPubkey} from '../blind/identity';
+import {resolveAuthorPubkey, isOffRollBlindPost} from '../blind/identity';
 import {resolveContent} from '../blind/blindPost';
 
 /** Build an unsigned kind-7 reaction carrying `emoji` as its content, targeting a broadcast. */
@@ -55,6 +55,9 @@ function foldReactionEvents(
     if (locked) continue;
     const emoji = text.trim();
     if (!emoji) continue;
+    // Off-roll reactions never count (member-roll enforcement — sock-puppet keys would otherwise
+    // each read as a distinct voter). Defers while no roll is loaded.
+    if (isOffRollBlindPost(ev)) continue;
     // Fold on the RESOLVED author: a public-channel reaction rides the blind path (throwaway
     // signer + encrypted attribution), so the raw pubkey is a fresh key per tap — dedup and
     // `mine` must use the attributed member. Attributed reactions resolve to their own pubkey.
@@ -119,6 +122,8 @@ export function tallyAllReactions(
     if (locked) continue;
     const emoji = text.trim();
     if (!emoji) continue;
+    // Off-roll reactions never count — see foldReactionEvents.
+    if (isOffRollBlindPost(ev)) continue;
     // Same resolved-author fold as tallyEmojiReactions: group/DM reactions are npub-signed today
     // (resolve to themselves), but any blind-signed reaction still dedups by real member.
     const voter = resolveAuthorPubkey(ev);

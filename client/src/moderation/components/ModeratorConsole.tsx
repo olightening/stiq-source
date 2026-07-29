@@ -58,6 +58,11 @@ export interface ModeratorConsoleProps {
   onLogPost: (targetId: string, targetType: 'post' | 'comment', authorPubkey?: string) => void;
   /** Advisory: reverse a standing rule — the author's posts return to the feed. */
   onRestoreAuthor: (authorPubkey: string) => void;
+  /** Clear a report-threshold auto-hide: publish a moderator restore so the item returns to the
+   *  feed and threads for everyone. Offered only on threshold-reached rows, because those are the
+   *  only ones already hidden without a human deciding — "Dismiss" is local to this moderator's
+   *  queue and would leave a false-positive brigade hidden fleet-wide. */
+  onRestorePost?: (targetId: string, targetType: 'post' | 'comment', authorPubkey?: string) => void;
   /** Lift a legacy hard-ban. */
   onUnban: (pubkey: string) => void;
   /** Open the reported post/comment in context (optional). */
@@ -109,6 +114,7 @@ export function ModeratorConsole({
   onLogAuthor,
   onLogPost,
   onRestoreAuthor,
+  onRestorePost,
   onUnban,
   onViewPost,
   checkLimit,
@@ -280,6 +286,11 @@ export function ModeratorConsole({
                     // Rate-limit keys match the emitted stiq-action so an organizer's caps count them.
                     const logPostLimit = canLogPost ? limitFor('log') : null;
                     const logAuthorLimit = canLogAuthor ? limitFor('log-user') : null;
+                    // A threshold-reached row is ALREADY auto-hidden community-wide, so the "no
+                    // action needed" outcome has to be a real, published restore — Dismiss only
+                    // clears this moderator's own queue.
+                    const canClear = r.thresholdReached && !!onRestorePost && can('restore');
+                    const clearLimit = canClear ? limitFor('restore') : null;
                     const pastOn = !!includePast[r.targetId];
                     return (
                       <View key={r.targetId} style={s.card}>
@@ -343,6 +354,17 @@ export function ModeratorConsole({
                           <Press style={s.ghostBtn} onPress={() => dismiss(r.targetId)}>
                             <Text style={s.ghostText}>Dismiss</Text>
                           </Press>
+                          {canClear && (
+                            <Press
+                              style={s.ghostBtn}
+                              disabled={!!clearLimit}
+                              onPress={() => {
+                                onRestorePost?.(r.targetId, r.targetType, r.authorPubkey);
+                                dismiss(r.targetId);
+                              }}>
+                              <Text style={s.ghostText}>Restore</Text>
+                            </Press>
+                          )}
                           <View style={s.flex1} />
                           {canLogPost && (
                             <Press
@@ -361,8 +383,8 @@ export function ModeratorConsole({
                             </Press>
                           )}
                         </View>
-                        {(logPostLimit || logAuthorLimit) && (
-                          <Text style={s.limitNote}>{logPostLimit || logAuthorLimit}</Text>
+                        {(logPostLimit || logAuthorLimit || clearLimit) && (
+                          <Text style={s.limitNote}>{logPostLimit || logAuthorLimit || clearLimit}</Text>
                         )}
                         {!canLogPost && !canLogAuthor && (
                           <Text style={s.limitNote}>Logging this needs a permission you don’t have. You can still dismiss it.</Text>

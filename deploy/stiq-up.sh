@@ -136,13 +136,19 @@ STIQ_VANGUARDS="${STIQ_VANGUARDS:-0}"
 
 # Token domain separation (posting/read tokens signed under DEDICATED keys, not the enrollment
 # issuer key — closes the Sybil/ban-evasion hole where a plentiful posting token also verifies as a
-# scarce membership-binding credential). OFF by default: byte-identical to today's single-key setup.
+# scarce membership-binding credential, and is the premise the client-side member roll rests on:
+# without it a drawn posting token can bind a fresh npub, so the organizer refuses to publish the
+# roll at all and a community gets zero ban-evasion protection).
+#
+# The default is INHERITED, not fixed — resolved once $CONFIG_PATH is known (search
+# "resolve_token_domain_sep_default"). Fresh install ⇒ 1; existing box that already has separation
+# ⇒ 1; existing box WITHOUT it ⇒ 0. An explicit STIQ_TOKEN_DOMAIN_SEP always wins.
 #   ⚠ COORDINATED FLIP: flipping the organizer's STIQ_TOKEN_DOMAIN_SEP alone bricks all posting — the
 #   relay would keep verifying K_post tokens against K_enroll and reject them. When this is 1, the
 #   installer fetches the organizer's posting/binding public keys over loopback (/api/token-keys)
 #   AFTER the organizer restarts and injects them into the relay config, then restarts the relay too
 #   (see step 9b below) — so enabling it here does the whole coordinated rollout in one run.
-TOKEN_DOMAIN_SEP="${STIQ_TOKEN_DOMAIN_SEP:-0}"
+TOKEN_DOMAIN_SEP="${STIQ_TOKEN_DOMAIN_SEP:-}"   # empty = unset; see resolve_token_domain_sep_default
 
 # Censorable reads (asks #4). When 1, the organizer enforces read-auth (STIQ_READ_AUTH) so it can
 # refuse a read-REVOKED member's read-token draws, and the relay ADVERTISES content_encryption +
@@ -1489,6 +1495,50 @@ say "Writing the relay config (${RELAY_ETC}/config.json)..."
 # config on disk.
 CONFIG_PATH="${RELAY_ETC}/config.json"
 
+# resolve_token_domain_sep_default — pick TOKEN_DOMAIN_SEP when the operator did not pass one.
+#
+# It used to default to a flat 0, which meant every FRESH community shipped with enrollment
+# credentials and posting tokens signed by ONE key. A bare RSA-PSS credential carries no type, so
+# the relay cannot tell them apart: a plentiful posting token doubles as a scarce membership-binding
+# credential, and a banned member can simply bind a new npub. The client-side member roll is built
+# on that scarcity, so the organizer refuses to publish the roll unless separation is on — meaning
+# new deployments silently got no ban-evasion protection at all until an operator knew to flip a
+# flag they had never heard of.
+#
+# So the default INHERITS rather than flipping wholesale:
+#   * no relay config yet (a fresh install)          → 1. Nothing exists to break.
+#   * config already carries posting_issuer_public_keys → 1. Separation is already on; inheriting it
+#     also retires a re-run footgun, since a plain re-run used to trip the reverse-transition die()
+#     below purely for not re-passing the flag.
+#   * config exists WITHOUT separation                → 0. Never auto-flip a live community: its
+#     members hold already-drawn posting tokens signed under K_enroll, and turning separation on
+#     would stop those verifying — every one of them would fail to post. That flip is a deliberate,
+#     announced operation (pass STIQ_TOKEN_DOMAIN_SEP=1), not a side effect of running the installer.
+resolve_token_domain_sep_default() {
+  [[ -n "$TOKEN_DOMAIN_SEP" ]] && return 0        # operator (or the --attach branch) chose already
+  if [[ ! -f "$CONFIG_PATH" ]]; then
+    TOKEN_DOMAIN_SEP=1
+    say "Token domain separation: ON (fresh install default — posting and enrollment keys stay distinct)."
+    return 0
+  fi
+  if STIQ_INSTALLER_CONFIG_PATH="$CONFIG_PATH" python3 - <<'PY'
+import json, os, sys
+try:
+    cfg = json.load(open(os.environ['STIQ_INSTALLER_CONFIG_PATH']))
+except Exception:
+    sys.exit(1)
+sys.exit(0 if cfg.get('posting_issuer_public_keys') else 1)
+PY
+  then
+    TOKEN_DOMAIN_SEP=1
+    say "Token domain separation: ON (inherited from ${CONFIG_PATH})."
+  else
+    TOKEN_DOMAIN_SEP=0
+    say "Token domain separation: OFF (inherited from ${CONFIG_PATH}). This community's members hold posting tokens signed under the enrollment key, so enabling it is a deliberate, announced flip — re-run with STIQ_TOKEN_DOMAIN_SEP=1 when ready. Until then the organizer will not publish the member roll (see PLAN.md §3.4)."
+  fi
+}
+resolve_token_domain_sep_default
+
 # secure_relay_config restores stiq:stiq ownership + 600 perms on $CONFIG_PATH. Every rewrite of this
 # file (here and in 9b/9c/9d below) runs as root and writes via temp-file + os.replace — atomic
 # against a crash mid-write, but os.replace mints a NEW inode owned by whoever wrote it (root), which
@@ -1783,6 +1833,10 @@ Environment=STIQ_ENROLL_POW=${ENROLL_POW}
 # Token domain separation (mints posting/read tokens under dedicated keys). OFF (0) by default; when
 # on, step 9b below fetches the resulting posting/binding public keys and wires them into the relay.
 Environment=STIQ_TOKEN_DOMAIN_SEP=${TOKEN_DOMAIN_SEP}
+# The relay's bound-npub registry (membership_file in the relay config — both run as 'stiq'). The
+# organizer reads it to publish the encrypted stiq:member-roll doc; only meaningful (and only
+# published) under token domain separation.
+Environment=STIQ_MEMBERSHIP_FILE=${RELAY_LIB}/membership.json
 Environment=STIQ_READ_AUTH=${CONTENT_ENCRYPTION}
 # Dashboard binds loopback only; a Tor onion (with client auth) or SSH tunnel fronts it.
 Environment=STIQ_BIND=127.0.0.1
@@ -2002,12 +2056,15 @@ PY
     || die "post-wiring check failed: organizer reports domainSeparation but ${CONFIG_PATH} still lacks posting_issuer_public_keys."
   say "Token domain separation verified: relay + organizer agree on the posting key."
 else
-  # Reverse-transition guard. TOKEN_DOMAIN_SEP defaults to 0 every run, but the T5 config merge
-  # deliberately PRESERVES an existing posting_issuer_public_keys. So a re-run on a box that already
-  # has domain separation enabled — without re-passing STIQ_TOKEN_DOMAIN_SEP=1 — would restart the
-  # organizer signing posting tokens under K_enroll while the relay still verifies ONLY against K_post,
-  # silently bricking every post (the WS/enrollment smoke tests don't exercise ordinary posting, so
-  # nothing would catch it). Refuse to proceed rather than silently revert.
+  # Reverse-transition guard. The T5 config merge deliberately PRESERVES an existing
+  # posting_issuer_public_keys, so restarting the organizer WITHOUT domain separation on a box that
+  # has it would sign posting tokens under K_enroll while the relay still verifies ONLY against
+  # K_post — silently bricking every post (the WS/enrollment smoke tests don't exercise ordinary
+  # posting, so nothing would catch it). Refuse to proceed rather than silently revert.
+  #
+  # Reaching this is now DELIBERATE: the default inherits an existing box's separation
+  # (resolve_token_domain_sep_default), so a plain re-run no longer trips it — only an explicit
+  # STIQ_TOKEN_DOMAIN_SEP=0 gets here, and that operator is asking for exactly what this prevents.
   if [[ -f "$CONFIG_PATH" ]] && STIQ_INSTALLER_CONFIG_PATH="$CONFIG_PATH" python3 - <<'PY'
 import json, os, sys
 try:
@@ -2019,10 +2076,11 @@ PY
   then
     die "$(cat <<EOM
 ${CONFIG_PATH} already has posting_issuer_public_keys set (token domain separation is ENABLED on this
-box), but STIQ_TOKEN_DOMAIN_SEP is not 1 for this run. Proceeding would restart the organizer signing
-posting tokens under K_enroll while the relay keeps verifying against K_post — silently bricking ALL
-posting. Re-run with STIQ_TOKEN_DOMAIN_SEP=1 to keep domain separation, or intentionally disable it by
-removing posting_issuer_public_keys/binding_issuer_public_keys from ${CONFIG_PATH} first.
+box), but this run was given STIQ_TOKEN_DOMAIN_SEP=0 explicitly. Proceeding would restart the organizer
+signing posting tokens under K_enroll while the relay keeps verifying against K_post — silently bricking
+ALL posting. Drop STIQ_TOKEN_DOMAIN_SEP to inherit the box's current setting (the default), or
+intentionally disable separation by removing posting_issuer_public_keys/binding_issuer_public_keys from
+${CONFIG_PATH} first.
 EOM
 )"
   fi

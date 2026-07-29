@@ -39,3 +39,10 @@ mirrors.json
 # the earlier explicit list silently missed the four media key files.
 *_token_key_private.pem
 *_token_key_public.b64
+
+# The manifest that INDEXES those keys (fingerprint + mintedAt per purpose). Runtime state, and
+# committing it is actively harmful rather than merely untidy: it is the key-loss guard's memory,
+# so a fresh install cloned from a repo carrying it would find every purpose "already minted" with
+# no matching .pem on disk and refuse to boot (see organizer-server.mjs's STIQ_ALLOW_KEY_REMINT
+# FATAL). It appears the moment anyone runs the organizer with STIQ_TOKEN_DOMAIN_SEP=1.
+key-manifest.json

@@ -4,10 +4,11 @@ import {
   buildLogBatch,
   buildLogEvent,
   buildLogUser,
-  buildRestoreEvent,
   buildUnlogUser,
   loggedAuthorsFrom,
 } from './advisory';
+// The REAL reversal builder every surface uses — advisory.ts deliberately has none of its own.
+import {buildRestore} from './report';
 
 const modSk = generateSecretKey();
 const modPk = getPublicKey(modSk);
@@ -35,7 +36,7 @@ describe('advisory moderation overlay', () => {
   it('routes a single event to the log and back', () => {
     const log = asMod(buildLogEvent('ev1', author), 10);
     expect(advisoryOverlay([log], isMod).loggedEvents.has('ev1')).toBe(true);
-    const restore = asMod(buildRestoreEvent('ev1'), 20);
+    const restore = asMod(buildRestore('ev1'), 20);
     expect(advisoryOverlay([log, restore], isMod).loggedEvents.has('ev1')).toBe(false);
   });
 

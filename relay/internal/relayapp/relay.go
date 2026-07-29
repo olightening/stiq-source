@@ -348,7 +348,7 @@ func New(cfg config.Config) (*khatru.Relay, func(), *Reloader, error) {
 			return nil, nil, nil, err
 		}
 		relay.StoreEvent = append(relay.StoreEvent, db.SaveEvent)
-		relay.QueryEvents = append(relay.QueryEvents, delGuard.wrap(db.QueryEvents))
+		relay.QueryEvents = append(relay.QueryEvents, suppressBindingReads(delGuard.wrap(db.QueryEvents)))
 		relay.DeleteEvent = append(relay.DeleteEvent, db.DeleteEvent)
 		// NIP-45 COUNT: lets clients tally comments/reactions/etc. without pulling raw events
 		// over Tor. Setting CountEvents also makes khatru advertise NIP-45 in its NIP-11 doc.
@@ -381,7 +381,7 @@ func New(cfg config.Config) (*khatru.Relay, func(), *Reloader, error) {
 			return nil, nil, nil, err
 		}
 		relay.StoreEvent = append(relay.StoreEvent, db.SaveEvent)
-		relay.QueryEvents = append(relay.QueryEvents, delGuard.wrap(db.QueryEvents))
+		relay.QueryEvents = append(relay.QueryEvents, suppressBindingReads(delGuard.wrap(db.QueryEvents)))
 		relay.DeleteEvent = append(relay.DeleteEvent, db.DeleteEvent)
 		relay.CountEvents = append(relay.CountEvents, db.CountEvents)
 		queryFn = db.QueryEvents
@@ -581,10 +581,13 @@ func New(cfg config.Config) (*khatru.Relay, func(), *Reloader, error) {
 		diagnosticRejectHook(eventDiagnostics, "commit", m.CommitSpend),
 	)
 	enableEventDiagnostics(relay)
-	// Anti-enumeration: discovery (profile/channel) and group queries must be scoped (§3.8).
+	// Anti-enumeration: discovery (profile/channel) and group queries must be scoped (§3.8), and
+	// kind-9011 membership bindings are write-only at the wire (no reader exists; serving them
+	// enumerates the bound-npub set — see policy.RejectBindingReads + suppressBindingReads).
 	relay.RejectFilter = append(relay.RejectFilter,
 		policy.RequireScopedDiscovery,
 		policy.RequireScopedGroupQuery,
+		policy.RejectBindingReads,
 	)
 	// Private-group read enforcement (finding #38) ships DARK: it requires clients to speak NIP-42
 	// AUTH, so enable it only once they do (a coordinated flip), otherwise private-group reads break.
@@ -605,6 +608,7 @@ func New(cfg config.Config) (*khatru.Relay, func(), *Reloader, error) {
 		policy.RequireScopedDiscovery,
 		policy.RequireScopedGroupQuery,
 		policy.RequireScopedCount,
+		policy.RejectBindingReads,
 	)
 	// NIP-09 deletions (kind 5) are processed by khatru BEFORE the RejectEvent chain runs, so stiq's
 	// membership/organizer/group/weight/rate-limit gates never see them. khatru's default outcome is

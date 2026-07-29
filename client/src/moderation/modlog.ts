@@ -22,7 +22,7 @@ import {eventGroupId, groupState, GroupKind} from '../channels/groups';
 import {safeNpubEncode} from '../util/npub';
 import {filterFeed, moderatorMutedAuthors} from './filter';
 import {advisoryActionOf, advisoryOverlay} from './advisory';
-import {resolveAuthorPubkey, isUnattributedBlindPost} from '../blind/identity';
+import {resolveAuthorPubkey, isUnattributedBlindPost, isOffRollBlindPost} from '../blind/identity';
 import {resolveContent} from '../blind/blindPost';
 import {KIND_VOICE_MESSAGE} from '../feed/voice';
 
@@ -32,6 +32,21 @@ export type ModTargetType = 'post' | 'comment' | 'user';
 export const UNATTRIBUTED_REASON = 'Auto-removed: no member signature (unattributable)';
 /** reportType flair; a STRUCTURAL removal (no member to reinstate) → detail sheet hides Restore. */
 export const UNATTRIBUTED_REPORT_TYPE = 'unattributable';
+
+/** Report-threshold bucket: enough DISTINCT members reported the item to cross the organizer's
+ * `reportThreshold`, so it is auto-hidden pending a moderator's decision. Unlike the two structural
+ * buckets below this one is REVERSIBLE — the detail sheet keeps its Restore button, and one restore
+ * is final for the mechanism (see queue.thresholdHiddenTargets). */
+export const PENDING_REVIEW_REASON = 'Auto-hidden: reported by enough members, pending review';
+/** reportType flair; NOT structural — a moderator can restore it. */
+export const PENDING_REVIEW_REPORT_TYPE = 'pending-review';
+
+/** Off-roll bucket (member-roll enforcement): the attestation is VALID but its npub was never
+ * bound on the relay — a fresh-key sock puppet / ban-evasion identity. Distinct label from the
+ * unattributable bucket so moderators can tell "stripped attribution" from "fake member". */
+export const OFF_ROLL_REASON = 'Auto-removed: author is not an enrolled member';
+/** reportType flair; structural like `unattributable` (no enrolled member to reinstate). */
+export const OFF_ROLL_REPORT_TYPE = 'not-a-member';
 
 export interface ModLogEntry {
   /** Stable id for list keys (the action event id + target). */
@@ -178,7 +193,12 @@ export function buildModLog(
       action,
       targetType: type,
       target: targetId,
-      targetAuthorPubkey: ev?.pubkey,
+      // The REAL author, decrypted from a blind event's attribution — `ev.pubkey` is the per-post
+      // THROWAWAY signer, a fresh key every time. Recording that instead rendered a garbage
+      // identity on the row AND made a mod-log search by the offender's npub miss the entry (audit
+      // 2026-07-29, D2). Resolves to `ev.pubkey` unchanged for ordinary npub-signed content. This
+      // block also wins the dedupe race against block 5's hiddenContentEntry, so it has to be right.
+      targetAuthorPubkey: ev ? resolveAuthorPubkey(ev) : undefined,
       // Prefer the live cached body; fall back to the snapshot captured on the report at action
       // time so removed posts stay searchable once the original event leaves the cache. A live
       // body still sealed under a locked epoch resolves to '' (never the fallback) — an untrusted
@@ -233,7 +253,9 @@ export function buildModLog(
         action: 'hide',
         targetType: 'post',
         target: id,
-        targetAuthorPubkey: ev?.pubkey,
+        // autoHiddenPosts scans kinds 1/30023 — the blind-eligible bucket — so resolve the real
+        // author here too (see block 1's note).
+        targetAuthorPubkey: ev ? resolveAuthorPubkey(ev) : undefined,
         targetContent: bodyOf(ev),
         moderatorPubkey: '',
         moderatorNpub: '',
@@ -257,6 +279,10 @@ export function buildModLog(
           action: 'hide',
           targetType: 'post',
           target: id,
+          // Deliberately the raw pubkey, NOT resolveAuthorPubkey: space messages (channel 1311,
+          // group 9/11/12) are structurally never blind — they are npub-signed by design, because
+          // membership in a space is role-gated — so `ev.pubkey` IS the real author and a
+          // resolution attempt would be pure cost. Do not "fix" this to match blocks 1 and 3.
           targetAuthorPubkey: ev?.pubkey,
           targetContent: bodyOf(ev),
           moderatorPubkey: '',
@@ -314,6 +340,63 @@ export function buildModLog(
       where: resolveWhere(store, ev),
       auto: true,
     });
+  }
+
+  // 7. Off-roll blind posts/comments (member-roll enforcement) — the attestation verifies but
+  // resolves to an npub that is NOT on the organizer's member roll: a never-bound fresh key (the
+  // rotate-past-a-ban / sock-puppet shape). Same automatic, structural treatment as bucket 6, with
+  // a distinct label — and WITH targetAuthorPubkey (the claimed key resolves; a moderator may want
+  // to ban it as well, which also future-proofs against its reuse). Only judged while a roll is
+  // actually loaded (isOffRollBlindPost defers otherwise), so legacy communities never log here.
+  for (const ev of candidates) {
+    if (seen.has(ev.id)) continue;
+    if (!isOffRollBlindPost(ev)) continue;
+    seen.add(ev.id);
+    entries.push({
+      key: `offroll:${ev.id}`,
+      action: 'hide',
+      targetType: ev.kind === Kind.Comment || isStiqComment(ev) ? 'comment' : 'post',
+      target: ev.id,
+      targetAuthorPubkey: resolveAuthorPubkey(ev),
+      targetContent: resolveContent(ev).text,
+      moderatorPubkey: '',
+      moderatorNpub: '',
+      timestamp: ev.created_at,
+      reason: OFF_ROLL_REASON,
+      reportType: OFF_ROLL_REPORT_TYPE,
+      where: resolveWhere(store, ev),
+      auto: true,
+    });
+  }
+
+  // 8. Report-threshold auto-hides — enough DISTINCT members reported the item to cross the
+  // organizer's reportThreshold, so it is hidden from feed and threads pending a moderator's
+  // decision (queue.thresholdHiddenTargets). Surfaced here, LAST, so any stronger verdict already
+  // recorded above wins the row: a moderator's own hide, an advisory rule, or a structural
+  // unattributable/off-roll removal all describe the content better than "N people reported it".
+  // Reversible — the row keeps its Restore, and one restore is final for this mechanism.
+  if (autoCfg?.pendingReview) {
+    for (const id of autoCfg.pendingReview) {
+      if (seen.has(id)) continue;
+      const ev = store.getById(id);
+      if (!ev) continue;
+      seen.add(id);
+      entries.push({
+        key: `pending:${id}`,
+        action: 'hide',
+        targetType: ev.kind === Kind.Comment || isStiqComment(ev) ? 'comment' : 'post',
+        target: id,
+        targetAuthorPubkey: resolveAuthorPubkey(ev),
+        targetContent: bodyOf(ev),
+        moderatorPubkey: '',
+        moderatorNpub: '',
+        timestamp: ev.created_at,
+        reason: PENDING_REVIEW_REASON,
+        reportType: PENDING_REVIEW_REPORT_TYPE,
+        where: resolveWhere(store, ev),
+        auto: true,
+      });
+    }
   }
 
   entries.sort((a, b) => b.timestamp - a.timestamp);

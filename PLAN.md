@@ -150,8 +150,29 @@ dashboard supports.
   rejected from anyone else (`relay/internal/policy/organizer.go`).
 - **Build-time fallback:** `MODERATOR_NPUBS` in `client/src/moderation/moderators.ts` ships
   **empty** and is used only by legacy communities that predate the organizer key.
-- **Client-side effect:** the feed hides content carrying a matching 1984 report from an authorized
-  moderator; a Moderation Log inverts the filter and shows what was hidden and by whom.
+- **Client-side effect:** the feed **and every thread** hide content carrying a matching 1984 report
+  from an authorized moderator, an author under a standing `log-user` rule, an author under an active
+  ban, and every id named by a `log-batch`. Feed and thread route through one predicate
+  (`moderation/filter.ts` `isCommunityHidden`) so the two surfaces cannot diverge. A Moderation Log
+  inverts the filter and shows what was hidden and by whom, attributing blind content to its **real**
+  author (the decrypted attribution, never the per-post throwaway signer).
+- **Report threshold (`reasons.reportThreshold`).** Once that many **distinct** members report one
+  item, clients auto-hide it pending review — computed, never materialized as an event, so every
+  client agrees instantly and offline. Only non-moderator reports count, and one explicit moderator
+  Restore clears it permanently (further reports cannot re-hide it). `0`, the default, disables it.
+- **Member roll (`d="stiq:member-roll"`).** A ban follows the *real* author decrypted from a post's
+  attribution — but that attestation only ever proved control of **some** key, so a banned member
+  could mint a fresh npub and reappear (and any member could mint many, each counting as a distinct
+  voter). The organizer therefore publishes the relay's authoritative bound-npub set — read from
+  its own membership file, never from kind-9011 events — as an organizer-signed kind-30078 doc,
+  NIP-44-encrypted under the community key. Clients hide any blind post whose attribution resolves
+  to an npub **not on the roll**, exactly as they already hide one with no attribution, and exclude
+  it from every tally. Binding a new npub costs a fresh single-use invite, so the only way back in
+  is one the organizer grants. Two conditions gate it, both fail-safe: the doc is published **only
+  under token domain separation** (otherwise a plentiful posting token doubles as a binding
+  credential and the roll's scarcity premise is false), and clients enforce **only** while a
+  decrypted roll is loaded — no roll, no enforcement. Kind-9011 bindings are write-only at the wire
+  (`policy.RejectBindingReads`): nothing reads them, and serving them would enumerate the members.
 
 ### 3.5 Device compromise — auto-lock and duress
 
@@ -171,8 +192,10 @@ signed by a throwaway key, so neither the relay nor other members can attribute 
   the moderator roster — the public sees nothing.
 - **Double-spend** is prevented by the relay's spent-token set; the client tracks its own witnesses
   (`blind/doubleSpend.ts`, `blind/spendWitness.ts`).
-- **Known limitation, unchanged:** a moderator can learn an author and hide their content but
-  cannot make the relay block their *future* posts. That is the design, not a gap.
+- **Known limitation:** a moderator can learn an author and hide their content but cannot make the
+  relay block their *future* posts. That is the design, not a gap. What the member roll (§3.4) adds
+  is that those future posts must still be attributed to an **enrolled** npub — so a hide can no
+  longer be shed by rotating keys, only by obtaining another invite.
 
 ### 3.7 Spaces — channels, groups, events
 
@@ -216,7 +239,7 @@ The original plan carried these as open flags. They are answered:
 | Snowflake in v1 | Shipped, as the `reach` rung of the connection ladder (§3.2). |
 | Where the issuer key lives | On the community's own server, generated there by `deploy/stiq-up.sh` and never transmitted. Dashboard access equals shell access equals full community control — deliberately, with no weaker remote admin surface. |
 | How the community bootstrap reaches a blank app | The join code: relay onion + issuer public key (+ optional update-repo pins), as a link or QR. |
-| Member revocation | Post-binding, an identity can be advisory-banned (§3.4). Revoking *before* binding needs issuer-key rotation. Communities needing hard expulsion rotate the community credential. |
+| Member revocation | Post-binding, an identity can be advisory-banned (§3.4), and the member roll stops that ban being sidestepped with a fresh npub. Revoking *before* binding needs issuer-key rotation. Communities needing hard expulsion rotate the community credential. |
 
 ---
 
@@ -302,8 +325,14 @@ when comments became anonymous. Those reworks are folded into the rows above.
 2. **Distribution bootstrap.** The in-app update path is complete once someone has the app, but
    the *first* install is always a manual sideload, and no signed APK is published with this
    source. A community's operator must build and sign one — see [BUILDING.md](BUILDING.md).
-3. **Anonymous-author banning.** Accepted as a limitation (hide plus out-of-band accountability),
-   or worth a nullifier/revocation scheme? Unchanged since the original plan.
+3. **Anonymous-author banning.** Partially answered: the member roll (§3.4) now stops a banned
+   member from rotating to a *fresh* npub, because an attribution must name a key that actually
+   bound a credential — and a spare credential a bound member re-presents is now burned rather than
+   left reusable, so a second invite cannot quietly become a second npub. What it does not stop is
+   an accomplice lending their key, or a banned member holding an unspent invite they were issued
+   before the ban (ban hygiene: revoke their outstanding invites). A nullifier scheme — a per-member
+   serial carried by every post, blocklistable without deanonymizing anyone — remains the complete
+   answer, and remains unbuilt.
 4. **Comment PoW difficulty.** Comments are far more frequent than DMs; the difficulty that deters
    spam without hurting battery has not been re-tuned since the token economy landed.
 5. **Group posting models.** Owner-broadcast is the default; designated co-posters and open

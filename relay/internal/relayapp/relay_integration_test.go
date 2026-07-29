@@ -1280,3 +1280,101 @@ func TestStaleGrantAfterVoluntaryLeaveFallsToPending(t *testing.T) {
 		t.Fatalf("the stale-grant request should fall to pending")
 	}
 }
+
+// countResult sends one COUNT frame and reports whether the relay refused it. khatru's rejection
+// shape for COUNT is NOT a CLOSED frame: handleCountRequest writes a NOTICE with the reject reason
+// and returns early (the store is never queried), then the outer handler still emits a COUNT
+// envelope with count 0. So "rejected" here = a NOTICE arrived before the COUNT, and the COUNT that
+// follows must be 0.
+func countResult(t *testing.T, wsURL string, filter map[string]any) (rejected bool, msg string) {
+	t.Helper()
+	c, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close()
+	payload, err := json.Marshal([]any{"COUNT", "cnt1", filter})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	_ = c.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	if err := c.WriteMessage(websocket.TextMessage, payload); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	sawNotice := false
+	for {
+		_, data, err := c.ReadMessage()
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		var frame []json.RawMessage
+		if err := json.Unmarshal(data, &frame); err != nil || len(frame) < 2 {
+			continue
+		}
+		var typ string
+		_ = json.Unmarshal(frame[0], &typ)
+		switch typ {
+		case "NOTICE":
+			sawNotice = true
+			_ = json.Unmarshal(frame[1], &msg)
+		case "COUNT":
+			if sawNotice {
+				var body struct {
+					Count *int64 `json:"count"`
+				}
+				if len(frame) > 2 {
+					_ = json.Unmarshal(frame[2], &body)
+				}
+				if body.Count != nil && *body.Count != 0 {
+					t.Fatalf("rejected COUNT must not leak a tally, got %d", *body.Count)
+				}
+			}
+			return sawNotice, msg
+		}
+	}
+}
+
+// Membership bindings are write-only at the wire: an explicit kind-9011 REQ or COUNT is refused
+// outright (even scoped — there is no legitimate reader; the member roll ships via the organizer's
+// encrypted stiq:member-roll doc), and a kind-less read never leaks a stored binding.
+func TestBindingReadsClosed(t *testing.T) {
+	issuerSK, issuerPEM := issuerKeyPEM(t)
+	ws := newTestRelay(t, issuerPEM)
+	memberSK, memberPK := bindMember(t, ws, issuerSK)
+
+	if rejected, msg := reqResult(t, ws, map[string]any{"kinds": []int{9011}}); !rejected {
+		t.Fatalf("unscoped kind-9011 REQ must be rejected, got served (%q)", msg)
+	}
+	if rejected, _ := reqResult(t, ws, map[string]any{"kinds": []int{9011}, "authors": []string{memberPK}}); !rejected {
+		t.Fatalf("author-scoped kind-9011 REQ must still be rejected (membership oracle)")
+	}
+	if rejected, _ := reqResult(t, ws, map[string]any{"kinds": []int{1, 9011}}); !rejected {
+		t.Fatalf("mixed-kind REQ naming 9011 must be rejected")
+	}
+	if rejected, _ := countResult(t, ws, map[string]any{"kinds": []int{9011}, "authors": []string{memberPK}}); !rejected {
+		t.Fatalf("kind-9011 COUNT must be rejected")
+	}
+
+	// A kind-less, author-scoped REQ passes the guards — but must never surface the binding event.
+	// The member's ordinary content still serves, proving suppression is kind-targeted.
+	note := signed(t, memberSK, 1, "hello roll")
+	if accepted, msg := publish(t, ws, note); !accepted {
+		t.Fatalf("bound member note should publish: %q", msg)
+	}
+	got := reqEvents(t, ws, map[string]any{"authors": []string{memberPK}})
+	for _, ev := range got {
+		if ev.Kind == 9011 {
+			t.Fatalf("kind-less read leaked a membership binding")
+		}
+	}
+	sawNote := false
+	for _, ev := range got {
+		if ev.Kind == 1 && ev.Content == "hello roll" {
+			sawNote = true
+		}
+	}
+	if !sawNote {
+		t.Fatalf("suppression must not swallow ordinary content (note missing from author read)")
+	}
+}

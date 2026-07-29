@@ -30,6 +30,10 @@ export interface AutoModConfig {
   postRulesAt: number;
   /** Pubkeys with an active moderator ban — their posts are hidden (computed by the caller). */
   bannedAuthors?: ReadonlySet<string>;
+  /** Ids auto-hidden by the organizer's report threshold, pending moderator review (computed by
+   *  the caller via `queue.thresholdHiddenTargets` — kept out of this module to avoid an import
+   *  cycle, and passed here so the feed applies every computed hide in one pass). */
+  pendingReview?: ReadonlySet<string>;
 }
 
 export interface AutoHide {
