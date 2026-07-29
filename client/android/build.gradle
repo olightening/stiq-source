@@ -80,3 +80,57 @@ allprojects {
         maven { url "https://guardianproject.info/maven" }
     }
 }
+
+/*
+ * 16 KB page-size readiness for every native library THIS BUILD COMPILES ITSELF.
+ *
+ * Android is moving from 4 KB to 16 KB memory pages. A .so whose PT_LOAD segments are aligned to
+ * 0x1000 cannot be mapped by the dynamic linker on a 16 KB-page kernel, so the app fails to LOAD —
+ * a device/kernel constraint that sideloading grants no exemption from. Measured on the vc18 APK,
+ * 16 of 23 arm64 libs were 4 KB-aligned.
+ *
+ * Those 16 split into three classes, and only one is fixable here:
+ *   - Compiled from source by our own externalNativeBuild (reanimated's libreanimated/libworklets,
+ *     op-sqlite's libop-sqlite) — this block fixes them, at the currently pinned dependency
+ *     versions. No upgrade, and specifically no reanimated 4.x / New Architecture migration, is
+ *     needed to align a lib we compile ourselves.
+ *   - Prebuilt for op-sqlite features this app does not enable (libcrsqlite, libsqlite_vec) —
+ *     excluded from packaging outright in app/build.gradle rather than aligned.
+ *   - Prebuilt inside third-party AARs (React Native's own libreactnative/libhermes/libjsi/libfbjni/
+ *     libc++_shared, Fresco's three, ACINQ's libsecp256k1-jni, op-sqlite's bundled OpenSSL
+ *     libcrypto) — genuinely out of reach of any flag we can set. Those need the RN 0.77+ bump; see
+ *     PLAN_SIX_FIXES_2026-07-29.md.
+ *
+ * Applied to EVERY subproject that configures a CMake externalNativeBuild rather than to a
+ * hardcoded list of module names: an autolinked Gradle project name changes whenever a dependency
+ * is renamed or bumped, and a name that stops matching would silently stop applying the flag with
+ * nothing failing loudly. Raising max-page-size on a native lib that did not need it is harmless
+ * (it costs a little segment padding), so the broad application is the safe direction to err in.
+ *
+ * gradle.projectsEvaluated, NOT subprojects { afterEvaluate { } }: React Native's autolinking has
+ * already evaluated some subprojects by the time this root script runs, and registering an
+ * afterEvaluate callback on an already-evaluated project is a hard error
+ * ("Cannot run Project.afterEvaluate(Closure) when the project is already evaluated").
+ * projectsEvaluated fires exactly once, after every project is evaluated but before the task graph
+ * is built — late enough that each module's own cmake.arguments are already set (so ours appends
+ * last and cannot be clobbered), early enough that the CMake configure task still picks it up.
+ *
+ * The NDK toolchain does not discard this. android-legacy.toolchain.cmake sets
+ * CMAKE_SHARED_LINKER_FLAGS via set(... CACHE STRING ...) WITHOUT force (a no-op once our -D has
+ * set the cache entry), then PREPENDS its own defaults to our value rather than replacing it.
+ *
+ * Verify it actually took effect — do not assume:
+ *   Get-ChildItem -Recurse -Filter CMakeCache.txt <module>/android/.cxx | Select-String "CMAKE_SHARED_LINKER_FLAGS"
+ * and confirm the built .so with scripts/apkalign-style PT_LOAD inspection.
+ */
+gradle.projectsEvaluated {
+    rootProject.subprojects { sub ->
+        def androidExt = sub.extensions.findByName("android")
+        if (androidExt?.defaultConfig?.externalNativeBuild?.cmake != null) {
+            androidExt.defaultConfig.externalNativeBuild.cmake.arguments(
+                "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384"
+            )
+            sub.logger.lifecycle("[stiq-16k] max-page-size=16384 -> ${sub.path}")
+        }
+    }
+}

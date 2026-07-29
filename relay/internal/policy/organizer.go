@@ -156,9 +156,21 @@ type Window struct {
 
 // Limits is the rate-limit policy, mirrored from the organizer's stiq:limits event.
 type Limits struct {
-	Posts            Window
-	Comments         Window
-	Channel          Window
+	Posts    Window
+	Comments Window
+	Channel  Window
+	// Reaction bounds attributed (h-tagged) kind-7 votes/reactions. Untagged blind votes never reach
+	// this window (see ratelimit.go's isBlindPost carve-out) — their price is the token.
+	Reaction Window
+	// GroupChat bounds NIP-29 group chat/thread/reply (kinds 9/11/12) — the primary communication
+	// surface of a group, so it runs a much higher cadence than Channel (which is tuned for the
+	// infrequent management events that share it: group create/edit, reports, event-doc republishes).
+	GroupChat Window
+	// Default is the fail-closed backstop window for any allow-listed kind that has no bespoke
+	// category in ratelimit.categorize()/windowFor() — including any kind added to allowed_kinds in
+	// the future without an accompanying rate-limit update. See the 2026-07-29 audit that found 20
+	// allow-listed kinds silently falling through to unlimited.
+	Default          Window
 	DMGlobalPerMin   int
 	ExemptModerators bool
 	// AllowVoice gates NIP-A0 voice messages community-wide. Default false — voice is off until
@@ -187,9 +199,22 @@ type Limits struct {
 // TOKENS_PER_EPOCH instead. A published stiq:limits fully REPLACES this (an explicit 0 there still
 // means unlimited for that category), so the organizer can still raise or remove any cap.
 var DefaultLimits = Limits{
-	Posts:            Window{Daily: 20, Weekly: 100, Monthly: 300},
-	Comments:         Window{Daily: 100, Weekly: 500, Monthly: 1500},
-	Channel:          Window{Daily: 50, Weekly: 250, Monthly: 750},
+	Posts:    Window{Daily: 20, Weekly: 100, Monthly: 300},
+	Comments: Window{Daily: 100, Weekly: 500, Monthly: 1500},
+	Channel:  Window{Daily: 50, Weekly: 250, Monthly: 750},
+	// 25x Posts.Daily / 10x Channel.Daily: a reaction is a single tap with no typed content, the
+	// cheapest possible write, and members legitimately fire far more of these per day than posts or
+	// comments. 500/day is one every ~3 minutes sustained for 24h — no genuine human sustains that, but
+	// it comfortably covers a heavy voting session; it exists as a flood backstop, not to shape normal
+	// behavior.
+	Reaction: Window{Daily: 500, Weekly: 2500, Monthly: 7500},
+	// 3x Comments.Daily: group chat is typed prose like a comment, but it is the PRIMARY surface of a
+	// group rather than an occasional feed comment, so it gets real headroom above the comment cadence.
+	GroupChat: Window{Daily: 300, Weekly: 1500, Monthly: 4500},
+	// Same cadence as Channel (infrequent management/administrative events) — reused for every
+	// allow-listed kind that has no bespoke category. Kept as an INDEPENDENT field (not literally
+	// Channel) so an operator can tune the catch-all bucket without also moving Channel's own tenants.
+	Default:          Window{Daily: 50, Weekly: 250, Monthly: 750},
 	DMGlobalPerMin:   60,
 	ExemptModerators: true,
 	// Mailbox flood caps default ON (a fresh/unconfigured relay is protected from the start). A
@@ -1140,12 +1165,21 @@ func (w windowJSON) toWindow() Window {
 }
 
 type limitsJSON struct {
-	Posts            windowJSON `json:"posts"`
-	Comments         windowJSON `json:"comments"`
-	Channel          windowJSON `json:"channel"`
-	DMGlobalPerMin   int        `json:"dm_global_per_min"`
-	ExemptModerators bool       `json:"exempt_moderators"`
-	AllowVoice       bool       `json:"allow_voice"`
+	Posts    windowJSON `json:"posts"`
+	Comments windowJSON `json:"comments"`
+	Channel  windowJSON `json:"channel"`
+	// Reaction/GroupChat/Default are POINTERS, unlike Posts/Comments/Channel above, for the same reason
+	// MailboxPerMin/MailboxPerConnPerMin already are: an OLD stiq:limits event (published before these
+	// fields existed — true of every event on the relay as of this change, including the one currently
+	// live in production) must leave them nil and fall back to the protective DefaultLimits, never parse
+	// an absent key as an explicit {0,0,0} = unlimited. An operator who genuinely wants one of these
+	// tiers unbounded publishes an explicit {"daily":0,"weekly":0,"monthly":0}.
+	Reaction         *windowJSON `json:"reaction"`
+	GroupChat        *windowJSON `json:"group_chat"`
+	Default          *windowJSON `json:"default"`
+	DMGlobalPerMin   int         `json:"dm_global_per_min"`
+	ExemptModerators bool        `json:"exempt_moderators"`
+	AllowVoice       bool        `json:"allow_voice"`
 	// Mailbox caps are pointers so an OLD stiq:limits event (published before these existed) leaves
 	// them nil and falls back to the protective DefaultLimits, rather than parsing an absent field as
 	// 0 (= unlimited) and silently disabling the flood cap. An organizer who genuinely wants them off
@@ -1163,8 +1197,20 @@ func (l limitsJSON) toLimits() Limits {
 		ExemptModerators: l.ExemptModerators,
 		AllowVoice:       l.AllowVoice,
 		// Absent (nil) ⇒ keep the protective default; present ⇒ honor it (explicit 0 = unlimited).
+		Reaction:             DefaultLimits.Reaction,
+		GroupChat:            DefaultLimits.GroupChat,
+		Default:              DefaultLimits.Default,
 		MailboxPerMin:        DefaultLimits.MailboxPerMin,
 		MailboxPerConnPerMin: DefaultLimits.MailboxPerConnPerMin,
+	}
+	if l.Reaction != nil {
+		lim.Reaction = l.Reaction.toWindow()
+	}
+	if l.GroupChat != nil {
+		lim.GroupChat = l.GroupChat.toWindow()
+	}
+	if l.Default != nil {
+		lim.Default = l.Default.toWindow()
 	}
 	if l.MailboxPerMin != nil {
 		lim.MailboxPerMin = nonNeg(*l.MailboxPerMin)

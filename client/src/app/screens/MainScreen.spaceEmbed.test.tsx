@@ -501,3 +501,181 @@ describe('ChannelDetail onSaveToEmbed — saves the currently-open channel as a 
     expect(typeof tree.root.findByType(ChannelDetail).props.onSaveToEmbed).toBe('function');
   });
 });
+
+describe('MainScreen — stiq://channel/<id> invite link (invite-confirm)', () => {
+  it('a cold deep link to a non-member private group opens the join dialog, never an immediate join', () => {
+    const onJoinGroup = jest.fn();
+    const onRequestToJoin = jest.fn();
+    const onPendingInviteLinkHandled = jest.fn();
+
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(
+        <MainScreen
+          {...(baseProps as MainScreenProps)}
+          feed={emptyFeed}
+          inbox={[]}
+          channels={[]}
+          groups={[]}
+          onGetChannelMessages={() => []}
+          onJoinGroup={onJoinGroup}
+          onRequestToJoin={onRequestToJoin}
+          pendingInviteLink="stiq://channel/g9"
+          onPendingInviteLinkHandled={onPendingInviteLinkHandled}
+        />,
+      );
+    });
+
+    // Dialog opened, not an immediate join.
+    const modal = visibleModalContaining(tree, 'Request to join');
+    expect(modal.props.visible).toBe(true);
+    expect(onJoinGroup).not.toHaveBeenCalled();
+    expect(onRequestToJoin).not.toHaveBeenCalled();
+    expect(onPendingInviteLinkHandled).toHaveBeenCalledTimes(1);
+
+    // Only the explicit tap fires the (sole) 9021-publishing path.
+    const requestButton = tree.root.findAll(
+      n => typeof n.children?.[0] === 'string' && n.children[0] === 'Request to join',
+    )[0]!;
+    let btn: renderer.ReactTestInstance | null = requestButton;
+    while (btn && typeof btn.props.onPress !== 'function') btn = btn.parent;
+    act(() => { (btn!.props.onPress as () => void)(); });
+    expect(onRequestToJoin).toHaveBeenCalledWith('g9', undefined);
+    expect(onJoinGroup).not.toHaveBeenCalled();
+  });
+
+  it('a tapped in-body invite card (GroupView) routes through the SAME confirm dialog, not a direct join', () => {
+    const owner = OWNER;
+    const groups = [{id: 'g1', name: 'Builders', memberCount: 2, isAdmin: false}];
+    const token = encodeSpaceEmbed({kind: 39000, owner, identifier: 'g1', name: 'Builders', private: true});
+    const onRequestToJoin = jest.fn();
+
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(
+        <MainScreen
+          {...(baseProps as MainScreenProps)}
+          feed={emptyFeed}
+          inbox={[]}
+          channels={[]}
+          groups={groups}
+          onGetChannelMessages={() => []}
+          onRequestToJoin={onRequestToJoin}
+        />,
+      );
+    });
+
+    // Land on GroupView for g1 (a member), via the existing stiq:space: token path.
+    act(() => { (tree.root.findByType(FeedList).props.onOpenNostrPost as (id: string) => void)(token); });
+    expect(tree.root.findByType(GroupView).props.groupId).toBe('g1');
+
+    // Tap an invite card for a DIFFERENT group (g2, not a member) inside the group's message body.
+    const onOpenInviteLink = tree.root.findByType(GroupView).props.onOpenInviteLink as (url: string) => void;
+    expect(typeof onOpenInviteLink).toBe('function');
+    act(() => { onOpenInviteLink('stiq://channel/g2'); });
+
+    const modal = visibleModalContaining(tree, 'Request to join');
+    expect(modal.props.visible).toBe(true);
+    expect(onRequestToJoin).not.toHaveBeenCalled();
+  });
+
+  it('a channel-coordinate invite link opens the channel directly — no confirm dialog (regression guard)', () => {
+    const owner = OWNER;
+    const coord = `30311:${owner}:d1`;
+    const channels: Channel[] = [{id: coord, owner, name: 'General'}];
+
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(
+        <MainScreen
+          {...(baseProps as MainScreenProps)}
+          feed={emptyFeed}
+          inbox={[]}
+          channels={channels}
+          groups={[]}
+          onGetChannelMessages={() => []}
+          pendingInviteLink={`stiq://channel/${coord}`}
+        />,
+      );
+    });
+
+    expect(visibleModals(tree)).toHaveLength(0);
+    expect(tree.root.findByType(ChannelView).props.channel.id).toBe(coord);
+  });
+
+  it('an already-a-member deep link opens the group directly — no confirm dialog', () => {
+    const groups = [{id: 'g5', name: 'Already In', memberCount: 3, isAdmin: false}];
+
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(
+        <MainScreen
+          {...(baseProps as MainScreenProps)}
+          feed={emptyFeed}
+          inbox={[]}
+          channels={[]}
+          groups={groups}
+          onGetChannelMessages={() => []}
+          pendingInviteLink="stiq://channel/g5"
+        />,
+      );
+    });
+
+    expect(visibleModals(tree)).toHaveLength(0);
+    expect(tree.root.findByType(GroupView).props.groupId).toBe('g5');
+  });
+
+  it('BACK on the open join dialog cancels — never joins (Modal onRequestClose contract)', () => {
+    const onJoinGroup = jest.fn();
+    const onRequestToJoin = jest.fn();
+
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(
+        <MainScreen
+          {...(baseProps as MainScreenProps)}
+          feed={emptyFeed}
+          inbox={[]}
+          channels={[]}
+          groups={[]}
+          onGetChannelMessages={() => []}
+          onJoinGroup={onJoinGroup}
+          onRequestToJoin={onRequestToJoin}
+          pendingInviteLink="stiq://channel/g9"
+        />,
+      );
+    });
+
+    const modal = visibleModalContaining(tree, 'Request to join');
+    act(() => { (modal.props.onRequestClose as () => void)(); });
+
+    expect(visibleModals(tree)).toHaveLength(0);
+    expect(onJoinGroup).not.toHaveBeenCalled();
+    expect(onRequestToJoin).not.toHaveBeenCalled();
+  });
+
+  it('a malformed pendingInviteLink is a no-op — no dialog, no crash, queue still consumed', () => {
+    const onPendingInviteLinkHandled = jest.fn();
+
+    let tree!: renderer.ReactTestRenderer;
+    expect(() => {
+      act(() => {
+        tree = renderer.create(
+          <MainScreen
+            {...(baseProps as MainScreenProps)}
+            feed={emptyFeed}
+            inbox={[]}
+            channels={[]}
+            groups={[]}
+            onGetChannelMessages={() => []}
+            pendingInviteLink="not-a-real-url"
+            onPendingInviteLinkHandled={onPendingInviteLinkHandled}
+          />,
+        );
+      });
+    }).not.toThrow();
+
+    expect(visibleModals(tree!)).toHaveLength(0);
+    expect(onPendingInviteLinkHandled).toHaveBeenCalledTimes(1);
+  });
+});

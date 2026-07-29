@@ -40,7 +40,6 @@ class MainApplication : Application(), ReactApplication {
               add(StiqBiometricPackage())
               add(StiqPowerPackage())
               add(StiqFilesPackage())
-              add(StiqScreenGuardPackage())
               add(NoCabPackage())
             }
 

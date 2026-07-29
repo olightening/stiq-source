@@ -377,6 +377,10 @@ function App(): React.JSX.Element {
   // cold-start launch via notifee.getInitialNotification — see the setup effect below). Mirrors
   // the incomingJoinCode/onJoinCodeConsumed consumed-signal pattern.
   const [pendingNav, setPendingNav] = useState<NavTarget | null>(null);
+  // A stiq://channel/<id> invite link (deep link, cold or warm) queued for MainScreen's
+  // join-confirmation routing (handleInviteLink) -- mirrors incomingJoinCode/onJoinCodeConsumed and
+  // pendingNav/onPendingNavHandled. MUST NOT be handled by joining directly: see handleDeepLink below.
+  const [pendingInviteLink, setPendingInviteLink] = useState<string | null>(null);
   // True while "Join another community" is running the onboarding flow in ADD mode over the live
   // app (the user is already enrolled; this is additive — a new identity slot + community).
   const [addCommunityMode, setAddCommunityMode] = useState(false);
@@ -535,10 +539,13 @@ function App(): React.JSX.Element {
           }
         }
       } else if (host === 'channel') {
-        // A private-space invite link: stiq://channel/<id>#k=<key>&e=<epoch>. Pass the RAW url so
-        // the runtime can split the fragment itself (the key never reaches a server) — it stores
-        // any carried E2E key, then joins. No-op until the runtime is enrolled/ready.
-        void runtimeRef.current?.acceptInviteLink(url);
+        // A space invite link: stiq://channel/<id>#k=<key>&e=<epoch>. NEVER joins directly from here
+        // — queue the raw url for MainScreen's handleInviteLink, which shows the locked-preview
+        // join-confirmation dialog (or opens straight through for an already-public channel / an
+        // already-joined group) and only ever publishes a join request on an explicit tap. A `#k=`
+        // fragment is still discarded by parseInviteLink itself (see invite.ts) — nothing here needs
+        // to touch it.
+        setPendingInviteLink(url);
       }
     } catch {
       // malformed URL — ignore
@@ -3899,6 +3906,8 @@ function App(): React.JSX.Element {
       onJoinCodeConsumed={() => setIncomingJoinCode(null)}
       pendingNav={pendingNav}
       onPendingNavHandled={() => setPendingNav(null)}
+      pendingInviteLink={pendingInviteLink}
+      onPendingInviteLinkHandled={() => setPendingInviteLink(null)}
       notifUnreadCount={snapshot.notifUnreadCount}
       onGetNotifications={() => runtimeRef.current?.deriveNotifications() ?? []}
       onGetNotificationPrefs={() => runtimeRef.current?.getNotificationPrefs() ?? DEFAULT_PREFS}
@@ -4059,7 +4068,6 @@ function App(): React.JSX.Element {
       onCreateGroup={(meta, closed, isPrivate, broadcast) =>
         runtimeRef.current?.createGroup({name: meta.name, about: meta.about, gradient: meta.gradient, reactions: meta.reactions, closed, private: isPrivate, broadcast}) ?? Promise.resolve(null)}
       onJoinGroup={groupId => { void runtimeRef.current?.joinGroup(groupId); }}
-      onAcceptInviteLink={url => { void runtimeRef.current?.acceptInviteLink(url); }}
       onLeaveGroup={groupId => { void runtimeRef.current?.leaveGroup(groupId); }}
       onKickGroupMember={(groupId, pubkey) => { void runtimeRef.current?.kickGroupMember(groupId, pubkey); }}
       onAddGroupMember={(groupId, pubkey, asAdmin) => { void runtimeRef.current?.addGroupMember(groupId, pubkey, asAdmin); }}

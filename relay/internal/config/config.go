@@ -28,6 +28,10 @@ import (
 //	applied by policy.GroupGuard; the 39000-39003 state is written only by the relay itself
 //	(the guard rejects member-submitted state), so allow-listing them here is safe.
 //
+// 1987/30500 (client draft-sharing pair: draft access request / draft access delivery) were live on
+// prod's hand-edited explicit allowed_kinds before this constant carried them (added 2026-07-29,
+// rate-limit default-deny audit).
+//
 // kind 1059 (DM gift wrap) goes through the PoW path, not this list. The membership-binding
 // kind is handled separately.
 // DefaultMaxEventBytes and DefaultMaxTagsPerEvent are the content-neutral weight caps applied
@@ -79,6 +83,12 @@ var DefaultAllowedKinds = []int{
 	9, 11, 12,
 	9000, 9001, 9002, 9003, 9004, 9005, 9006, 9007, 9008, 9009, 9021, 9022,
 	39000, 39001, 39002, 39003, 39004, 39005,
+	// 1987 (draft access request) / 30500 (draft access delivery): client/src/contracts/index.ts
+	// Kind.DraftAccessRequest / Kind.DraftDelivery — the client-side draft-sharing pair. Live on prod's
+	// hand-edited explicit allowed_kinds before this addition (verified read-only 2026-07-29); this
+	// brings the repo's source-of-truth constant in line with what prod already admits (rate-limit
+	// default-deny audit, 2026-07-29).
+	1987, 30500,
 }
 
 // NOTE: voice kinds 1222/1244 are allow-listed here so bound members may publish them, but the

@@ -616,3 +616,223 @@ func TestReportsAreRateLimitedButModeratorsAreNot(t *testing.T) {
 		}
 	}
 }
+
+// --- 2026-07-29 rate-limiter default-deny fix ---------------------------------------------------
+//
+// categorize()'s default branch used to return catNone (unlimited) for 20 allow-listed kinds it had
+// no case for. The tests below cover the new catReaction/catGroupChat/catDefault categories, the two
+// fail-closed default branches (categorize()'s and windowFor()'s), and the blind/attributed carve-out
+// interactions that make kind 7 tricky (an untagged blind vote must stay exempt; an h-tagged or
+// tokened-and-h-tagged reaction must not).
+
+// TestCategorizeReactionAndGroupChat locks in the two new categories added by this fix.
+// categorize() itself maps kind 7 to catReaction UNCONDITIONALLY (it does not look at tags) — the
+// h-tag/blind-token distinction is resolved earlier, in RejectEvent, before categorize() is ever
+// called (see TestBlindUntaggedReactionStillFullyExempt /
+// TestAttributedHTaggedReactionCountedEvenWithToken for that layer). Both kind 7 and kinds 9/11/12
+// used to fall through to catNone (unlimited) before this fix.
+func TestCategorizeReactionAndGroupChat(t *testing.T) {
+	if got := categorize(ev(7, "x")); got != catReaction {
+		t.Errorf("kind 7: categorize = %v, want catReaction", got)
+	}
+	for _, k := range []int{9, 11, 12} {
+		if got := categorize(ev(k, "x")); got != catGroupChat {
+			t.Errorf("kind %d: categorize = %v, want catGroupChat", k, got)
+		}
+	}
+}
+
+// TestCategorizeVoiceMirrorsTextEquivalents: the voice-message kinds (NIP-A0, off by default via
+// AllowVoice) must be bounded exactly like their text equivalents, so enabling voice later doesn't
+// silently reopen an unlimited path.
+func TestCategorizeVoiceMirrorsTextEquivalents(t *testing.T) {
+	if got := categorize(ev(1222, "x")); got != catPost {
+		t.Errorf("kind 1222 (voice message): categorize = %v, want catPost", got)
+	}
+	if got := categorize(ev(1244, "x")); got != catComment {
+		t.Errorf("kind 1244 (voice comment): categorize = %v, want catComment", got)
+	}
+}
+
+// TestCategorizeAdministrativeKindsUseDefaultTier covers the bulk of the 2026-07-29 audit's
+// unlimited-kinds finding: profile, NIP-51 lists, long-form articles, app data, space-key delivery,
+// live-activity docs, media blobs (non-blind path), channel create/metadata, polls, the double-spend
+// witness, and the draft-sharing pair (1987/30500, also newly added to config.DefaultAllowedKinds by
+// this change) — all legitimately infrequent, so they share the conservative catDefault tier rather
+// than each getting a bespoke window.
+func TestCategorizeAdministrativeKindsUseDefaultTier(t *testing.T) {
+	kinds := []int{0, 10000, 10003, 10009, 30023, 30078, 30079, 30311, 30351, 40, 41, 1018, 1068, 1986, 1987, 30500}
+	for _, k := range kinds {
+		if got := categorize(ev(k, "x")); got != catDefault {
+			t.Errorf("kind %d: categorize = %v, want catDefault", k, got)
+		}
+	}
+}
+
+// TestCategorizeRelayManagedGroupStateExplicit documents that the relay-managed NIP-29 group state
+// kinds (39000-39005) — never actually admitted from a client; GroupGuard rejects them first
+// (codeGroupStateManaged, groups.go) — still get an explicit catDefault case rather than being left
+// to the default: branch, so the omission reads as audited, not missed.
+func TestCategorizeRelayManagedGroupStateExplicit(t *testing.T) {
+	for k := 39000; k <= 39005; k++ {
+		if got := categorize(ev(k, "x")); got != catDefault {
+			t.Errorf("kind %d: categorize = %v, want catDefault", k, got)
+		}
+	}
+}
+
+// TestCategorizeUnknownKindFailsClosed is THE pinning test for this fix's core change: an arbitrary
+// kind categorize() has never heard of must fail CLOSED onto catDefault, never catNone. This guards
+// against a future author reverting the default: branch back to "return catNone" and silently
+// reopening the exact hole the 2026-07-29 audit closed.
+func TestCategorizeUnknownKindFailsClosed(t *testing.T) {
+	if got := categorize(ev(654321, "x")); got != catDefault {
+		t.Fatalf("categorize(unknown kind) = %v, want catDefault (fail closed, NOT catNone)", got)
+	}
+}
+
+// TestCategorizeDeliberateExemptionsStillNone locks in that kind 31925 (event "interested" RSVP) is
+// a DELIBERATE, fully-unbounded exemption (catNone), not merely a catDefault kind that happens to
+// look unlimited because the policy hasn't set a Default window — those two would be indistinguishable
+// under an all-zero Limits{}, so this test uses a NON-zero Default to show the categories genuinely
+// behave differently: a catDefault kind (30023) gets capped by it, while 31925 (catNone) never even
+// reaches the windowFor/admitUser machinery and sails past the identical cap unconditionally.
+func TestCategorizeDeliberateExemptionsStillNone(t *testing.T) {
+	if got := categorize(ev(31925, "x")); got != catNone {
+		t.Fatalf("kind 31925: categorize = %v, want catNone (deliberate, documented exemption)", got)
+	}
+
+	l := New(&fakeSource{limits: policy.Limits{Default: policy.Window{Daily: 2}}})
+	for i := 0; i < 2; i++ {
+		if reject, msg := l.RejectEvent(context.Background(), ev(30023, "author")); reject {
+			t.Fatalf("article %d within the Default cap should admit: %s", i, msg)
+		}
+	}
+	if reject, _ := l.RejectEvent(context.Background(), ev(30023, "author")); !reject {
+		t.Fatal("a catDefault kind (30023) must be capped once a non-zero Default window is configured")
+	}
+	// kind 31925 sails past the SAME cap unconditionally, any number of times — it is catNone and
+	// never reaches windowFor/admitUser at all.
+	for i := 0; i < 10; i++ {
+		if reject, msg := l.RejectEvent(context.Background(), ev(31925, "author")); reject {
+			t.Fatalf("kind-31925 event %d should be unconditionally admitted regardless of the Default cap: %s", i, msg)
+		}
+	}
+}
+
+// TestWindowForUnknownCategoryFallsBackToDefault pins the second layer of the fail-closed fix:
+// windowFor(), called with a category value matching none of its cases (a synthetic out-of-range
+// value standing in for a future category constant added without a windowFor case), must return
+// limits.Default, never the zero-value policy.Window{} (which admitUser/RejectEvent treat as
+// "unlimited").
+func TestWindowForUnknownCategoryFallsBackToDefault(t *testing.T) {
+	limits := policy.Limits{Default: policy.Window{Daily: 42}}
+	if got := windowFor(category(999), limits); got != limits.Default {
+		t.Fatalf("windowFor(unknown category) = %+v, want limits.Default %+v", got, limits.Default)
+	}
+}
+
+// TestReactionCeilingAboveChannelWindow is the regression test that would have caught a naive "just
+// reuse catChannel for kind 7" implementation: with Channel capped far below Reaction, 100 h-tagged
+// reactions from one pubkey must ALL be admitted — a catChannel-based implementation would start
+// rejecting at #51.
+func TestReactionCeilingAboveChannelWindow(t *testing.T) {
+	src := &fakeSource{limits: policy.Limits{Channel: policy.Window{Daily: 50}, Reaction: policy.Window{Daily: 500}}}
+	l := New(src)
+	tag := nostr.Tag{"h", "grp"}
+	for i := 0; i < 100; i++ {
+		if reject, msg := l.RejectEvent(context.Background(), ev(7, "voter", tag)); reject {
+			t.Fatalf("h-tagged reaction %d should be admitted under the Reaction ceiling: %s", i, msg)
+		}
+	}
+}
+
+// TestGroupChatCountedPerUserAndCapped mirrors TestManagementKindsThrottled for the new GroupChat
+// window: a single pubkey's kind-9 flood is counted per-user and capped, with the reject message
+// naming "group message" (name(catGroupChat)).
+func TestGroupChatCountedPerUserAndCapped(t *testing.T) {
+	src := &fakeSource{limits: policy.Limits{GroupChat: policy.Window{Daily: 3}}}
+	l := New(src)
+	for i := 0; i < 3; i++ {
+		if reject, msg := l.RejectEvent(context.Background(), ev(9, "chatty")); reject {
+			t.Fatalf("group chat message %d rejected early: %s", i, msg)
+		}
+	}
+	reject, msg := l.RejectEvent(context.Background(), ev(9, "chatty"))
+	if !reject {
+		t.Fatal("4th group chat message should be rejected by the GroupChat daily cap")
+	}
+	if !strings.HasPrefix(msg, "[rate_limited] ") {
+		t.Errorf("reject message %q should begin with [rate_limited]", msg)
+	}
+	if !strings.Contains(msg, "group message") {
+		t.Errorf("reject message %q should name the category %q", msg, "group message")
+	}
+}
+
+// TestReactionCountedPerUserAndCapped is the same shape as TestGroupChatCountedPerUserAndCapped for
+// h-tagged kind-7 reactions.
+func TestReactionCountedPerUserAndCapped(t *testing.T) {
+	src := &fakeSource{limits: policy.Limits{Reaction: policy.Window{Daily: 3}}}
+	l := New(src)
+	tag := nostr.Tag{"h", "grp"}
+	for i := 0; i < 3; i++ {
+		if reject, msg := l.RejectEvent(context.Background(), ev(7, "voter", tag)); reject {
+			t.Fatalf("reaction %d rejected early: %s", i, msg)
+		}
+	}
+	if reject, _ := l.RejectEvent(context.Background(), ev(7, "voter", tag)); !reject {
+		t.Fatal("4th reaction should be rejected by the Reaction daily cap")
+	}
+}
+
+// TestBlindUntaggedReactionStillFullyExempt is a regression guard for the blind-vote carve-out
+// (isBlindPost/isAttributedSpaceContent in RejectEvent): an UNTAGGED kind-7 carrying a stiq_token
+// must be admitted unconditionally. The Reaction cap here is intentionally TIGHT (1/day): if the
+// blind-vote carve-out did not fire first and this fell through to catReaction's per-user window, the
+// 2nd event would be rejected. All 20 admitting proves the exemption runs upstream of catReaction
+// entirely, not that the window merely happens to be generous.
+func TestBlindUntaggedReactionStillFullyExempt(t *testing.T) {
+	src := &fakeSource{limits: policy.Limits{Reaction: policy.Window{Daily: 1}}}
+	l := New(src)
+	tok := nostr.Tag{"stiq_token", "x"}
+	for i := 0; i < 20; i++ {
+		if reject, msg := l.RejectEvent(context.Background(), ev(7, "throwaway", tok)); reject {
+			t.Fatalf("untagged blind reaction %d must remain exempt: %s", i, msg)
+		}
+	}
+}
+
+// TestAttributedHTaggedReactionCountedEvenWithToken is the companion to
+// TestBlindUntaggedReactionStillFullyExempt: an h-tagged kind-7 carrying BOTH an h tag and a
+// stiq_token must still be counted against Reaction (tokens-everywhere) — the token does not
+// re-exempt attributed space content, only a truly anonymous blind post.
+func TestAttributedHTaggedReactionCountedEvenWithToken(t *testing.T) {
+	src := &fakeSource{limits: policy.Limits{Reaction: policy.Window{Daily: 2}}}
+	l := New(src)
+	h, tok := nostr.Tag{"h", "grp"}, nostr.Tag{"stiq_token", "x"}
+	for i := 0; i < 2; i++ {
+		if reject, msg := l.RejectEvent(context.Background(), ev(7, "voter", h, tok)); reject {
+			t.Fatalf("h-tagged+tokened reaction %d within the cap should admit: %s", i, msg)
+		}
+	}
+	if reject, _ := l.RejectEvent(context.Background(), ev(7, "voter", h, tok)); !reject {
+		t.Fatal("h-tagged+tokened reaction PAST the Reaction cap must still be rejected — the token must not re-exempt attributed content")
+	}
+}
+
+// TestDefaultTierCountedPerUserAndCapped proves the catDefault tier is a REAL per-user cap, not just
+// a category label: a catDefault-mapped kind (30023, long-form article) is counted and capped like
+// any other attributed category.
+func TestDefaultTierCountedPerUserAndCapped(t *testing.T) {
+	src := &fakeSource{limits: policy.Limits{Default: policy.Window{Daily: 2}}}
+	l := New(src)
+	for i := 0; i < 2; i++ {
+		if reject, msg := l.RejectEvent(context.Background(), ev(30023, "writer")); reject {
+			t.Fatalf("article %d within the Default cap should admit: %s", i, msg)
+		}
+	}
+	if reject, _ := l.RejectEvent(context.Background(), ev(30023, "writer")); !reject {
+		t.Fatal("3rd article should be rejected by the Default daily cap")
+	}
+}

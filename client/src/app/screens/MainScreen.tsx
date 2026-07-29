@@ -95,6 +95,8 @@ import {ChannelDetail} from '../../channels/components/ChannelDetail';
 import {CreateChannel} from '../../channels/components/CreateChannel';
 import {GroupView} from '../../channels/components/GroupView';
 import {parseSpaceEmbed, encodeSpaceEmbed, sanitizeBody} from '../../channels/spaceEmbed';
+import {parseInviteLink} from '../../channels/invite';
+import {CHANNEL_COORD_RE} from '../../feed/components/RefEmbed';
 import {parseMsgEmbed} from '../../channels/msgEmbed';
 import {parseDraftEmbed, encodeDraftEmbed, draftExcerptWouldTrim, MAX_DRAFT_EXCERPT_LEN, type DraftRef} from '../../feed/draftEmbed';
 import type {DraftDeliverySnapshot} from '../../feed/draftAccess';
@@ -539,8 +541,6 @@ export interface MainScreenProps {
   /** Create a NIP-29 group/private channel; returns its group id for optimistic navigation. */
   onCreateGroup?: (meta: ChannelMetadata, closed?: boolean, isPrivate?: boolean, broadcast?: boolean) => Promise<string | null> | void;
   onJoinGroup?: (groupId: string) => void;
-  /** Accept a `stiq://channel/<id>` invite link tapped as an embed card in a message body (in-app join). */
-  onAcceptInviteLink?: (url: string) => void;
   onLeaveGroup?: (groupId: string) => void;
   onKickGroupMember?: (groupId: string, pubkey: string) => void;
   /** Role changes on existing members (promote/demote); direct adds are gone — invites only. */
@@ -696,6 +696,13 @@ export interface MainScreenProps {
   pendingNav?: NavTarget | null;
   /** Acknowledges pendingNav has been consumed so it isn't re-applied on the next render. */
   onPendingNavHandled?: () => void;
+  /** A `stiq://channel/<id>` invite link queued by App.tsx's deep-link handler (cold-start replay or
+   *  a link that arrived while the app was running), or null when nothing is pending. Routed through
+   *  the SAME `handleInviteLink` an in-body tapped invite card uses -- never joins on its own.
+   *  Mirrors pendingNav/onPendingNavHandled. */
+  pendingInviteLink?: string | null;
+  /** Acknowledges pendingInviteLink has been consumed so it isn't re-applied on the next render. */
+  onPendingInviteLinkHandled?: () => void;
   /** Count of unread derived notifications — the number on the bell's badge (0 = no badge). */
   notifUnreadCount?: number;
   /** Live-derived notification list, built fresh from cached data on demand (no persisted log). */
@@ -931,7 +938,6 @@ export function MainScreen({
   relaySupportsNip29 = false,
   onCreateGroup,
   onJoinGroup,
-  onAcceptInviteLink,
   onLeaveGroup,
   onKickGroupMember,
   onAddGroupMember,
@@ -992,6 +998,8 @@ export function MainScreen({
   onLoadOlderGroupPage,
   pendingNav,
   onPendingNavHandled,
+  pendingInviteLink,
+  onPendingInviteLinkHandled,
   notifUnreadCount = 0,
   onGetNotifications,
   onGetNotificationPrefs,
@@ -1928,6 +1936,56 @@ export function MainScreen({
     return false;
   }, []);
 
+  /**
+   * Route a `stiq://channel/<id>` invite link (deep link OR an in-body tapped card) into either a
+   * direct open (public channel; already-a-member group -- nothing to confirm) or the SAME
+   * locked-preview join dialog `openEmbedTarget`'s `stiq:space:` branch uses (non-member group).
+   * NEVER calls joinGroup/requestToJoin/acceptInviteLink itself -- those only fire from an explicit
+   * tap inside the dialog (onRequestToJoin/onJoinGroup/onAcceptSpaceInvite, already wired below).
+   * `[]` deps: reads only refs + stable setState setters + the module-level fetchChannelIfUnknown,
+   * same reasoning as pushNavOrigin/popNavOriginIfMatches above.
+   */
+  const handleInviteLink = useCallback((url: string): void => {
+    const parsed = parseInviteLink(url);
+    if (!parsed) return;
+    const spaceId = parsed.spaceId;
+
+    if (CHANNEL_COORD_RE.test(spaceId)) {
+      // Public channel coordinate -- viewing/following grants no privilege, so there is nothing to
+      // confirm. Same open sequence as openEmbedTarget's stiq:space: 30311 branch (MainScreen.tsx
+      // ~1832-1844): fetchChannelIfUnknown kicks the relay fetch when not yet cached, and
+      // setOpenChannelId shows the existing "Opening channel" placeholder until it resolves.
+      setTab('channels');
+      setOpenGroupId(null);
+      setChannelDetailOpen(false);
+      fetchChannelIfUnknown(spaceId, embedChannelsRef.current, embedGetEventRef.current);
+      setOpenChannelId(spaceId);
+      return;
+    }
+
+    // NIP-29 group id. Already a member (re-tapping an old invite, or a link shared back to you
+    // after an admin let you in) -- open directly, nothing left to confirm.
+    if (embedGroupsRef.current.some(g => g.id === spaceId)) {
+      setTab('channels');
+      setOpenChannelId(null);
+      setChannelDetailOpen(false);
+      setOpenGroupId(spaceId);
+      return;
+    }
+
+    // Non-member: open the SAME locked-preview join dialog the stiq:space: embed-token flow uses
+    // (joinReq state, rendered in the Modal below) instead of ever joining directly. A bare
+    // stiq://channel/<id> link carries no name/gradient (unlike a self-contained stiq:space: token)
+    // -- the dialog already falls back to generic "Private space"/"Invite-only space" copy until
+    // onGetSpacePreview hydrates (or forever, if the fetch never lands), and the Join/Request/Accept
+    // button always requires an explicit tap regardless, so a previewSpace() failure or timeout can
+    // never fall through to an auto-join.
+    setJoinReqSent(false);
+    setJoinNote('');
+    embedPreviewSpaceRef.current?.(spaceId);
+    setJoinReq({groupId: spaceId});
+  }, []);
+
   // Completes a tapped embed whose target wasn't cached at tap time. Runs on every render on
   // purpose (no dep array): the store snapshots that can resolve the target — feed items, channel
   // and group message versions — all arrive via renders, and the null-check makes the idle cost
@@ -2617,7 +2675,7 @@ export function MainScreen({
         onOpenProfile={onGetProfile ? () => setOpenProfile(onGetProfile(openConversation.peer)) : undefined}
         onLookupEvent={onGetEvent}
         onOpenNostrPost={openEmbedTarget}
-        onOpenInviteLink={onAcceptInviteLink}
+        onOpenInviteLink={handleInviteLink}
         blocked={peerBlocked}
         onBlock={onBlockUser ? () => onBlockUser(openConversation.peer) : undefined}
         onUnblock={onUnblockUser ? () => onUnblockUser(openConversation.peer) : undefined}
@@ -3224,6 +3282,20 @@ export function MainScreen({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingNav]);
+
+  // A stiq://channel/<id> deep link arrives here only after App.tsx's deliverDeepLink queue has
+  // confirmed runtime.init() is genuinely done (see App.tsx's pendingDeepLink/deliverDeepLink) --
+  // the SAME cold-start-ordering guarantee pendingNav already relies on for a notification tap, so
+  // groups/channels are real (not empty) by the time handleInviteLink's membership/preview checks
+  // run. Consumed exactly once, then acknowledged so it isn't re-applied on the next render.
+  useEffect(() => {
+    if (pendingInviteLink) {
+      const url = pendingInviteLink;
+      handleInviteLink(url);
+      onPendingInviteLinkHandled?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingInviteLink]);
 
   return (
     <SafeAreaView style={styles.root} onTouchStart={handleTouchStart}>
@@ -4379,7 +4451,7 @@ export function MainScreen({
           // openChannelPostId directly, which nothing renders while a GROUP (not a channel) is
           // open — a dead tap.
           onOpenRef={openEmbedTarget}
-          onOpenInviteLink={onAcceptInviteLink}
+          onOpenInviteLink={handleInviteLink}
           onOpenMember={onGetProfile ? pubkey => {
             if (openGroupId) pushNavOrigin({kind: 'group', groupId: openGroupId}, {kind: 'profile', pubkey});
             setOpenGroupId(null);

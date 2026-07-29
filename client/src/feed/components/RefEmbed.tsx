@@ -220,7 +220,7 @@ export function embedFromDraftRef(ref: DraftRef | 'legacy'): RefEmbedView {
 // (`30311:<64-hex owner>:<identifier>`) or a bare NIP-29 private-group id. The bare link carries no
 // name/gradient (unlike a self-contained `stiq:space:` token), so the shape of the id is all we have
 // to label the card offline. A short, elided id fills the title so a viewer sees WHICH space.
-const CHANNEL_COORD_RE = /^30311:[0-9a-f]{64}:/i;
+export const CHANNEL_COORD_RE = /^30311:[0-9a-f]{64}:/i;
 
 /**
  * Map a parsed `stiq://channel/<id>` invite link into the embed's display fields — offline, from the

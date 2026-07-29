@@ -375,7 +375,6 @@ import {
   addEncryptedSpace,
   isEncryptedSpace,
 } from '../channels/encryptedSpaces';
-import {parseInviteLink} from '../channels/invite';
 import {
   decryptForSpace,
   encryptForSpace,
@@ -8944,23 +8943,19 @@ export class AppRuntime {
     await this.inviteToSpace(groupId, [recipientPubkey]);
   }
 
-  /**
-   * Accept an invite LINK: parse it, store any carried E2E key (so the space decrypts immediately),
-   * then join. Use this for the deep-link / pasted-link path. Returns the space id (or null when the
-   * link is unrecognisable). The key fragment, if present, never leaves the device.
-   */
-  async acceptInviteLink(url: string): Promise<string | null> {
-    const parsed = parseInviteLink(url);
-    if (!parsed) return null;
-    if (parsed.key && parsed.epoch !== undefined) {
-      // We received a space key via the invite fragment → this space is encrypted. Mark it locally
-      // (relay-independent) BEFORE joining so any immediate send is fail-closed, and cache the key.
-      await addEncryptedSpace(parsed.spaceId);
-      await this.cacheSpaceKey(parsed.spaceId, parsed.epoch, parsed.key);
-    }
-    await this.joinGroup(parsed.spaceId);
-    return parsed.spaceId;
-  }
+  // acceptInviteLink() USED TO LIVE HERE, and it is deliberately gone (vc19).
+  //
+  // It parsed a stiq://channel/<id> link and immediately joinGroup()'d it, which meant one tap on
+  // any link — external, or an invite card inside a message — published a SIGNED kind-9021 join
+  // request under the user's identity with nothing asked and nothing shown. Both call sites now go
+  // through MainScreen.handleInviteLink, which opens the locked-preview dialog and publishes only
+  // from an explicit button press.
+  //
+  // Deleted rather than left dormant on purpose: a still-callable "parse a link and join it"
+  // helper is precisely how this reappears — a future caller wires it up in good faith and the
+  // consent gate is silently gone again, with no test failing. If a programmatic join is ever
+  // genuinely needed, call joinGroup()/requestToJoin() directly from behind a confirmation, so the
+  // consent step is visible at the call site.
 
   // ── Membership handoff: sealed-note join requests + accept-first invites ─────────────────────
   // (design_handoff_membership; MEMBERSHIP_HANDOFF_PLAN.md. Relay untouched — 9021/9022/9000/9001

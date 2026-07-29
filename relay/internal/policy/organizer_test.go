@@ -227,6 +227,88 @@ func TestMailboxCapsFallBackForLegacyLimits(t *testing.T) {
 	}
 }
 
+// --- 2026-07-29 rate-limiter default-deny fix: Reaction/GroupChat/Default pointer fields --------
+//
+// Reaction/GroupChat/Default (limitsJSON) are pointers for the exact same reason MailboxPerMin/
+// MailboxPerConnPerMin already are (see TestMailboxCapsFallBackForLegacyLimits above): an absent key
+// must fall back to the protective DefaultLimits, never decode as an explicit {0,0,0} = unlimited.
+
+// TestLimitsJSONOldPayloadFallsBackToDefaultForNewFields is the regression test for the exact
+// live-prod scenario the pointer-typed fields exist to prevent: a stiq:limits payload shaped
+// byte-for-byte like prod's live limits.json (verified 2026-07-29 — predates this change, so it has
+// no reaction/group_chat/default keys at all) must decode with Reaction/GroupChat/Default equal to
+// DefaultLimits' non-zero values, NOT the zero-value Window{} (=unlimited). This test must FAIL
+// against a plain (non-pointer) field implementation and PASS against the pointer implementation —
+// it is the one that would have caught the exact regression this change is designed to prevent: an
+// organizer's Node issuer republishing limits.json before it knows about these new fields.
+func TestLimitsJSONOldPayloadFallsBackToDefaultForNewFields(t *testing.T) {
+	h := NewConfigHolder([]string{orgPK})
+	body := `{"posts":{"daily":50,"weekly":200,"monthly":600},"comments":{"daily":200,"weekly":800,"monthly":2400},"channel":{"daily":100,"weekly":400,"monthly":1200},"dm_global_per_min":700,"exempt_moderators":true}`
+	if reject, msg := h.RejectEvent(context.Background(), appData(orgPK, dLimits, body)); reject {
+		t.Fatalf("legacy-shaped limits event rejected: %s", msg)
+	}
+	l := h.Limits()
+	if l.Reaction != DefaultLimits.Reaction {
+		t.Errorf("Reaction = %+v, want the protective default %+v (got the unlimited zero value instead)", l.Reaction, DefaultLimits.Reaction)
+	}
+	if l.GroupChat != DefaultLimits.GroupChat {
+		t.Errorf("GroupChat = %+v, want the protective default %+v (got the unlimited zero value instead)", l.GroupChat, DefaultLimits.GroupChat)
+	}
+	if l.Default != DefaultLimits.Default {
+		t.Errorf("Default = %+v, want the protective default %+v (got the unlimited zero value instead)", l.Default, DefaultLimits.Default)
+	}
+	if l.Reaction == (Window{}) || l.GroupChat == (Window{}) || l.Default == (Window{}) {
+		t.Fatalf("new fields must never silently become Window{} (unlimited) for a legacy payload: %+v", l)
+	}
+}
+
+// TestLimitsJSONExplicitZeroMeansUnlimitedForNewFields confirms the operator escape hatch survives
+// the pointer change: an EXPLICIT {"daily":0,"weekly":0,"monthly":0} for reaction/group_chat/default
+// must decode to Window{} (genuinely unlimited), not silently keep the code default. Mirrors the
+// explicit-0 half of TestMailboxCapsParsedFromPublishedLimits above.
+func TestLimitsJSONExplicitZeroMeansUnlimitedForNewFields(t *testing.T) {
+	h := NewConfigHolder([]string{orgPK})
+	body := `{"reaction":{"daily":0,"weekly":0,"monthly":0},"group_chat":{"daily":0,"weekly":0,"monthly":0},"default":{"daily":0,"weekly":0,"monthly":0}}`
+	if reject, msg := h.RejectEvent(context.Background(), appData(orgPK, dLimits, body)); reject {
+		t.Fatalf("limits event rejected: %s", msg)
+	}
+	l := h.Limits()
+	if l.Reaction != (Window{}) {
+		t.Errorf("explicit reaction:0 should decode to Window{} (unlimited), got %+v", l.Reaction)
+	}
+	if l.GroupChat != (Window{}) {
+		t.Errorf("explicit group_chat:0 should decode to Window{} (unlimited), got %+v", l.GroupChat)
+	}
+	if l.Default != (Window{}) {
+		t.Errorf("explicit default:0 should decode to Window{} (unlimited), got %+v", l.Default)
+	}
+}
+
+// TestLimitsJSONExplicitNonZeroForNewFields confirms an organizer publishing real numbers for the
+// new fields sees them applied verbatim — the positive-value counterpart of the two tests above,
+// mirroring the non-zero half of TestMailboxCapsParsedFromPublishedLimits. Uses the prod-scale
+// first-week-safety-margin numbers from the rate-limiter default-deny spec (§7).
+func TestLimitsJSONExplicitNonZeroForNewFields(t *testing.T) {
+	h := NewConfigHolder([]string{orgPK})
+	body := `{"reaction":{"daily":1000,"weekly":5000,"monthly":15000},"group_chat":{"daily":600,"weekly":3000,"monthly":9000},"default":{"daily":100,"weekly":400,"monthly":1200}}`
+	if reject, msg := h.RejectEvent(context.Background(), appData(orgPK, dLimits, body)); reject {
+		t.Fatalf("limits event rejected: %s", msg)
+	}
+	l := h.Limits()
+	wantReaction := Window{Daily: 1000, Weekly: 5000, Monthly: 15000}
+	wantGroupChat := Window{Daily: 600, Weekly: 3000, Monthly: 9000}
+	wantDefault := Window{Daily: 100, Weekly: 400, Monthly: 1200}
+	if l.Reaction != wantReaction {
+		t.Errorf("Reaction = %+v, want %+v", l.Reaction, wantReaction)
+	}
+	if l.GroupChat != wantGroupChat {
+		t.Errorf("GroupChat = %+v, want %+v", l.GroupChat, wantGroupChat)
+	}
+	if l.Default != wantDefault {
+		t.Errorf("Default = %+v, want %+v", l.Default, wantDefault)
+	}
+}
+
 func TestNoOrganizerConfigured(t *testing.T) {
 	h := NewConfigHolder(nil)
 	// With no organizer, a stiq config event from anyone is rejected (no trust root).

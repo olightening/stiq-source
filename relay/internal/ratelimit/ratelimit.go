@@ -107,10 +107,34 @@ const (
 	catPost
 	catComment
 	catChannel
+	// catReaction is attributed (h-tagged) kind-7 reactions/votes — the group/channel reaction that is
+	// NEVER exempt from the limiter even when tokened (tokens-everywhere). An UNTAGGED kind-7 (plain
+	// blind feed vote) never reaches this category at all — isBlindPost/isAttributedSpaceContent
+	// short-circuits it in RejectEvent before categorize() runs; its price is the token, not this
+	// window. Reactions are the cheapest possible write (single tap, no body) and members legitimately
+	// fire far more of them per day than posts or comments, so this gets its own, much higher-ceiling
+	// window rather than sharing catChannel's cadence (tuned for infrequent management/broadcast events).
+	catReaction
+	// catGroupChat is NIP-29 group chat/thread-root/thread-reply (kinds 9/11/12) — the PRIMARY
+	// communication surface of a group, not an occasional management action like catChannel's other
+	// tenants (group management, reports, event-doc republishes), so it runs at a much higher cadence
+	// and gets its own window. Pre-existing documented gap (relay.go, membership.go) before this change.
+	catGroupChat
+	// catDefault is the fail-closed backstop for any allow-listed kind with no bespoke category:
+	// categorize()'s default branch returns this instead of catNone (unlimited), and windowFor()'s
+	// default branch returns limits.Default instead of the zero-value Window{} (also unlimited). The
+	// 2026-07-29 audit found 20 allow-listed kinds silently falling through to unlimited via those two
+	// defaults — this closes that class of gap for kinds added to the allow-list in the future too, not
+	// just the ones enumerated in categorize() today.
+	catDefault
+	// catReaction/catGroupChat/catDefault above are attributed/per-user-counted, so they must stay
+	// BEFORE this line — catDM/catMailbox/catMailboxResponse below are all unattributed (ephemeral-
+	// signed) and deliberately excluded from the userCounters array (sized [catDefault+1]int). Do not
+	// reorder.
 	catDM
 	// catMailbox is enroll/draw/unlock REQUESTS. Like catDM it is ephemeral-signed and unattributable,
 	// so it is handled by global + per-connection windows, never the per-user counters — it must stay
-	// out of the userCounters array (sized by catChannel).
+	// out of the userCounters array (sized by catDefault).
 	catMailbox
 	// catMailboxResponse is the organizer's enroll/draw/unlock RESPONSE kinds. Ephemeral-signed by an
 	// unverifiable mailbox key, so — like catMailbox — never per-user counted. Bounded by a GLOBAL-only
@@ -122,7 +146,7 @@ const (
 // userCounters holds per-day event counts per category for one pubkey.
 type userCounters struct {
 	// days maps a day index (unix/86400) to per-category counts.
-	days map[int64]*[catChannel + 1]int
+	days map[int64]*[catDefault + 1]int
 }
 
 // connWindow is one connection's recent mailbox-request timestamps plus a last-seen stamp used to
@@ -277,7 +301,7 @@ func (l *Limiter) admitUser(pubkey string, cat category, now time.Time, win poli
 
 	uc := l.users[pubkey]
 	if uc == nil {
-		uc = &userCounters{days: make(map[int64]*[catChannel + 1]int)}
+		uc = &userCounters{days: make(map[int64]*[catDefault + 1]int)}
 		l.users[pubkey] = uc
 	}
 	uc.prune(today)
@@ -295,7 +319,7 @@ func (l *Limiter) admitUser(pubkey string, cat category, now time.Time, win poli
 
 	bucket := uc.days[today]
 	if bucket == nil {
-		bucket = &[catChannel + 1]int{}
+		bucket = &[catDefault + 1]int{}
 		uc.days[today] = bucket
 	}
 	bucket[cat]++
@@ -497,8 +521,17 @@ func windowFor(cat category, l policy.Limits) policy.Window {
 		return l.Comments
 	case catChannel:
 		return l.Channel
+	case catReaction:
+		return l.Reaction
+	case catGroupChat:
+		return l.GroupChat
+	case catDefault:
+		return l.Default
 	default:
-		return policy.Window{}
+		// Defense-in-depth against the SAME bug class recurring one layer down: if a future category
+		// constant is ever added to the iota block above without a case here, fail closed onto the
+		// conservative default window rather than unlimited (policy.Window{}).
+		return l.Default
 	}
 }
 
@@ -510,6 +543,15 @@ func name(cat category) string {
 		return "comment"
 	case catChannel:
 		return "channel"
+	case catReaction:
+		return "reaction"
+	case catGroupChat:
+		return "group message"
+	case catDefault:
+		// Reused string, not a distinct one: catDefault covers many unrelated kinds (profile, lists,
+		// articles, app data, polls, ...), so a generic reject message is deliberate here, unlike the
+		// other categories above which each name one specific kind of content.
+		return "event"
 	default:
 		return "event"
 	}
@@ -517,6 +559,12 @@ func name(cat category) string {
 
 // categorize maps an event to a rate-limit category, mirroring the client's comment detection
 // (a kind-1 note carrying the 'stiq-comment' marker is a comment, not a feed post).
+//
+// categorize() is only ever reached for a kind ALREADY in the allow-list: Membership.admitAttributed
+// rejects anything else with codeKindNotPermitted before the limiter ever runs (relay.go's hook order
+// is signature -> weight -> membership -> organizer -> ratelimit -> group -> commit). So every case
+// below — and the default branch itself (see its comment) — exists to bound a kind a real bound
+// member CAN already publish today, not a hypothetical one.
 func categorize(event *nostr.Event) category {
 	switch event.Kind {
 	case 1:
@@ -526,8 +574,36 @@ func categorize(event *nostr.Event) category {
 		return catPost
 	case 1111:
 		return catComment
+	case 7:
+		// Reactions/votes. An UNTAGGED kind-7 (plain feed vote) that carries a stiq_token never reaches
+		// this switch at all — RejectEvent's isBlindPost/isAttributedSpaceContent carve-out (above)
+		// exempts it before categorize() runs, exactly like every other blind post; its price is the
+		// token, not this window. An H-TAGGED kind-7 (group/channel reaction) is NEVER exempt, tokened
+		// or not (tokens-everywhere), so it always lands here — and so does an untagged, TOKENLESS
+		// kind-7 (the non-blind direct-publish path, e.g. blind_required=false): the signer there is a
+		// real, reused npub, so per-user counting is safe and desirable, exactly as for 30351 below.
+		// Either way, reactions are the cheapest possible write (single tap, no body) and members
+		// legitimately fire far more of them per day than they post or comment — catChannel's cadence
+		// (tuned for infrequent management/broadcast events) would choke a normal active member, so
+		// this gets its own, much higher-ceiling window (see catReaction).
+		return catReaction
+	case 1222:
+		// Voice message — the audio-shaped counterpart of kind 1 (kindVoiceMessage in organizer.go).
+		// Same cadence as an ordinary post. Currently unreachable in practice (AllowVoice defaults
+		// false, prod included) but must still be bounded for the day it's switched on.
+		return catPost
+	case 1244:
+		// Voice comment — the audio-shaped counterpart of kind 1111 (kindVoiceComment in organizer.go).
+		return catComment
 	case 42, 1311:
 		return catChannel
+	case 9, 11, 12:
+		// NIP-29 group chat/thread-root/thread-reply. Pre-existing documented gap (relay.go,
+		// membership.go): these are the PRIMARY communication surface of a group, not an occasional
+		// management action like 42/1311 just above or the management/reporting cluster below — they
+		// legitimately run at a much higher cadence, so they get their own window (see catGroupChat)
+		// rather than reusing catChannel.
+		return catGroupChat
 	// 1984 (reports + every moderator stiq-action). A MEMBER report used to be completely
 	// unrate-limited: policy.checkModAction returns early for a non-moderator, and this switch had
 	// no 1984 case, so it fell to catNone = unlimited. Only the per-event size/tag weight gate stood
@@ -562,6 +638,31 @@ func categorize(event *nostr.Event) category {
 	// than accumulate. Listed here so the omission reads as a decision, not a gap.
 	case 31925:
 		return catNone
+	case 0, 10000, 10003, 10009, 30023, 30078, 30079, 30311, 30351, 40, 41, 1018, 1068, 1986:
+		// Everything else the allow-list admits that isn't chat-shaped: profile + NIP-51 lists (all
+		// single-slot REPLACEABLE — a flood here churns writes, not storage, but still costs disk I/O),
+		// long-form articles, non-reserved kind-30078 app data, space-key delivery, live-activity docs,
+		// media blobs on the rare non-blind direct-publish path (the blind/tokened path is already
+		// exempt upstream — see the isBlindPost note above; do NOT special-case 30351 to catNone),
+		// channel create/metadata, polls, and the double-spend witness. All are legitimately INFREQUENT
+		// — nobody writes 50 articles or creates 50 channels a day — so the conservative catDefault
+		// tier fits every one without a bespoke window. Listed explicitly (not left to the default:
+		// branch) so a future reader sees this was a decision, matching the standing rule that a silent
+		// gap is how this class of bug happens (finding #40's lesson).
+		return catDefault
+	case 1987, 30500:
+		// Draft access request / draft delivery (client/src/contracts/index.ts Kind.DraftAccessRequest
+		// / Kind.DraftDelivery). NOT in config.DefaultAllowedKinds before this change even though they
+		// were already LIVE on prod's hand-edited explicit allowed_kinds (verified 2026-07-29) — added
+		// to DefaultAllowedKinds in config.go as part of this change so the repo's source of truth
+		// matches what prod already admits. Rare, one-shot request/response events — catDefault fits.
+		return catDefault
+	case 39000, 39001, 39002, 39003, 39004, 39005:
+		// Relay-managed NIP-29 group state. GroupGuard rejects any member-submitted event of these
+		// kinds before it reaches storage (codeGroupStateManaged, groups.go) — on a correctly-behaving
+		// relay this case never fires. It exists so a defect in that gate doesn't ALSO mean zero
+		// rate-limit backstop, and so the omission reads as audited, not missed.
+		return catDefault
 	case 1059:
 		return catDM
 	case kindEnrollRequest, kindDrawRequest, kindUnlockRequest:
@@ -569,7 +670,13 @@ func categorize(event *nostr.Event) category {
 	case kindEnrollResponse, kindDrawResponse, kindUnlockResponse:
 		return catMailboxResponse
 	default:
-		return catNone
+		// Fail-closed backstop (2026-07-29 audit: 20 allow-listed kinds were found silently falling
+		// through to catNone/unlimited here). categorize() is only reached for a kind ALREADY in the
+		// allow-list (see the func comment), so this branch is a safety net for a kind added to
+		// config.DefaultAllowedKinds in the future without an accompanying rate-limit case above — it
+		// is now bounded at the conservative catDefault tier instead of silently unlimited. Do NOT
+		// revert this to catNone.
+		return catDefault
 	}
 }
 

@@ -339,8 +339,6 @@ export interface AppShellProps {
   relaySupportsNip29?: boolean;
   onCreateGroup?: (meta: ChannelMetadata, closed?: boolean, isPrivate?: boolean, broadcast?: boolean) => Promise<string | null> | void;
   onJoinGroup?: (groupId: string) => void;
-  /** Accept a `stiq://channel/<id>` invite link tapped as a card in a message body (in-app join). */
-  onAcceptInviteLink?: (url: string) => void;
   onLeaveGroup?: (groupId: string) => void;
   onKickGroupMember?: (groupId: string, pubkey: string) => void;
   onAddGroupMember?: (groupId: string, pubkey: string, asAdmin: boolean) => void;
@@ -423,6 +421,10 @@ export interface AppShellProps {
    *  MainScreen, then cleared via onPendingNavHandled — mirrors incomingJoinCode/onJoinCodeConsumed. */
   pendingNav?: import('../notifications/notifications').NavTarget | null;
   onPendingNavHandled?: () => void;
+  /** A `stiq://channel/<id>` invite link queued by App.tsx (deep link or cold-start), consumed once
+   *  by MainScreen then cleared via onPendingInviteLinkHandled -- mirrors pendingNav. */
+  pendingInviteLink?: string | null;
+  onPendingInviteLinkHandled?: () => void;
   /** Count of unread derived notifications — the number on the bell's badge (0 = no badge). */
   notifUnreadCount?: number;
   /** Snapshot of the live-derived notification list, taken when the notification center opens. */
@@ -611,7 +613,6 @@ export function AppShell(props: AppShellProps): React.JSX.Element {
           relaySupportsNip29={props.relaySupportsNip29}
           onCreateGroup={props.onCreateGroup}
           onJoinGroup={props.onJoinGroup}
-          onAcceptInviteLink={props.onAcceptInviteLink}
           onLeaveGroup={props.onLeaveGroup}
           onKickGroupMember={props.onKickGroupMember}
           onAddGroupMember={props.onAddGroupMember}
@@ -658,6 +659,8 @@ export function AppShell(props: AppShellProps): React.JSX.Element {
           onCloseChannel={props.onCloseChannel}
           pendingNav={props.pendingNav}
           onPendingNavHandled={props.onPendingNavHandled}
+          pendingInviteLink={props.pendingInviteLink}
+          onPendingInviteLinkHandled={props.onPendingInviteLinkHandled}
           notifUnreadCount={props.notifUnreadCount}
           onGetNotifications={props.onGetNotifications}
           onGetNotificationPrefs={props.onGetNotificationPrefs}

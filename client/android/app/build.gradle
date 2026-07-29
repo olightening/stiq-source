@@ -173,8 +173,29 @@ android {
         // (3) moderator quick actions pre-check scope and rate cap instead of firing into a relay
         //     rejection, and headless background syncs refresh org config so a phone that only
         //     ever background-syncs stops honouring a REVOKED moderator.
-        versionCode 18
-        versionName "2.5-moderation"
+        // vc19 "2.6-consent": consent, screenshots, and the first 16 KB-page work.
+        // (1) Tapping a space link no longer joins you. Both entry points — the external
+        //     stiq://channel/<id> deep link and an invite card tapped inside a message — used to
+        //     reach acceptInviteLink() fire-and-forget, publishing a SIGNED kind-9021 join request
+        //     under the user's identity with no prompt. Both now show what you are about to join
+        //     and require an explicit confirmation; BACK and cancel decline.
+        // (2) FLAG_SECURE is GONE (it was added app-wide in vc18). Screenshots, screen recording,
+        //     and a real Recents/task-switcher thumbnail all work again, everywhere, by operator
+        //     directive. setHideOverlayWindows(true) — anti-tapjacking, a different attack — stays.
+        //     The dead StiqScreenGuard JS bridge went with it: leaving a callable setSecure(true)
+        //     around is precisely how the ban would silently return.
+        // (3) 16 KB page-size readiness, the part achievable without a React Native upgrade:
+        //     libreanimated / libworklets / libop-sqlite are compiled by OUR build, so the root
+        //     project now injects -Wl,-z,max-page-size=16384 into every CMake module; libcrsqlite
+        //     and libsqlite_vec are prebuilts for op-sqlite features this app never enabled and are
+        //     now excluded from packaging outright (also a smaller APK). That takes 5 of the 16
+        //     misaligned arm64 libs. The other 11 are prebuilt inside React Native's own AARs,
+        //     Fresco, ACINQ secp256k1, and op-sqlite's bundled OpenSSL — they need the RN 0.77+
+        //     bump, which is staged on claude/rn-16kb and deliberately NOT in this release: it
+        //     migrates 75 members' SQLCipher databases, and no identity backup exists yet.
+        //     No shipping consumer device defaults to 16 KB pages today, so this is readiness.
+        versionCode 19
+        versionName "2.6-consent"
 
         /* RN developer support (red box, dev menu, HMR, and the Metro dev-server websocket).
          *
@@ -289,6 +310,25 @@ android {
             // the assumption were wrong: the app would connect fine on the direct rung and quietly
             // lose bridges — i.e. it breaks only for users in a censored network.
             useLegacyPackaging = true
+
+            // op-sqlite vendors PREBUILT .so for two optional extensions — CRSQLite (CRDT
+            // replication) and sqlite-vec (vector search). This app enables NEITHER: client
+            // package.json declares only {"op-sqlite": {"sqlcipher": true}}, so op-sqlite's own
+            // build.gradle leaves useCRSQLite/useSqliteVec unset and never defines
+            // OP_SQLITE_USE_CRSQLITE / OP_SQLITE_USE_SQLITE_VEC, and no STIQ source references
+            // crsqlite, vec0, or loadExtension. They shipped anyway purely because they sit in a
+            // conventional src/main/jniLibs sourceSet, which AGP packages unconditionally —
+            // ~2 MB per ABI of dead weight in every APK.
+            //
+            // Excluding them also removes two of the sixteen 4 KB-aligned libraries that block
+            // 16 KB-page devices, and it is the only class of that problem fixable by deletion
+            // rather than by an upstream release: these are prebuilts, so the root project's
+            // CMAKE_SHARED_LINKER_FLAGS injection cannot reach them.
+            //
+            // If a future feature ever needs CRDT sync or vector search, enable it in package.json
+            // AND delete the matching exclude here — otherwise the extension would be switched on
+            // while its library is stripped, and the failure surfaces only at runtime.
+            excludes += ["**/libcrsqlite.so", "**/libsqlite_vec.so"]
         }
     }
 

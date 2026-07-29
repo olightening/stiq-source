@@ -2,7 +2,6 @@
 
 import android.os.Build
 import android.os.Bundle
-import android.view.WindowManager
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate
 import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint.fabricEnabled
@@ -18,43 +17,27 @@ class MainActivity : ReactActivity() {
    */
   override fun onCreate(savedInstanceState: Bundle?) {
     setTheme(R.style.AppTheme)
-    applyScreenGuards()
+    applyOverlayGuard()
     super.onCreate(savedInstanceState)
   }
 
   /**
-   * Window-level privacy/integrity guards, applied BEFORE super.onCreate() so they are in force for
-   * the very first frame — in particular before the window is ever eligible to be captured for the
-   * Recents thumbnail.
+   * Anti-tapjacking guard, applied BEFORE super.onCreate() so it is in force for the very first
+   * frame.
    *
-   * FLAG_SECURE is applied APP-WIDE rather than per-screen, deliberately:
+   * setHideOverlayWindows(true) (API 31+): while our window is visible, the system hides
+   * TYPE_APPLICATION_OVERLAY windows belonging to OTHER apps. That removes the overlay attack
+   * surface outright, with none of the risk of touch-filtering (which can silently eat legitimate
+   * taps). Below API 31 there is no equivalent.
    *
-   *  - The leak that actually happens in the field is the Recents/task-switcher thumbnail, and that
-   *    is captured for the TASK, of whatever surface happened to be on top when the user
-   *    backgrounded. Per-screen FLAG_SECURE therefore protects nothing unless *every* screen a user
-   *    can background from is covered — and missing one is silent.
-   *  - Toggling FLAG_SECURE at runtime forces the window's surface to be recreated. Doing that on
-   *    navigation would put a visible flicker (and a re-layout) on ordinary screen transitions.
-   *  - The set of STIQ surfaces that are NOT sensitive is close to empty: the feed, spaces, DMs,
-   *    the log, settings (npub, relays, PIN), and the PIN keypad itself are all content a
-   *    screenshot-scraping or screen-recording app on the same device should not get for free.
-   *
-   * The cost is that legitimate screenshots are blocked app-wide. That is bought back by
-   * StiqScreenGuard.setSecure(false), which JS can call around a deliberate, user-initiated export
-   * (e.g. saving an invite QR) and then restore — an explicit opt-out beats an implicit gap.
-   *
-   * setHideOverlayWindows(true) (API 31+) is the anti-tapjacking half: while our window is visible,
-   * the system hides TYPE_APPLICATION_OVERLAY windows belonging to OTHER apps. That removes the
-   * overlay attack surface outright, with none of the risk of touch-filtering (which can silently
-   * eat legitimate taps). Below API 31 there is no equivalent, which is what
-   * StiqScreenGuard.setTapjackGuard() covers on the specific surfaces that warrant it.
+   * STIQ deliberately does NOT set FLAG_SECURE: screenshots, screen recording, and the
+   * Recents/task-switcher thumbnail are all allowed, everywhere in the app. vc18 shipped an
+   * app-wide FLAG_SECURE; it was removed in vc19 because blocking a user from screenshotting their
+   * own community is a cost paid by every legitimate user on every screen, while an attacker who
+   * can run a screen-scraper on the device has already cleared a far higher bar than the flag
+   * defends. Do not reintroduce it without an explicit, per-surface reason.
    */
-  private fun applyScreenGuards() {
-    try {
-      window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
-    } catch (t: Throwable) {
-      android.util.Log.w("MainActivity", "FLAG_SECURE could not be applied", t)
-    }
+  private fun applyOverlayGuard() {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
       try {
         window.setHideOverlayWindows(true)
