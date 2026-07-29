@@ -107,30 +107,42 @@ allprojects {
  * nothing failing loudly. Raising max-page-size on a native lib that did not need it is harmless
  * (it costs a little segment padding), so the broad application is the safe direction to err in.
  *
- * gradle.projectsEvaluated, NOT subprojects { afterEvaluate { } }: React Native's autolinking has
- * already evaluated some subprojects by the time this root script runs, and registering an
- * afterEvaluate callback on an already-evaluated project is a hard error
- * ("Cannot run Project.afterEvaluate(Closure) when the project is already evaluated").
- * projectsEvaluated fires exactly once, after every project is evaluated but before the task graph
- * is built — late enough that each module's own cmake.arguments are already set (so ours appends
- * last and cannot be clobbered), early enough that the CMake configure task still picks it up.
+ * ⚠ TIMING IS THE WHOLE PROBLEM HERE. Two earlier attempts failed, both instructively:
+ *
+ *   subprojects { afterEvaluate { } }   — hard error. React Native's autolinking has already
+ *       evaluated some subprojects by the time this root script runs, and registering an
+ *       afterEvaluate callback on an evaluated project throws.
+ *   gradle.projectsEvaluated { }        — ran, logged happily, and did NOTHING. It fires after
+ *       every project is evaluated, by which point AGP has already finalised its variants, so
+ *       mutating defaultConfig writes into an object nothing reads again. CMakeCache.txt showed
+ *       CMAKE_SHARED_LINKER_FLAGS:STRING= (empty) and the .so stayed 4KB-aligned. This is the
+ *       silent-failure mode to watch for: the build succeeds and the log line prints.
+ *
+ * plugins.withId fires when the Android plugin is APPLIED — during that project's own evaluation,
+ * before AGP creates variants, and it also fires immediately for a project already evaluated. Both
+ * reanimated and op-sqlite declare their own args with the appending form (arguments "-D..."), so
+ * ours coexists rather than being clobbered.
  *
  * The NDK toolchain does not discard this. android-legacy.toolchain.cmake sets
  * CMAKE_SHARED_LINKER_FLAGS via set(... CACHE STRING ...) WITHOUT force (a no-op once our -D has
  * set the cache entry), then PREPENDS its own defaults to our value rather than replacing it.
  *
- * Verify it actually took effect — do not assume:
- *   Get-ChildItem -Recurse -Filter CMakeCache.txt <module>/android/.cxx | Select-String "CMAKE_SHARED_LINKER_FLAGS"
- * and confirm the built .so with scripts/apkalign-style PT_LOAD inspection.
+ * VERIFY, NEVER ASSUME — a passing build proves nothing here. Both checks, every time:
+ *   1. grep CMAKE_SHARED_LINKER_FLAGS in the module's own .cxx CMakeCache.txt, under the
+ *      RelWithDebInfo tree for an arm64-v8a config. RelWithDebInfo is the release variant; the
+ *      Debug tree is a separate, often stale copy that will happily show you the wrong answer.
+ *   2. PT_LOAD p_align of the .so actually inside the built APK.
  */
-gradle.projectsEvaluated {
-    rootProject.subprojects { sub ->
-        def androidExt = sub.extensions.findByName("android")
-        if (androidExt?.defaultConfig?.externalNativeBuild?.cmake != null) {
-            androidExt.defaultConfig.externalNativeBuild.cmake.arguments(
-                "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384"
-            )
-            sub.logger.lifecycle("[stiq-16k] max-page-size=16384 -> ${sub.path}")
+subprojects { sub ->
+    ["com.android.library", "com.android.application"].each { pluginId ->
+        sub.plugins.withId(pluginId) {
+            def androidExt = sub.extensions.findByName("android")
+            if (androidExt?.defaultConfig?.externalNativeBuild?.cmake != null) {
+                androidExt.defaultConfig.externalNativeBuild.cmake.arguments(
+                    "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384"
+                )
+                sub.logger.lifecycle("[stiq-16k] max-page-size=16384 -> ${sub.path}")
+            }
         }
     }
 }
